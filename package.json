@@ -1,0 +1,81 @@
+{
+  "name": "ratelimit-flex",
+  "version": "0.1.0",
+  "description": "Flexible rate limiting for Node.js (Express, Fastify, sliding window, token bucket)",
+  "license": "MIT",
+  "keywords": [
+    "rate-limiter",
+    "express",
+    "fastify",
+    "sliding-window",
+    "token-bucket",
+    "middleware",
+    "rate-limiting"
+  ],
+  "author": "",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      },
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@types/express": "*",
+    "express": "^4.18.0 || ^5.0.0",
+    "fastify": "^4.28.0 || ^5.0.0",
+    "fastify-plugin": "^4.5.1 || ^5.0.0",
+    "ioredis": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/express": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    },
+    "fastify-plugin": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^25.5.0",
+    "fastify": "^5.2.0",
+    "fastify-plugin": "^5.0.0",
+    "eslint": "^10.1.0",
+    "prettier": "^3.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2",
+    "vitest": "^4.1.2"
+  }
+}
