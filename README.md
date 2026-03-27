@@ -109,7 +109,7 @@ app.use(limiter.express);           // Express
 await app.register(limiter.fastify); // Fastify
 ```
 
-For best type-safety and clarity, prefer direct imports (`expressRateLimiter` or `fastifyRateLimiter`) when you already know your framework.
+**Note**: This function requires `fastify-plugin` as a peer dependency (already listed). For best type-safety and clarity, prefer direct imports (`expressRateLimiter` or `fastifyRateLimiter`) when you already know your framework.
 
 ## Examples
 
