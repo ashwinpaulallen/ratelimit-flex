@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18, 20, 22]
+        # Vitest 4+ requires Node >=20.12 (uses util.styleText via rolldown)
+        node-version: [20, 22, 24]
 
     steps:
       - name: Checkout
@@ -33,14 +34,12 @@ jobs:
         run: npm test
 
       - name: Test with coverage
-        if: matrix.node-version >= 20
         run: npm run test:coverage
 
       - name: Build
         run: npm run build
 
       - name: Upload coverage artifact
-        if: matrix.node-version >= 20
         uses: actions/upload-artifact@v4
         with:
           name: coverage-node-${{ matrix.node-version }}

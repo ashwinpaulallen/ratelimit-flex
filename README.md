@@ -28,6 +28,8 @@ yarn add ratelimit-flex
 pnpm add ratelimit-flex
 ```
 
+**Note:** The published package targets **Node.js 18+**. Continuous integration and local development use **Node.js 20.12+** because Vitest 4 depends on APIs that are not available on Node 18.
+
 ## Quick Start (Express)
 
 ```ts
