@@ -1,0 +1,8 @@
+{
+  "name": "ratelimit-flex-test-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node app.mjs"
+  }
+}

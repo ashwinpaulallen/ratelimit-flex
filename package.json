@@ -57,23 +57,32 @@
     "node": ">=18"
   },
   "files": [
-    "dist"
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "prepublishOnly": "npm run lint && npm run test && npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.0",
     "@types/node": "^25.5.0",
-    "fastify": "^5.2.0",
-    "fastify-plugin": "^5.0.0",
+    "@types/supertest": "^7.2.0",
+    "@vitest/coverage-v8": "^4.1.2",
     "eslint": "^10.1.0",
+    "express": "^5.2.1",
+    "fastify": "^5.8.4",
+    "fastify-plugin": "^5.0.0",
     "prettier": "^3.8.1",
+    "supertest": "^7.2.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
     "vitest": "^4.1.2"
