@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { fastifyRateLimiter } from '../src/middleware/fastify.js';
+import { fastifyRateLimiter } from '../src/fastify.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../src/types/index.js';
 

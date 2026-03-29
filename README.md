@@ -58,7 +58,6 @@ Simplest and most memory-efficient approach. Best for straightforward rate limit
 ```ts
 import rateLimit, {
   expressRateLimiter,
-  fastifyRateLimiter,
   createRateLimiter,
   createRateLimitEngine,
   MemoryStore,
@@ -71,7 +70,12 @@ import rateLimit, {
 } from 'ratelimit-flex';
 ```
 
+```ts
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+```
+
 - Default export: `expressRateLimiter`
+- Fastify plugin: import from `ratelimit-flex/fastify` (keeps `fastify` / `fastify-plugin` off the main entry for Express-only apps)
 - Named exports include all of the above plus all types from `types/index.ts`
 - `createRateLimitEngine(options)`: factory that returns a `RateLimitEngine` instance (for advanced use cases)
 
@@ -103,15 +107,12 @@ import rateLimit, {
 
 ### Convenience Factory: `createRateLimiter(options)`
 
-`createRateLimiter` returns an object with both `.express` and `.fastify` properties:
+`createRateLimiter` returns `{ express }` — Express middleware only. For Fastify, use `import { fastifyRateLimiter } from 'ratelimit-flex/fastify'`.
 
 ```ts
 const limiter = createRateLimiter({ maxRequests: 100 });
-app.use(limiter.express);           // Express
-await app.register(limiter.fastify); // Fastify
+app.use(limiter.express);
 ```
-
-**Note**: This function requires `fastify-plugin` as a peer dependency (already listed). For best type-safety and clarity, prefer direct imports (`expressRateLimiter` or `fastifyRateLimiter`) when you already know your framework.
 
 ## Examples
 
@@ -135,7 +136,8 @@ app.use(
 
 ```ts
 import Fastify from 'fastify';
-import { fastifyRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+import { RateLimitStrategy } from 'ratelimit-flex';
 
 const app = Fastify();
 await app.register(fastifyRateLimiter, {

@@ -1,5 +1,4 @@
 import express from 'express';
-import Fastify from 'fastify';
 import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRateLimiter } from '../src/index.js';
@@ -41,32 +40,5 @@ describe('createRateLimiter convenience factory', () => {
     expect(r1.status).toBe(200);
     expect(r2.status).toBe(200);
     expect(r3.status).toBe(429);
-  });
-
-  it('creates Fastify plugin via .fastify', async () => {
-    const limiter = createRateLimiter({
-      strategy: RateLimitStrategy.SLIDING_WINDOW,
-      windowMs: 60_000,
-      maxRequests: 2,
-      store: trackedStore({
-        strategy: RateLimitStrategy.SLIDING_WINDOW,
-        windowMs: 60_000,
-        maxRequests: 2,
-      }),
-    });
-
-    const app = Fastify();
-    await app.register(limiter.fastify);
-    app.get('/ok', async () => ({ ok: true }));
-
-    const r1 = await app.inject({ method: 'GET', url: '/ok' });
-    const r2 = await app.inject({ method: 'GET', url: '/ok' });
-    const r3 = await app.inject({ method: 'GET', url: '/ok' });
-
-    expect(r1.statusCode).toBe(200);
-    expect(r2.statusCode).toBe(200);
-    expect(r3.statusCode).toBe(429);
-
-    await app.close();
   });
 });

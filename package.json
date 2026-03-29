@@ -27,6 +27,17 @@
         "default": "./dist/cjs/index.js"
       },
       "default": "./dist/index.js"
+    },
+    "./fastify": {
+      "import": {
+        "types": "./dist/fastify.d.ts",
+        "default": "./dist/fastify.js"
+      },
+      "require": {
+        "types": "./dist/cjs/fastify.d.ts",
+        "default": "./dist/cjs/fastify.js"
+      },
+      "default": "./dist/fastify.js"
     }
   },
   "peerDependencies": {
