@@ -4,7 +4,13 @@ import {
   slidingWindowDefaults,
   tokenBucketDefaults,
 } from '../strategies/defaults.js';
-import type { RateLimitInfo, RateLimitOptions, RateLimitResult } from '../types/index.js';
+import type {
+  RateLimitInfo,
+  RateLimitOptions,
+  RateLimitResult,
+  WindowLimitSpec,
+  WindowRateLimitOptions,
+} from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 
 export const baseDefaults = {
@@ -15,11 +21,19 @@ export const baseDefaults = {
   skipSuccessfulRequests: false,
 } as const;
 
-export function getLimit(opts: RateLimitOptions): number {
+export function getLimit(opts: RateLimitOptions, req?: unknown): number {
   if (opts.strategy === RateLimitStrategy.TOKEN_BUCKET) {
     return opts.bucketSize;
   }
-  return opts.maxRequests ?? 100;
+  const w = opts as WindowRateLimitOptions;
+  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
+    return Math.min(...w.groupedWindowStores.map((g) => g.maxRequests));
+  }
+  const mr = w.maxRequests ?? 100;
+  if (typeof mr === 'function') {
+    return req !== undefined ? mr(req) : 100;
+  }
+  return mr;
 }
 
 /**
@@ -56,20 +70,41 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
     strategy,
   };
 
+  const limits = (merged as WindowRateLimitOptions).limits;
+  if (limits && limits.length > 0) {
+    const groupedWindowStores = limits.map((entry: WindowLimitSpec) => ({
+      windowMs: entry.windowMs,
+      maxRequests: entry.max,
+      store: new MemoryStore({
+        strategy: merged.strategy,
+        windowMs: entry.windowMs,
+        maxRequests: entry.max,
+      }),
+    }));
+    const store = groupedWindowStores[0]!.store;
+    return { ...merged, groupedWindowStores, store };
+  }
+
+  const maxForStore = typeof merged.maxRequests === 'number' ? merged.maxRequests : 100;
+
   const store =
     merged.store ??
     new MemoryStore({
       strategy: merged.strategy,
       windowMs: merged.windowMs ?? 60_000,
-      maxRequests: merged.maxRequests ?? 100,
+      maxRequests: maxForStore,
     });
 
   return { ...merged, store };
 }
 
-export function toRateLimitInfo(opts: RateLimitOptions, result: RateLimitResult): RateLimitInfo {
+export function toRateLimitInfo(
+  opts: RateLimitOptions,
+  result: RateLimitResult,
+  req?: unknown,
+): RateLimitInfo {
   return {
-    limit: getLimit(opts),
+    limit: getLimit(opts, req),
     current: result.totalHits,
     remaining: result.remaining,
     resetTime: result.resetTime,

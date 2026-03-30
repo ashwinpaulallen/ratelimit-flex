@@ -1,4 +1,8 @@
-import type { RateLimitResult, RateLimitStore } from '../types/index.js';
+import type {
+  RateLimitIncrementOptions,
+  RateLimitResult,
+  RateLimitStore,
+} from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 
 /** Window-based strategies (sliding / fixed). */
@@ -384,12 +388,13 @@ export class RedisStore implements RateLimitStore {
   }
 
   /** @inheritdoc */
-  async increment(key: string): Promise<RateLimitResult> {
+  async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
+    const maxOverride = options?.maxRequests;
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
-        return this.incrSliding(key);
+        return this.incrSliding(key, maxOverride);
       case RateLimitStrategy.FIXED_WINDOW:
-        return this.incrFixed(key);
+        return this.incrFixed(key, maxOverride);
       case RateLimitStrategy.TOKEN_BUCKET:
         return this.incrBucket(key);
       default: {
@@ -399,14 +404,15 @@ export class RedisStore implements RateLimitStore {
     }
   }
 
-  private async incrSliding(key: string): Promise<RateLimitResult> {
+  private async incrSliding(key: string, maxOverride?: number): Promise<RateLimitResult> {
+    const maxReq = maxOverride ?? this.maxRequests;
     const now = Date.now();
     const member = `${now}:${Math.random().toString(36).slice(2)}`;
     const rk = this.redisKey('sw', key);
     const raw = await this.evalScript(
       LUA_SLIDING_INCR,
       [rk],
-      [now, this.windowMs, this.maxRequests, member],
+      [now, this.windowMs, maxReq, member],
     );
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
       return this.failOpenResult();
@@ -417,7 +423,7 @@ export class RedisStore implements RateLimitStore {
     if (Number.isNaN(count) || Number.isNaN(resetMs)) {
       return this.failOpenResult();
     }
-    const remaining = blocked ? 0 : Math.max(0, this.maxRequests - count);
+    const remaining = blocked ? 0 : Math.max(0, maxReq - count);
     return {
       totalHits: count,
       remaining,
@@ -426,10 +432,11 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrFixed(key: string): Promise<RateLimitResult> {
+  private async incrFixed(key: string, maxOverride?: number): Promise<RateLimitResult> {
+    const maxReq = maxOverride ?? this.maxRequests;
     const now = Date.now();
     const rk = this.redisKey('fw', key);
-    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, this.maxRequests, now]);
+    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, maxReq, now]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
       return this.failOpenResult();
     }
@@ -439,7 +446,7 @@ export class RedisStore implements RateLimitStore {
     if (Number.isNaN(current) || Number.isNaN(resetMs)) {
       return this.failOpenResult();
     }
-    const remaining = blocked ? 0 : Math.max(0, this.maxRequests - current);
+    const remaining = blocked ? 0 : Math.max(0, maxReq - current);
     return {
       totalHits: current,
       remaining,
