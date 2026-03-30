@@ -5,7 +5,7 @@
 import { expressRateLimiter } from './middleware/express.js';
 import type { RateLimitOptions } from './types/index.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '1.1.0';
 
 // Framework adapters (Fastify: `import { fastifyRateLimiter } from 'ratelimit-flex/fastify'`)
 export { expressRateLimiter };
