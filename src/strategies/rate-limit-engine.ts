@@ -1,5 +1,11 @@
 import { MemoryStore } from '../stores/memory-store.js';
+import {
+  sanitizePenaltyDurationMs,
+  sanitizeRateLimitCap,
+  sanitizeWindowMs,
+} from '../utils/clamp.js';
 import type {
+  RateLimitIncrementOptions,
   RateLimitOptions,
   RateLimitResult,
   RateLimitStore,
@@ -11,6 +17,10 @@ import { RateLimitStrategy } from '../types/index.js';
 /** Result of {@link RateLimitEngine.consume} including standard rate-limit headers. */
 export interface RateLimitConsumeResult extends RateLimitResult {
   headers: Record<string, string>;
+  /** When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked. */
+  draftWouldBlock?: boolean;
+  /** Why the request was blocked (when {@link RateLimitResult.isBlocked}). */
+  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
 }
 
 /** Options for {@link createRateLimiter}: `store` is optional — a {@link MemoryStore} is created when omitted. */
@@ -54,13 +64,39 @@ function createDefaultMemoryStore(options: RateLimiterConfigInput): MemoryStore 
   return new MemoryStore({
     strategy: options.strategy ?? RateLimitStrategy.SLIDING_WINDOW,
     windowMs: options.windowMs ?? 60_000,
-    maxRequests: options.maxRequests ?? 100,
+    maxRequests: typeof options.maxRequests === 'number' ? options.maxRequests : 100,
   });
 }
 
 function resolveOptions(input: RateLimiterConfigInput): RateLimitOptions {
   const store = input.store ?? createDefaultMemoryStore(input);
   return { ...input, store } as RateLimitOptions;
+}
+
+function isWindowOpts(o: RateLimitOptions): o is WindowRateLimitOptions {
+  return o.strategy !== RateLimitStrategy.TOKEN_BUCKET;
+}
+
+function resolveWindowMaxRequests(opts: WindowRateLimitOptions, req: unknown): number {
+  const mr = opts.maxRequests ?? 100;
+  if (typeof mr === 'function') {
+    return sanitizeRateLimitCap(mr(req), 100);
+  }
+  return sanitizeRateLimitCap(mr, 100);
+}
+
+function resolveIncrementOpts(
+  opts: RateLimitOptions,
+  req: unknown,
+): RateLimitIncrementOptions | undefined {
+  if (!isWindowOpts(opts)) {
+    return undefined;
+  }
+  const mr = opts.maxRequests;
+  if (typeof mr === 'function') {
+    return { maxRequests: sanitizeRateLimitCap(mr(req), 100) };
+  }
+  return undefined;
 }
 
 /**
@@ -76,8 +112,20 @@ export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEng
 export class RateLimitEngine {
   private readonly options: RateLimitOptions;
 
+  private readonly allowSet: ReadonlySet<string> | null;
+
+  private readonly blockSet: ReadonlySet<string> | null;
+
+  private readonly penaltyUntil = new Map<string, number>();
+
+  private readonly violationTimestamps = new Map<string, number[]>();
+
   constructor(options: RateLimitOptions) {
     this.options = options;
+    const allow = options.allowlist;
+    const block = options.blocklist;
+    this.allowSet = allow && allow.length > 0 ? new Set(allow) : null;
+    this.blockSet = block && block.length > 0 ? new Set(block) : null;
   }
 
   /**
@@ -95,28 +143,228 @@ export class RateLimitEngine {
    */
   async consumeWithKey(key: string, req: unknown = key): Promise<RateLimitConsumeResult> {
     if (this.options.skip?.(req) === true) {
-      return this.buildPassthroughResult();
+      return this.buildPassthroughResult(req);
     }
 
-    const result = await this.options.store.increment(key);
-    const headers = this.buildHeaders(result);
+    if (this.allowSet?.has(key)) {
+      return this.buildPassthroughResult(req);
+    }
 
-    if (result.isBlocked && this.options.onLimitReached) {
+    if (this.blockSet?.has(key)) {
+      return this.buildPolicyBlockResult(req, 'blocklist');
+    }
+
+    const penaltyActive = this.isPenaltyActive(key);
+    if (penaltyActive) {
+      return this.buildPolicyBlockResult(req, 'penalty', key);
+    }
+
+    const grouped = isWindowOpts(this.options) ? this.options.groupedWindowStores : undefined;
+    let result: RateLimitResult;
+    let blockedAtIndex: number | undefined;
+    const incOpts = resolveIncrementOpts(this.options, req);
+
+    if (grouped && grouped.length > 0) {
+      const g = await this.consumeGroupedWindows(key, grouped);
+      result = g.result;
+      blockedAtIndex = g.blockedAtIndex;
+    } else {
+      result = await this.options.store.increment(key, incOpts);
+    }
+
+    const draft = this.options.draft === true;
+
+    if (result.isBlocked && draft && !result.storeUnavailable) {
+      if (grouped && grouped.length > 0 && blockedAtIndex !== undefined) {
+        const slot = grouped[blockedAtIndex];
+        if (slot !== undefined) {
+          await slot.store.decrement(key).catch(() => {
+            /* ignore */
+          });
+        }
+      } else if (!grouped || grouped.length === 0) {
+        await this.options.store.decrement(key).catch(() => {
+          /* ignore */
+        });
+      }
+      if (this.options.onDraftViolation) {
+        await Promise.resolve(this.options.onDraftViolation(req, result));
+      }
+      const limit = this.getLimit(req);
+      const headers = this.composeHeaders(
+        {
+          totalHits: result.totalHits,
+          remaining: result.remaining,
+          resetTime: result.resetTime,
+          isBlocked: false,
+        },
+        limit,
+      );
+      return {
+        totalHits: result.totalHits,
+        remaining: result.remaining,
+        resetTime: result.resetTime,
+        isBlocked: false,
+        headers,
+        draftWouldBlock: true,
+      };
+    }
+
+    if (result.isBlocked && !result.storeUnavailable) {
+      this.recordViolation(key, req);
+    }
+
+    const limit = this.getLimit(req);
+    const headers = this.composeHeaders(result, limit);
+
+    if (result.isBlocked && !result.storeUnavailable && this.options.onLimitReached) {
       await Promise.resolve(this.options.onLimitReached(req, result));
     }
 
-    return { ...result, headers };
+    return {
+      ...result,
+      headers,
+      blockReason: result.isBlocked
+        ? result.storeUnavailable
+          ? 'service_unavailable'
+          : 'rate_limit'
+        : undefined,
+    };
   }
 
-  private getLimit(): number {
+  private isPenaltyActive(key: string): boolean {
+    const until = this.penaltyUntil.get(key);
+    if (until === undefined) {
+      return false;
+    }
+    const now = Date.now();
+    if (now >= until) {
+      this.penaltyUntil.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  private recordViolation(key: string, req: unknown): void {
+    const cfg = this.options.penaltyBox;
+    if (!cfg) {
+      return;
+    }
+    const windowMs = sanitizeWindowMs(cfg.violationWindowMs ?? 3_600_000, 3_600_000);
+    const threshold = sanitizeRateLimitCap(cfg.violationsThreshold, 1);
+    const now = Date.now();
+    const prev = this.violationTimestamps.get(key) ?? [];
+    const trimmed = prev.filter((t) => t > now - windowMs);
+    trimmed.push(now);
+    this.violationTimestamps.set(key, trimmed);
+
+    if (trimmed.length >= threshold) {
+      const duration = sanitizePenaltyDurationMs(cfg.penaltyDurationMs, 60_000);
+      this.penaltyUntil.set(key, now + duration);
+      this.violationTimestamps.delete(key);
+      if (cfg.onPenalty) {
+        void Promise.resolve(cfg.onPenalty(req)).catch(() => {
+          /* ignore */
+        });
+      }
+    }
+  }
+
+  private async consumeGroupedWindows(
+    key: string,
+    grouped: NonNullable<WindowRateLimitOptions['groupedWindowStores']>,
+  ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
+    const done: RateLimitResult[] = [];
+    for (let i = 0; i < grouped.length; i++) {
+      const g = grouped[i]!;
+      const r = await g.store.increment(key, { maxRequests: g.maxRequests });
+      done.push(r);
+      if (r.isBlocked) {
+        for (let j = 0; j < i; j++) {
+          const prev = grouped[j]!;
+          await prev.store.decrement(key).catch(() => {
+            /* ignore */
+          });
+        }
+        return { result: this.mergeGroupedResults(done), blockedAtIndex: i };
+      }
+    }
+    return { result: this.mergeGroupedResults(done) };
+  }
+
+  private mergeGroupedResults(results: RateLimitResult[]): RateLimitResult {
+    if (results.length === 0) {
+      return {
+        totalHits: 0,
+        remaining: 0,
+        resetTime: new Date(),
+        isBlocked: false,
+      };
+    }
+    const unavailable = results.find((r) => r.storeUnavailable);
+    if (unavailable) {
+      return { ...unavailable };
+    }
+    const blockedIdx = results.findIndex((r) => r.isBlocked);
+    if (blockedIdx >= 0) {
+      const r = results[blockedIdx]!;
+      return {
+        totalHits: r.totalHits,
+        remaining: 0,
+        resetTime: r.resetTime,
+        isBlocked: true,
+      };
+    }
+    const remaining = Math.min(...results.map((r) => r.remaining));
+    const resetTime = new Date(Math.max(...results.map((r) => r.resetTime.getTime())));
+    const totalHits = Math.max(...results.map((r) => r.totalHits));
+    return {
+      totalHits,
+      remaining,
+      resetTime,
+      isBlocked: false,
+    };
+  }
+
+  private buildPolicyBlockResult(
+    req: unknown,
+    reason: 'blocklist' | 'penalty',
+    penaltyKey?: string,
+  ): RateLimitConsumeResult {
+    const limit = this.getLimit(req);
+    let resetTime: Date;
+    if (reason === 'penalty' && penaltyKey !== undefined) {
+      const until = this.penaltyUntil.get(penaltyKey);
+      resetTime = until !== undefined ? new Date(until) : new Date(Date.now() + 60_000);
+    } else {
+      resetTime = new Date(Date.now() + 60_000);
+    }
+    const base: RateLimitResult = {
+      totalHits: limit,
+      remaining: 0,
+      resetTime,
+      isBlocked: true,
+    };
+    return {
+      ...base,
+      headers: this.composeHeaders(base, limit),
+      blockReason: reason,
+    };
+  }
+
+  private getLimit(req: unknown): number {
     if (this.options.strategy === RateLimitStrategy.TOKEN_BUCKET) {
       return this.options.bucketSize;
     }
-    return this.options.maxRequests ?? 100;
+    const w = this.options as WindowRateLimitOptions;
+    if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
+      return Math.min(...w.groupedWindowStores.map((g) => g.maxRequests));
+    }
+    return resolveWindowMaxRequests(w, req);
   }
 
-  private buildPassthroughResult(): RateLimitConsumeResult {
-    const limit = this.getLimit();
+  private buildPassthroughResult(req: unknown): RateLimitConsumeResult {
+    const limit = this.getLimit(req);
     const resetTime = new Date(Date.now() + 60_000);
     const base: RateLimitResult = {
       totalHits: 0,
@@ -126,20 +374,15 @@ export class RateLimitEngine {
     };
     return {
       ...base,
-      headers: this.composeHeaders(base),
+      headers: this.composeHeaders(base, limit),
     };
   }
 
-  private buildHeaders(result: RateLimitResult): Record<string, string> {
-    return this.composeHeaders(result);
-  }
-
-  private composeHeaders(result: RateLimitResult): Record<string, string> {
+  private composeHeaders(result: RateLimitResult, limit: number): Record<string, string> {
     if (this.options.headers === false) {
       return {};
     }
 
-    const limit = this.getLimit();
     const resetSec = Math.ceil(result.resetTime.getTime() / 1000);
     const headers: Record<string, string> = {
       'X-RateLimit-Limit': String(limit),

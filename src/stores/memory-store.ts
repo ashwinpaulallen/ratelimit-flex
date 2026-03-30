@@ -1,5 +1,10 @@
-import type { RateLimitResult, RateLimitStore } from '../types/index.js';
+import type {
+  RateLimitIncrementOptions,
+  RateLimitResult,
+  RateLimitStore,
+} from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /** Options for window-based strategies (sliding / fixed). */
 export type MemoryStoreWindowOptions = {
@@ -74,8 +79,8 @@ export class MemoryStore implements RateLimitStore {
       // Align cleanup with refill cadence; avoids a separate windowMs for bucket mode.
       this.cleanupEveryMs = Math.max(1, options.interval);
     } else {
-      this.windowMs = options.windowMs;
-      this.maxRequests = options.maxRequests;
+      this.windowMs = sanitizeWindowMs(options.windowMs, 60_000);
+      this.maxRequests = sanitizeRateLimitCap(options.maxRequests, 100);
       this.tokensPerInterval = 0;
       this.refillIntervalMs = 0;
       this.bucketSize = 0;
@@ -97,12 +102,12 @@ export class MemoryStore implements RateLimitStore {
   }
 
   /** @inheritdoc */
-  async increment(key: string): Promise<RateLimitResult> {
+  async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
-        return Promise.resolve(this.incrementSliding(key));
+        return Promise.resolve(this.incrementSliding(key, options?.maxRequests));
       case RateLimitStrategy.FIXED_WINDOW:
-        return Promise.resolve(this.incrementFixed(key));
+        return Promise.resolve(this.incrementFixed(key, options?.maxRequests));
       case RateLimitStrategy.TOKEN_BUCKET:
         return Promise.resolve(this.incrementTokenBucket(key));
       default: {
@@ -154,7 +159,8 @@ export class MemoryStore implements RateLimitStore {
 
   // --- Sliding window -----------------------------------------------------
 
-  private incrementSliding(key: string): RateLimitResult {
+  private incrementSliding(key: string, maxOverride?: number): RateLimitResult {
+    const cap = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const cutoff = now - this.windowMs;
 
@@ -164,8 +170,8 @@ export class MemoryStore implements RateLimitStore {
     this.sliding.set(key, trimmed);
 
     const totalHits = trimmed.length;
-    const isBlocked = totalHits > this.maxRequests;
-    const remaining = isBlocked ? 0 : Math.max(0, this.maxRequests - totalHits);
+    const isBlocked = totalHits > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
 
     const oldest = trimmed[0];
     const resetTime = new Date(oldest !== undefined ? oldest + this.windowMs : now + this.windowMs);
@@ -188,7 +194,8 @@ export class MemoryStore implements RateLimitStore {
 
   // --- Fixed window ---------------------------------------------------------
 
-  private incrementFixed(key: string): RateLimitResult {
+  private incrementFixed(key: string, maxOverride?: number): RateLimitResult {
+    const cap = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     let entry = this.fixed.get(key);
 
@@ -201,8 +208,8 @@ export class MemoryStore implements RateLimitStore {
     this.fixed.set(key, entry);
 
     const totalHits = entry.count;
-    const isBlocked = totalHits > this.maxRequests;
-    const remaining = isBlocked ? 0 : Math.max(0, this.maxRequests - totalHits);
+    const isBlocked = totalHits > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
     const resetTime = new Date(entry.resetTime);
 
     return { totalHits, remaining, resetTime, isBlocked };

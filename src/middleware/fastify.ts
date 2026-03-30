@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
 import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
-import type { RateLimitInfo, RateLimitOptions } from '../types/index.js';
+import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'fastify' {
@@ -16,6 +16,21 @@ declare module 'fastify' {
       onSuccess: boolean;
     };
   }
+}
+
+function decrementStores(resolved: RateLimitOptions, key: string): void {
+  const w = resolved as WindowRateLimitOptions;
+  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
+    for (const g of w.groupedWindowStores) {
+      void g.store.decrement(key).catch(() => {
+        /* ignore */
+      });
+    }
+    return;
+  }
+  void resolved.store.decrement(key).catch(() => {
+    /* ignore */
+  });
 }
 
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
@@ -39,16 +54,28 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     }
 
     if (result.isBlocked) {
-      if (onLimitReached) {
+      // 503 first: Redis fail-closed. Blocklist/penalty never reach the store (engine order), so they
+      // cannot collide with storeUnavailable on the same response.
+      if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
+        await reply.status(503).send(jsonErrorBody('Service temporarily unavailable'));
+        return;
+      }
+      if (onLimitReached && result.blockReason === 'rate_limit') {
         await Promise.resolve(onLimitReached(request, result));
       }
-      await reply
-        .status(resolved.statusCode ?? 429)
-        .send(jsonErrorBody(resolved.message ?? 'Too many requests'));
+      const status =
+        result.blockReason === 'blocklist'
+          ? (resolved.blocklistStatusCode ?? 403)
+          : (resolved.statusCode ?? 429);
+      const msg =
+        result.blockReason === 'blocklist'
+          ? (resolved.blocklistMessage ?? 'Forbidden')
+          : (resolved.message ?? 'Too many requests');
+      await reply.status(status).send(jsonErrorBody(msg));
       return;
     }
 
-    request.rateLimit = toRateLimitInfo(resolved, result);
+    request.rateLimit = toRateLimitInfo(resolved, result, request);
 
     const onFailed = resolved.skipFailedRequests === true;
     const onSuccess = resolved.skipSuccessfulRequests === true;
@@ -70,9 +97,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     const success = status < 400;
 
     if ((flags.onFailed && failed) || (flags.onSuccess && success)) {
-      void resolved.store.decrement(key).catch(() => {
-        /* ignore */
-      });
+      decrementStores(resolved, key);
     }
   });
 };

@@ -5,7 +5,7 @@
 import { expressRateLimiter } from './middleware/express.js';
 import type { RateLimitOptions } from './types/index.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '1.1.0';
 
 // Framework adapters (Fastify: `import { fastifyRateLimiter } from 'ratelimit-flex/fastify'`)
 export { expressRateLimiter };
@@ -19,7 +19,7 @@ export {
   type RateLimiterConfigInput,
 } from './strategies/rate-limit-engine.js';
 export { MemoryStore } from './stores/memory-store.js';
-export { RedisStore } from './stores/redis-store.js';
+export { RedisStore, type RedisErrorMode } from './stores/redis-store.js';
 
 // Built-in defaults
 export { fixedWindowDefaults, slidingWindowDefaults, tokenBucketDefaults } from './strategies/defaults.js';

@@ -1,5 +1,10 @@
-import type { RateLimitResult, RateLimitStore } from '../types/index.js';
+import type {
+  RateLimitIncrementOptions,
+  RateLimitResult,
+  RateLimitStore,
+} from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /** Window-based strategies (sliding / fixed). */
 export type RedisStoreWindowOptions = {
@@ -35,6 +40,13 @@ export interface RedisLikeClient {
   disconnect?: () => void | Promise<void>;
 }
 
+/**
+ * How {@link RedisStore} behaves when Redis is unreachable or returns an error.
+ * - `fail-open` (default): allow traffic through; log a warning.
+ * - `fail-closed`: treat as blocked with {@link RateLimitResult.storeUnavailable}; middleware responds with HTTP 503.
+ */
+export type RedisErrorMode = 'fail-open' | 'fail-closed';
+
 export type RedisStoreOptions = RedisStoreStrategyOptions & {
   /** Existing Redis client — use {@link adaptIoRedisClient} / {@link adaptNodeRedisClient} if needed. */
   client?: RedisLikeClient;
@@ -50,6 +62,11 @@ export type RedisStoreOptions = RedisStoreStrategyOptions & {
    * Errors are swallowed after warning so your HTTP server keeps running.
    */
   onWarn?: (message: string, error?: unknown) => void;
+  /**
+   * When Redis cannot be reached or a command fails.
+   * @default 'fail-open'
+   */
+  onRedisError?: RedisErrorMode;
 };
 
 const DEFAULT_PREFIX = 'rlf:';
@@ -259,7 +276,12 @@ export class RedisStore implements RateLimitStore {
 
   private readonly onWarn: (message: string, error?: unknown) => void;
 
+  private readonly redisErrorMode: RedisErrorMode;
+
   private client: RedisLikeClient | null = null;
+
+  /** After the first failed connect, avoid repeated awaits on a rejected promise. */
+  private connectionFailed = false;
 
   private readonly clientPromise: Promise<RedisLikeClient>;
 
@@ -278,6 +300,7 @@ export class RedisStore implements RateLimitStore {
     this.keyPrefix = options.keyPrefix ?? DEFAULT_PREFIX;
     this.onWarn =
       options.onWarn ?? ((msg, err) => console.warn(`[ratelimit-flex] ${msg}`, err ?? ''));
+    this.redisErrorMode = options.onRedisError ?? 'fail-open';
 
     if (options.strategy === RateLimitStrategy.TOKEN_BUCKET) {
       this.windowMs = 0;
@@ -286,8 +309,8 @@ export class RedisStore implements RateLimitStore {
       this.refillIntervalMs = options.interval;
       this.bucketSize = options.bucketSize;
     } else {
-      this.windowMs = options.windowMs;
-      this.maxRequests = options.maxRequests;
+      this.windowMs = sanitizeWindowMs(options.windowMs, 60_000);
+      this.maxRequests = sanitizeRateLimitCap(options.maxRequests, 100);
       this.tokensPerInterval = 0;
       this.refillIntervalMs = 0;
       this.bucketSize = 0;
@@ -321,13 +344,22 @@ export class RedisStore implements RateLimitStore {
     this.onWarn(message, error);
   }
 
-  private async getClient(): Promise<RedisLikeClient> {
+  private async getClient(): Promise<RedisLikeClient | null> {
+    if (this.connectionFailed) {
+      return null;
+    }
     if (this.client) {
       return this.client;
     }
-    const c = await this.clientPromise;
-    this.client = c;
-    return c;
+    try {
+      const c = await this.clientPromise;
+      this.client = c;
+      return c;
+    } catch (err) {
+      this.connectionFailed = true;
+      this.warn('Redis client unavailable', err);
+      return null;
+    }
   }
 
   private redisKey(kind: 'sw' | 'fw' | 'tb', key: string): string {
@@ -341,6 +373,9 @@ export class RedisStore implements RateLimitStore {
   ): Promise<unknown | null> {
     try {
       const r = await this.getClient();
+      if (r === null) {
+        return null;
+      }
       const flat = [...keys.map(String), ...args.map(String)];
       return await r.eval(script, keys.length, ...flat);
     } catch (err) {
@@ -355,6 +390,13 @@ export class RedisStore implements RateLimitStore {
     }
     try {
       const r = await this.getClient();
+      if (r === null) {
+        this.warn('Redis client unavailable (DEL)');
+        if (this.redisErrorMode === 'fail-closed') {
+          throw new Error('Redis client unavailable');
+        }
+        return;
+      }
       if (r.del) {
         await r.del(...keys);
         return;
@@ -362,6 +404,9 @@ export class RedisStore implements RateLimitStore {
       await r.eval(LUA_DEL, keys.length, ...keys.map(String));
     } catch (err) {
       this.warn('Redis DEL failed', err);
+      if (this.redisErrorMode === 'fail-closed') {
+        throw err;
+      }
     }
   }
 
@@ -383,41 +428,81 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
+  /** Blocked result when Redis cannot evaluate the limit (fail-closed mode). */
+  private failClosedIncrementResult(): RateLimitResult {
+    const now = Date.now();
+    if (this.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+      return {
+        totalHits: this.bucketSize,
+        remaining: 0,
+        resetTime: new Date(now + this.refillIntervalMs),
+        isBlocked: true,
+        storeUnavailable: true,
+      };
+    }
+    return {
+      totalHits: 0,
+      remaining: 0,
+      resetTime: new Date(now + this.windowMs),
+      isBlocked: true,
+      storeUnavailable: true,
+    };
+  }
+
+  private redisIncrementFailure(): RateLimitResult {
+    this.warn(
+      this.redisErrorMode === 'fail-closed'
+        ? 'Redis unavailable; failing closed (request blocked)'
+        : 'Redis unavailable; failing open (request allowed)',
+    );
+    if (this.redisErrorMode === 'fail-closed') {
+      return this.failClosedIncrementResult();
+    }
+    return this.failOpenResult();
+  }
+
   /** @inheritdoc */
-  async increment(key: string): Promise<RateLimitResult> {
-    switch (this.strategy) {
-      case RateLimitStrategy.SLIDING_WINDOW:
-        return this.incrSliding(key);
-      case RateLimitStrategy.FIXED_WINDOW:
-        return this.incrFixed(key);
-      case RateLimitStrategy.TOKEN_BUCKET:
-        return this.incrBucket(key);
-      default: {
-        const _: never = this.strategy;
-        return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
+  async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
+    const maxOverride = options?.maxRequests;
+    try {
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          return await this.incrSliding(key, maxOverride);
+        case RateLimitStrategy.FIXED_WINDOW:
+          return await this.incrFixed(key, maxOverride);
+        case RateLimitStrategy.TOKEN_BUCKET:
+          return await this.incrBucket(key);
+        default: {
+          const _: never = this.strategy;
+          return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
+        }
       }
+    } catch (err) {
+      this.warn('Redis increment failed', err);
+      return this.redisIncrementFailure();
     }
   }
 
-  private async incrSliding(key: string): Promise<RateLimitResult> {
+  private async incrSliding(key: string, maxOverride?: number): Promise<RateLimitResult> {
+    const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const member = `${now}:${Math.random().toString(36).slice(2)}`;
     const rk = this.redisKey('sw', key);
     const raw = await this.evalScript(
       LUA_SLIDING_INCR,
       [rk],
-      [now, this.windowMs, this.maxRequests, member],
+      [now, this.windowMs, maxReq, member],
     );
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
     const count = Number(raw[0]);
     const blocked = Number(raw[1]) === 1;
     const resetMs = Number(raw[2]);
     if (Number.isNaN(count) || Number.isNaN(resetMs)) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
-    const remaining = blocked ? 0 : Math.max(0, this.maxRequests - count);
+    const remaining = blocked ? 0 : Math.max(0, maxReq - count);
     return {
       totalHits: count,
       remaining,
@@ -426,20 +511,21 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrFixed(key: string): Promise<RateLimitResult> {
+  private async incrFixed(key: string, maxOverride?: number): Promise<RateLimitResult> {
+    const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const rk = this.redisKey('fw', key);
-    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, this.maxRequests, now]);
+    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, maxReq, now]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
     const current = Number(raw[0]);
     const blocked = Number(raw[1]) === 1;
     const resetMs = Number(raw[2]);
     if (Number.isNaN(current) || Number.isNaN(resetMs)) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
-    const remaining = blocked ? 0 : Math.max(0, this.maxRequests - current);
+    const remaining = blocked ? 0 : Math.max(0, maxReq - current);
     return {
       totalHits: current,
       remaining,
@@ -457,14 +543,14 @@ export class RedisStore implements RateLimitStore {
       [now, this.tokensPerInterval, this.refillIntervalMs, this.bucketSize],
     );
     if (raw === null || !Array.isArray(raw) || raw.length < 5) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
     const remaining = Number(raw[1]);
     const totalHits = Number(raw[2]);
     const blocked = Number(raw[3]) === 1;
     const nextMs = Number(raw[4]);
     if (Number.isNaN(remaining) || Number.isNaN(totalHits) || Number.isNaN(nextMs)) {
-      return this.failOpenResult();
+      return this.redisIncrementFailure();
     }
     return {
       totalHits,
@@ -480,17 +566,35 @@ export class RedisStore implements RateLimitStore {
       switch (this.strategy) {
         case RateLimitStrategy.SLIDING_WINDOW: {
           const rk = this.redisKey('sw', key);
-          await this.evalScript(LUA_SLIDING_DECR, [rk], []);
+          const out = await this.evalScript(LUA_SLIDING_DECR, [rk], []);
+          if (out === null) {
+            this.warn('Redis decrement: EVAL returned no result');
+            if (this.redisErrorMode === 'fail-closed') {
+              this.warn('Redis decrement failed (fail-closed): counter state may drift');
+            }
+          }
           break;
         }
         case RateLimitStrategy.FIXED_WINDOW: {
           const rk = this.redisKey('fw', key);
-          await this.evalScript(LUA_FIXED_DECR, [rk], []);
+          const out = await this.evalScript(LUA_FIXED_DECR, [rk], []);
+          if (out === null) {
+            this.warn('Redis decrement: EVAL returned no result');
+            if (this.redisErrorMode === 'fail-closed') {
+              this.warn('Redis decrement failed (fail-closed): counter state may drift');
+            }
+          }
           break;
         }
         case RateLimitStrategy.TOKEN_BUCKET: {
           const rk = this.redisKey('tb', key);
-          await this.evalScript(LUA_BUCKET_DECR, [rk], [this.bucketSize]);
+          const out = await this.evalScript(LUA_BUCKET_DECR, [rk], [this.bucketSize]);
+          if (out === null) {
+            this.warn('Redis decrement: EVAL returned no result');
+            if (this.redisErrorMode === 'fail-closed') {
+              this.warn('Redis decrement failed (fail-closed): counter state may drift');
+            }
+          }
           break;
         }
         default:
@@ -498,26 +602,36 @@ export class RedisStore implements RateLimitStore {
       }
     } catch (err) {
       this.warn('Redis decrement failed', err);
+      if (this.redisErrorMode === 'fail-closed') {
+        this.warn('Redis decrement threw (fail-closed mode)', err);
+      }
     }
   }
 
   /** @inheritdoc */
   async reset(key: string): Promise<void> {
-    const keys: string[] = [];
-    switch (this.strategy) {
-      case RateLimitStrategy.SLIDING_WINDOW:
-        keys.push(this.redisKey('sw', key));
-        break;
-      case RateLimitStrategy.FIXED_WINDOW:
-        keys.push(this.redisKey('fw', key));
-        break;
-      case RateLimitStrategy.TOKEN_BUCKET:
-        keys.push(this.redisKey('tb', key));
-        break;
-      default:
-        break;
+    try {
+      const keys: string[] = [];
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          keys.push(this.redisKey('sw', key));
+          break;
+        case RateLimitStrategy.FIXED_WINDOW:
+          keys.push(this.redisKey('fw', key));
+          break;
+        case RateLimitStrategy.TOKEN_BUCKET:
+          keys.push(this.redisKey('tb', key));
+          break;
+        default:
+          break;
+      }
+      await this.delKeys(...keys);
+    } catch (err) {
+      this.warn('Redis reset failed', err);
+      if (this.redisErrorMode === 'fail-closed') {
+        throw err;
+      }
     }
-    await this.delKeys(...keys);
   }
 
   /** @inheritdoc */

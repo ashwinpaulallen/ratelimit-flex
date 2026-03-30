@@ -13,7 +13,7 @@ describe('Edge cases', () => {
     vi.useRealTimers();
   });
 
-  it('handles zero maxRequests gracefully', async () => {
+  it('coerces invalid maxRequests (e.g. zero) to a safe default', async () => {
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,
       windowMs: 60_000,
@@ -21,8 +21,8 @@ describe('Edge cases', () => {
     });
 
     const r1 = await store.increment('zero');
-    expect(r1.isBlocked).toBe(true);
-    expect(r1.remaining).toBe(0);
+    expect(r1.isBlocked).toBe(false);
+    expect(r1.remaining).toBe(99);
     await store.shutdown();
   });
 

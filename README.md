@@ -13,6 +13,8 @@ Flexible, TypeScript-first rate limiting for Node.js APIs with first-class Expre
 - Pluggable stores: in-memory and Redis
 - Strong TypeScript types and clean public API
 - Supports custom keys, skip logic, callbacks, and custom responses
+- **Advanced (v1.1+)**: multiple windows per route, dynamic per-request limits, penalty box, allow/block lists, and draft mode for safe production tuning
+- With **Redis**, blocklist / allowlist / penalty stay **in-memory** and keep working if Redis fails—only quota counting depends on the store (see [Redis failure handling](#redis-failure-handling-onrediserror))
 
 ## Installation
 
@@ -50,6 +52,92 @@ Great when you want to allow short bursts while still enforcing a long-term aver
 
 ### Fixed Window
 Simplest and most memory-efficient approach. Best for straightforward rate limiting where slight boundary effects are acceptable (for example, internal tools or low-risk endpoints).
+
+## Advanced features (1.1+)
+
+These options work with `expressRateLimiter`, `fastifyRateLimiter`, and `RateLimitEngine` / `createRateLimiter` (where applicable).
+
+### Multiple windows on one route (`limits`)
+
+Use `limits` instead of a single `windowMs` / `maxRequests`. Each entry is `{ windowMs, max }`. The same client key is checked against **every** window; the request is blocked if **any** window is exceeded. The middleware creates one in-memory store per window.
+
+```ts
+app.use(
+  expressRateLimiter({
+    limits: [
+      { windowMs: 60_000, max: 100 }, // per minute
+      { windowMs: 3_600_000, max: 1000 }, // per hour
+    ],
+  }),
+);
+```
+
+### Dynamic `maxRequests`
+
+For sliding or fixed window, `maxRequests` may be a function that returns the cap for the current request (for example based on auth or headers):
+
+```ts
+app.use(
+  expressRateLimiter({
+    windowMs: 60_000,
+    maxRequests: (req) =>
+      (req as import('express').Request).user?.isPremium ? 1000 : 100,
+  }),
+);
+```
+
+### Penalty box
+
+After repeated **real** rate-limit blocks (not draft), the client can be temporarily banned. Violation timestamps are tracked in a sliding `violationWindowMs` (default one hour). When the count reaches `violationsThreshold`, the client is blocked for `penaltyDurationMs`. This state lives on the `RateLimitEngine` instance (not in the store), so it does not automatically sync across multiple app processes.
+
+```ts
+app.use(
+  expressRateLimiter({
+    maxRequests: 10,
+    windowMs: 60_000,
+    penaltyBox: {
+      violationsThreshold: 5,
+      violationWindowMs: 3_600_000,
+      penaltyDurationMs: 900_000, // 15 minutes
+      onPenalty: async (req) => {
+        /* e.g. audit log */
+      },
+    },
+  }),
+);
+```
+
+### Allowlist and blocklist
+
+Both lists match the **same string** produced by `keyGenerator` (often IP or API key). Allowlisted keys skip rate limiting entirely. Blocklisted keys are rejected before consuming quota, with `blocklistStatusCode` (default `403`) and `blocklistMessage` (default `"Forbidden"`).
+
+```ts
+app.use(
+  expressRateLimiter({
+    allowlist: ['203.0.113.10'],
+    blocklist: ['bad-api-key'],
+    keyGenerator: (req) =>
+      String((req as import('express').Request).header('x-api-key') ?? 'anonymous'),
+  }),
+);
+```
+
+### Draft mode
+
+Set `draft: true` to observe what **would** have been blocked without actually returning 429. Each would-be hit is rolled back so counters stay unchanged. Use `onDraftViolation` to log or metrics. On the engine, check `draftWouldBlock` on the consume result.
+
+```ts
+app.use(
+  expressRateLimiter({
+    draft: true,
+    onDraftViolation: (req, result) => {
+      console.warn('Would block', { result });
+    },
+    maxRequests: 100,
+    windowMs: 60_000,
+  }),
+);
+```
 
 ## API Reference
 
@@ -94,7 +182,15 @@ import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
 | `skipFailedRequests` | `boolean` | `false` | Decrement usage for failed responses (`>= 400`) |
 | `skipSuccessfulRequests` | `boolean` | `false` | Decrement usage for successful responses (`< 400`) |
 | `windowMs` | `number` | `60000` | Window length for sliding/fixed window strategies |
-| `maxRequests` | `number` | `100` | Max requests per window for sliding/fixed window |
+| `limits` | `{ windowMs, max }[]` | `undefined` | Multiple independent windows; blocks if **any** limit is exceeded (ignores single `windowMs` / `maxRequests` for the default store setup) |
+| `maxRequests` | `number \| (req) => number` | `100` | Max requests per window for sliding/fixed window, or a per-request cap |
+| `allowlist` | `string[]` | `undefined` | Keys that skip rate limiting |
+| `blocklist` | `string[]` | `undefined` | Keys always rejected before counting |
+| `blocklistStatusCode` | `number` | `403` | Status for blocklist hits |
+| `blocklistMessage` | `string \| object` | `"Forbidden"` | Body for blocklist hits (`{ error: message }`) |
+| `penaltyBox` | `PenaltyBoxOptions` | `undefined` | Temporary ban after repeated limit violations (engine-local state) |
+| `draft` | `boolean` | `false` | Would-be blocks are logged/observed only; increments rolled back |
+| `onDraftViolation` | `(req, result) => void \| Promise<void>` | `undefined` | Called in draft mode when a request would have been blocked |
 | `tokensPerInterval` | `number` | `10` | Tokens refilled per interval (token bucket) |
 | `interval` | `number` | `60000` | Refill interval in ms (token bucket) |
 | `bucketSize` | `number` | `100` | Max bucket capacity (token bucket burst size) |
@@ -193,6 +289,33 @@ const store = new RedisStore({
 app.use(expressRateLimiter({ strategy: RateLimitStrategy.SLIDING_WINDOW, store }));
 ```
 
+### Redis failure handling (`onRedisError`)
+
+**Policy vs counters:** `blocklist`, `allowlist`, and **penalty box** are enforced in the `RateLimitEngine` **before** the backing store runs. They use in-memory state only, so they **continue to work unchanged when Redis is unavailable**. Only quota / window counting (`increment` on `RedisStore`) depends on Redis. That split is easy to reason about in production: you can rely on “bad IPs and penalty rules still apply even if Redis goes down,” while you separately choose **fail-open** or **fail-closed** for distributed rate limits via `onRedisError`.
+
+`RedisStore` accepts **`onRedisError`**: `'fail-open'` (default) or `'fail-closed'`.
+
+| Mode | Behavior |
+|------|----------|
+| **`fail-open`** | If Redis is unreachable or a command fails, the request is **allowed** and a warning is logged (via `onWarn`). `increment` returns a permissive result; `decrement` and `reset` do not throw. |
+| **`fail-closed`** | If Redis fails during **`increment`**, the client is treated as **blocked** with `storeUnavailable: true` on the result. Express and Fastify respond with **503 Service Unavailable** and body `{ error: 'Service temporarily unavailable' }`. **`reset`** rejects the promise so callers can handle persistence failures. **`decrement`** never throws (the response has already been sent); failures are logged and an extra warning is emitted in fail-closed mode because counters may drift. |
+
+```ts
+import { expressRateLimiter, RedisStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const store = new RedisStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  url: process.env.REDIS_URL!,
+  onRedisError: 'fail-closed', // prefer failing shut when Redis is required for fairness
+});
+
+app.use(expressRateLimiter({ strategy: RateLimitStrategy.SLIDING_WINDOW, store }));
+```
+
+When using `RateLimitEngine` directly, check `result.storeUnavailable` or `blockReason === 'service_unavailable'` for the same semantics.
+
 ### Custom error responses
 
 ```ts
@@ -227,6 +350,14 @@ app.use(expressRateLimiter({ maxRequests: 100, windowMs: 60_000 })); // global
 app.use('/login', expressRateLimiter({ maxRequests: 10, windowMs: 60_000 })); // strict endpoint
 ```
 
+### Engine: `blockReason` and draft
+
+When using `RateLimitEngine` or `createRateLimiter` directly, consume results can include:
+
+- `blockReason`: `'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable'` (Redis fail-closed)
+- `draftWouldBlock`: `true` when `draft` is enabled and the request would have exceeded the limit
+- `storeUnavailable`: set when `RedisStore` could not evaluate the limit in fail-closed mode
+
 ## Stores
 
 | Store | Best for | Pros | Trade-offs |
@@ -239,18 +370,28 @@ app.use('/login', expressRateLimiter({ maxRequests: 10, windowMs: 60_000 })); //
 Implement the `RateLimitStore` interface:
 
 ```ts
+export interface RateLimitIncrementOptions {
+  maxRequests?: number;
+}
+
 export interface RateLimitStore {
-  increment(key: string): Promise<{
+  increment(
+    key: string,
+    options?: RateLimitIncrementOptions,
+  ): Promise<{
     totalHits: number;
     remaining: number;
     resetTime: Date;
     isBlocked: boolean;
+    storeUnavailable?: boolean;
   }>;
   decrement(key: string): Promise<void>;
   reset(key: string): Promise<void>;
   shutdown(): Promise<void>;
 }
 ```
+
+Window strategies may use `options.maxRequests` to override the store’s configured cap for that increment (used for dynamic `maxRequests` functions).
 
 Use your custom store by passing `store` in options:
 
