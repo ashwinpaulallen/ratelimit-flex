@@ -14,6 +14,7 @@ Flexible, TypeScript-first rate limiting for Node.js APIs with first-class Expre
 - Strong TypeScript types and clean public API
 - Supports custom keys, skip logic, callbacks, and custom responses
 - **Advanced (v1.1+)**: multiple windows per route, dynamic per-request limits, penalty box, allow/block lists, and draft mode for safe production tuning
+- With **Redis**, blocklist / allowlist / penalty stay **in-memory** and keep working if Redis fails—only quota counting depends on the store (see [Redis failure handling](#redis-failure-handling-onrediserror))
 
 ## Installation
 
@@ -288,6 +289,33 @@ const store = new RedisStore({
 app.use(expressRateLimiter({ strategy: RateLimitStrategy.SLIDING_WINDOW, store }));
 ```
 
+### Redis failure handling (`onRedisError`)
+
+**Policy vs counters:** `blocklist`, `allowlist`, and **penalty box** are enforced in the `RateLimitEngine` **before** the backing store runs. They use in-memory state only, so they **continue to work unchanged when Redis is unavailable**. Only quota / window counting (`increment` on `RedisStore`) depends on Redis. That split is easy to reason about in production: you can rely on “bad IPs and penalty rules still apply even if Redis goes down,” while you separately choose **fail-open** or **fail-closed** for distributed rate limits via `onRedisError`.
+
+`RedisStore` accepts **`onRedisError`**: `'fail-open'` (default) or `'fail-closed'`.
+
+| Mode | Behavior |
+|------|----------|
+| **`fail-open`** | If Redis is unreachable or a command fails, the request is **allowed** and a warning is logged (via `onWarn`). `increment` returns a permissive result; `decrement` and `reset` do not throw. |
+| **`fail-closed`** | If Redis fails during **`increment`**, the client is treated as **blocked** with `storeUnavailable: true` on the result. Express and Fastify respond with **503 Service Unavailable** and body `{ error: 'Service temporarily unavailable' }`. **`reset`** rejects the promise so callers can handle persistence failures. **`decrement`** never throws (the response has already been sent); failures are logged and an extra warning is emitted in fail-closed mode because counters may drift. |
+
+```ts
+import { expressRateLimiter, RedisStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const store = new RedisStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  url: process.env.REDIS_URL!,
+  onRedisError: 'fail-closed', // prefer failing shut when Redis is required for fairness
+});
+
+app.use(expressRateLimiter({ strategy: RateLimitStrategy.SLIDING_WINDOW, store }));
+```
+
+When using `RateLimitEngine` directly, check `result.storeUnavailable` or `blockReason === 'service_unavailable'` for the same semantics.
+
 ### Custom error responses
 
 ```ts
@@ -326,8 +354,9 @@ app.use('/login', expressRateLimiter({ maxRequests: 10, windowMs: 60_000 })); //
 
 When using `RateLimitEngine` or `createRateLimiter` directly, consume results can include:
 
-- `blockReason`: `'rate_limit' | 'blocklist' | 'penalty'`
+- `blockReason`: `'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable'` (Redis fail-closed)
 - `draftWouldBlock`: `true` when `draft` is enabled and the request would have exceeded the limit
+- `storeUnavailable`: set when `RedisStore` could not evaluate the limit in fail-closed mode
 
 ## Stores
 
@@ -354,6 +383,7 @@ export interface RateLimitStore {
     remaining: number;
     resetTime: Date;
     isBlocked: boolean;
+    storeUnavailable?: boolean;
   }>;
   decrement(key: string): Promise<void>;
   reset(key: string): Promise<void>;

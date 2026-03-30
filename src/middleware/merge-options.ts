@@ -1,4 +1,5 @@
 import { MemoryStore } from '../stores/memory-store.js';
+import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 import {
   fixedWindowDefaults,
   slidingWindowDefaults,
@@ -31,9 +32,9 @@ export function getLimit(opts: RateLimitOptions, req?: unknown): number {
   }
   const mr = w.maxRequests ?? 100;
   if (typeof mr === 'function') {
-    return req !== undefined ? mr(req) : 100;
+    return req !== undefined ? sanitizeRateLimitCap(mr(req), 100) : 100;
   }
-  return mr;
+  return sanitizeRateLimitCap(mr, 100);
 }
 
 /**
@@ -72,15 +73,19 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
 
   const limits = (merged as WindowRateLimitOptions).limits;
   if (limits && limits.length > 0) {
-    const groupedWindowStores = limits.map((entry: WindowLimitSpec) => ({
-      windowMs: entry.windowMs,
-      maxRequests: entry.max,
-      store: new MemoryStore({
-        strategy: merged.strategy,
-        windowMs: entry.windowMs,
-        maxRequests: entry.max,
-      }),
-    }));
+    const groupedWindowStores = limits.map((entry: WindowLimitSpec) => {
+      const windowMs = sanitizeWindowMs(entry.windowMs, 60_000);
+      const maxRequests = sanitizeRateLimitCap(entry.max, 100);
+      return {
+        windowMs,
+        maxRequests,
+        store: new MemoryStore({
+          strategy: merged.strategy,
+          windowMs,
+          maxRequests,
+        }),
+      };
+    });
     const store = groupedWindowStores[0]!.store;
     return { ...merged, groupedWindowStores, store };
   }

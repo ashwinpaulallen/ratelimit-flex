@@ -17,6 +17,11 @@ export interface RateLimitResult {
   remaining: number;
   resetTime: Date;
   isBlocked: boolean;
+  /**
+   * Set when {@link RedisStore} cannot complete the operation in `fail-closed` mode.
+   * Framework middleware maps this to HTTP 503.
+   */
+  storeUnavailable?: boolean;
 }
 
 /**

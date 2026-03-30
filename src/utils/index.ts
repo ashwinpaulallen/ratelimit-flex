@@ -1,3 +1,7 @@
 /** Internal utilities */
 
-export {};
+export {
+  sanitizePenaltyDurationMs,
+  sanitizeRateLimitCap,
+  sanitizeWindowMs,
+} from './clamp.js';

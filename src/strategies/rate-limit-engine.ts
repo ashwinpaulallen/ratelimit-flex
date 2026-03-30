@@ -1,4 +1,9 @@
 import { MemoryStore } from '../stores/memory-store.js';
+import {
+  sanitizePenaltyDurationMs,
+  sanitizeRateLimitCap,
+  sanitizeWindowMs,
+} from '../utils/clamp.js';
 import type {
   RateLimitIncrementOptions,
   RateLimitOptions,
@@ -15,7 +20,7 @@ export interface RateLimitConsumeResult extends RateLimitResult {
   /** When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked. */
   draftWouldBlock?: boolean;
   /** Why the request was blocked (when {@link RateLimitResult.isBlocked}). */
-  blockReason?: 'rate_limit' | 'blocklist' | 'penalty';
+  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
 }
 
 /** Options for {@link createRateLimiter}: `store` is optional — a {@link MemoryStore} is created when omitted. */
@@ -75,9 +80,9 @@ function isWindowOpts(o: RateLimitOptions): o is WindowRateLimitOptions {
 function resolveWindowMaxRequests(opts: WindowRateLimitOptions, req: unknown): number {
   const mr = opts.maxRequests ?? 100;
   if (typeof mr === 'function') {
-    return mr(req);
+    return sanitizeRateLimitCap(mr(req), 100);
   }
-  return mr;
+  return sanitizeRateLimitCap(mr, 100);
 }
 
 function resolveIncrementOpts(
@@ -89,7 +94,7 @@ function resolveIncrementOpts(
   }
   const mr = opts.maxRequests;
   if (typeof mr === 'function') {
-    return { maxRequests: mr(req) };
+    return { maxRequests: sanitizeRateLimitCap(mr(req), 100) };
   }
   return undefined;
 }
@@ -107,12 +112,20 @@ export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEng
 export class RateLimitEngine {
   private readonly options: RateLimitOptions;
 
+  private readonly allowSet: ReadonlySet<string> | null;
+
+  private readonly blockSet: ReadonlySet<string> | null;
+
   private readonly penaltyUntil = new Map<string, number>();
 
   private readonly violationTimestamps = new Map<string, number[]>();
 
   constructor(options: RateLimitOptions) {
     this.options = options;
+    const allow = options.allowlist;
+    const block = options.blocklist;
+    this.allowSet = allow && allow.length > 0 ? new Set(allow) : null;
+    this.blockSet = block && block.length > 0 ? new Set(block) : null;
   }
 
   /**
@@ -133,13 +146,11 @@ export class RateLimitEngine {
       return this.buildPassthroughResult(req);
     }
 
-    const allow = this.options.allowlist;
-    if (allow && allow.includes(key)) {
+    if (this.allowSet?.has(key)) {
       return this.buildPassthroughResult(req);
     }
 
-    const block = this.options.blocklist;
-    if (block && block.includes(key)) {
+    if (this.blockSet?.has(key)) {
       return this.buildPolicyBlockResult(req, 'blocklist');
     }
 
@@ -163,7 +174,7 @@ export class RateLimitEngine {
 
     const draft = this.options.draft === true;
 
-    if (result.isBlocked && draft) {
+    if (result.isBlocked && draft && !result.storeUnavailable) {
       if (grouped && grouped.length > 0 && blockedAtIndex !== undefined) {
         const slot = grouped[blockedAtIndex];
         if (slot !== undefined) {
@@ -199,27 +210,39 @@ export class RateLimitEngine {
       };
     }
 
-    if (result.isBlocked) {
+    if (result.isBlocked && !result.storeUnavailable) {
       this.recordViolation(key, req);
     }
 
     const limit = this.getLimit(req);
     const headers = this.composeHeaders(result, limit);
 
-    if (result.isBlocked && this.options.onLimitReached) {
+    if (result.isBlocked && !result.storeUnavailable && this.options.onLimitReached) {
       await Promise.resolve(this.options.onLimitReached(req, result));
     }
 
     return {
       ...result,
       headers,
-      blockReason: result.isBlocked ? 'rate_limit' : undefined,
+      blockReason: result.isBlocked
+        ? result.storeUnavailable
+          ? 'service_unavailable'
+          : 'rate_limit'
+        : undefined,
     };
   }
 
   private isPenaltyActive(key: string): boolean {
     const until = this.penaltyUntil.get(key);
-    return until !== undefined && Date.now() < until;
+    if (until === undefined) {
+      return false;
+    }
+    const now = Date.now();
+    if (now >= until) {
+      this.penaltyUntil.delete(key);
+      return false;
+    }
+    return true;
   }
 
   private recordViolation(key: string, req: unknown): void {
@@ -227,18 +250,22 @@ export class RateLimitEngine {
     if (!cfg) {
       return;
     }
-    const windowMs = cfg.violationWindowMs ?? 3_600_000;
+    const windowMs = sanitizeWindowMs(cfg.violationWindowMs ?? 3_600_000, 3_600_000);
+    const threshold = sanitizeRateLimitCap(cfg.violationsThreshold, 1);
     const now = Date.now();
     const prev = this.violationTimestamps.get(key) ?? [];
     const trimmed = prev.filter((t) => t > now - windowMs);
     trimmed.push(now);
     this.violationTimestamps.set(key, trimmed);
 
-    if (trimmed.length >= cfg.violationsThreshold) {
-      this.penaltyUntil.set(key, now + cfg.penaltyDurationMs);
+    if (trimmed.length >= threshold) {
+      const duration = sanitizePenaltyDurationMs(cfg.penaltyDurationMs, 60_000);
+      this.penaltyUntil.set(key, now + duration);
       this.violationTimestamps.delete(key);
       if (cfg.onPenalty) {
-        void Promise.resolve(cfg.onPenalty(req));
+        void Promise.resolve(cfg.onPenalty(req)).catch(() => {
+          /* ignore */
+        });
       }
     }
   }
@@ -273,6 +300,10 @@ export class RateLimitEngine {
         resetTime: new Date(),
         isBlocked: false,
       };
+    }
+    const unavailable = results.find((r) => r.storeUnavailable);
+    if (unavailable) {
+      return { ...unavailable };
     }
     const blockedIdx = results.findIndex((r) => r.isBlocked);
     if (blockedIdx >= 0) {

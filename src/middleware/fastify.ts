@@ -54,6 +54,12 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     }
 
     if (result.isBlocked) {
+      // 503 first: Redis fail-closed. Blocklist/penalty never reach the store (engine order), so they
+      // cannot collide with storeUnavailable on the same response.
+      if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
+        await reply.status(503).send(jsonErrorBody('Service temporarily unavailable'));
+        return;
+      }
       if (onLimitReached && result.blockReason === 'rate_limit') {
         await Promise.resolve(onLimitReached(request, result));
       }

@@ -10,6 +10,7 @@ export {
   RedisStore,
   adaptIoRedisClient,
   adaptNodeRedisClient,
+  type RedisErrorMode,
   type RedisLikeClient,
   type RedisStoreOptions,
   type RedisStoreStrategyOptions,
