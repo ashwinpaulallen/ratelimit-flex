@@ -101,6 +101,29 @@ describe('MemoryStore', () => {
     await store.shutdown();
   });
 
+  it('sliding-window decrement removes the oldest hit (FIFO), not the newest', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+
+    const t0 = Date.now();
+    await store.increment('fifo');
+    vi.advanceTimersByTime(1);
+    await store.increment('fifo');
+    vi.advanceTimersByTime(1);
+    await store.increment('fifo');
+
+    const sliding = (store as unknown as { sliding: Map<string, number[]> }).sliding;
+    expect(sliding.get('fifo')).toEqual([t0, t0 + 1, t0 + 2]);
+
+    await store.decrement('fifo');
+    expect(sliding.get('fifo')).toEqual([t0 + 1, t0 + 2]);
+
+    await store.shutdown();
+  });
+
   it('handles concurrent increments correctly', async () => {
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,
