@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MetricsCounters } from '../../src/metrics/counters.js';
 
 describe('MetricsCounters', () => {
@@ -15,14 +15,19 @@ describe('MetricsCounters', () => {
 
   it('ring buffer wraps correctly when full (capacity 4)', () => {
     const c = new MetricsCounters({ sampleCapacity: 4 });
-    const t = performance.now();
+    const t = 1_000_000;
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => t);
     for (let i = 0; i < 6; i++) {
       c.recordLatency(t - (i + 1) * 0.01);
     }
+    spy.mockRestore();
+
     const snap = c.snapshot();
     expect(snap.latencySamplesMs.length).toBe(4);
-    expect(snap.latencySamplesMs[0]).toBeCloseTo(0.01, 1);
-    expect(snap.latencySamplesMs[3]).toBeCloseTo(0.04, 1);
+    // When full, drain is oldest-first in ring order: slots hold 5th–6th writes then 3rd–4th
+    // (see drainRing when count === cap), so values are 0.03, 0.04, 0.05, 0.06 for synthetic deltas 0.01…0.06.
+    expect(snap.latencySamplesMs[0]).toBeCloseTo(0.03, 5);
+    expect(snap.latencySamplesMs[3]).toBeCloseTo(0.06, 5);
   });
 
   it('ring buffer wraps with 1024+ samples', () => {
