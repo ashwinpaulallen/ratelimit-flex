@@ -1,6 +1,9 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
+import { MetricsManager } from '../metrics/manager.js';
 import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
@@ -36,13 +39,40 @@ function decrementStores(resolved: RateLimitOptions, key: string): void {
 }
 
 /**
+ * Express rate limiter with optional {@link RateLimitOptions.metrics}: `getMetricsSnapshot`, `getMetricsHistory`, `metricsEndpoint`, `on('metrics')`.
+ *
+ * @since 1.3.0
+ */
+export interface ExpressRateLimiterHandler extends RequestHandler {
+  /** Aggregated metrics wiring (no-op when metrics disabled). */
+  metricsManager: MetricsManager;
+  getMetricsSnapshot(): MetricsSnapshot | null;
+  getMetricsHistory(): MetricsSnapshot[];
+  /** Alias of {@link getMetricsHistory}. */
+  getHistory(): MetricsSnapshot[];
+  /** Prometheus exposition middleware when `metrics.prometheus.enabled`; otherwise `undefined`. */
+  metricsEndpoint?: RequestHandler;
+  on(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): this;
+  off(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): this;
+  once(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): this;
+  removeListener(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): this;
+  /**
+   * Stops the metrics collector and adapters (OpenTelemetry observable callbacks, Prometheus listeners).
+   * Call alongside `store.shutdown()` when your store exposes shutdown.
+   */
+  shutdownMetrics(): Promise<void>;
+  /** Present when `metrics.openTelemetry` is enabled with a `meter`. */
+  openTelemetryAdapter?: OpenTelemetryAdapter;
+}
+
+/**
  * Express middleware: merges options, warns if {@link MemoryStore} is used in a likely multi-instance environment, then runs {@link RateLimitEngine.consumeWithKey} per request.
  *
  * @description
  * - Blocked responses: **429** (rate limit), **403** (blocklist), **503** (Redis fail-closed / service unavailable).
  * - On allow: sets `req.rateLimit` and optional `X-RateLimit-*` headers.
  * @param options - Partial {@link RateLimitOptions}; `store` defaults to a new {@link MemoryStore} when omitted (unless `limits` is used).
- * @returns Express `RequestHandler`.
+ * @returns Express `RequestHandler` with {@link ExpressRateLimiterHandler}: always includes {@link MetricsManager} and snapshot/history/Prometheus helpers (no-ops when `metrics` is disabled).
  * @example
  * ```ts
  * import express from 'express';
@@ -57,17 +87,19 @@ function decrementStores(resolved: RateLimitOptions, key: string): void {
  * @see {@link warnIfMemoryStoreInCluster}
  * @since 1.0.0
  */
-export function expressRateLimiter(options: Partial<RateLimitOptions>): RequestHandler {
+export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressRateLimiterHandler {
   const resolved = mergeRateLimiterOptions(options);
   warnIfMemoryStoreInCluster(resolved.store);
+  const metricsManager = new MetricsManager(resolved.metrics);
   const { onLimitReached, ...engineOptions } = resolved;
-  const engine = new RateLimitEngine(engineOptions);
+  const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
 
-  return async function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
-    if (resolved.skip?.(req) === true) {
-      next();
-      return;
+  let metricsCollectorStarted = false;
+  const rateLimitMiddleware = async function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
+    if (!metricsCollectorStarted && metricsManager.getCounters()) {
+      metricsManager.start();
+      metricsCollectorStarted = true;
     }
 
     let key: string;
@@ -122,4 +154,38 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): RequestH
       next(err);
     }
   };
+
+  const prometheusMw = metricsManager.getPrometheusMiddleware() ?? undefined;
+
+  const handler = rateLimitMiddleware as ExpressRateLimiterHandler;
+  handler.metricsManager = metricsManager;
+  handler.metricsEndpoint = prometheusMw;
+  handler.getMetricsSnapshot = (): MetricsSnapshot | null => metricsManager.getSnapshot();
+  handler.getMetricsHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.getHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.on = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): ExpressRateLimiterHandler => {
+    metricsManager.on('metrics', listener);
+    return handler;
+  };
+  handler.off = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): ExpressRateLimiterHandler => {
+    metricsManager.off('metrics', listener);
+    return handler;
+  };
+  handler.once = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): ExpressRateLimiterHandler => {
+    metricsManager.once('metrics', listener);
+    return handler;
+  };
+  handler.removeListener = (
+    _event: 'metrics',
+    listener: (snapshot: MetricsSnapshot) => void,
+  ): ExpressRateLimiterHandler => {
+    metricsManager.removeListener('metrics', listener);
+    return handler;
+  };
+  handler.shutdownMetrics = async (): Promise<void> => {
+    await metricsManager.shutdown();
+  };
+  handler.openTelemetryAdapter = metricsManager.getOpenTelemetryAdapter() ?? undefined;
+
+  return handler;
 }

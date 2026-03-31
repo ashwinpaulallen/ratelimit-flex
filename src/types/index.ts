@@ -1,5 +1,14 @@
 /** Shared types for rate limiting */
 
+import type { MetricsConfig } from './metrics.js';
+
+export type {
+  HotKeyIntervalCounts,
+  MetricsCollectorOptions,
+  MetricsConfig,
+  MetricsSnapshot,
+} from './metrics.js';
+
 /**
  * Built-in rate limiting algorithms.
  *
@@ -233,6 +242,13 @@ export interface RateLimitOptionsBase {
    * @see {@link RedisStore}
    */
   store: RateLimitStore;
+
+  /**
+   * @description Observability: `true` enables defaults; object configures intervals and callbacks.
+   * @default undefined (no metrics)
+   * @since 1.3.0
+   */
+  metrics?: MetricsConfig | boolean;
 }
 
 /**

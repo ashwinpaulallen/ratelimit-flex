@@ -8,7 +8,7 @@
  * @packageDocumentation
  */
 
-import { expressRateLimiter } from './middleware/express.js';
+import { expressRateLimiter, type ExpressRateLimiterHandler } from './middleware/express.js';
 import type { RateLimitOptions } from './types/index.js';
 
 /**
@@ -16,7 +16,7 @@ import type { RateLimitOptions } from './types/index.js';
  *
  * @since 1.0.0
  */
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 /**
  * Express middleware factory — same implementation as {@link expressRateLimiter} in `./middleware/express.js`.
@@ -24,7 +24,22 @@ export const VERSION = '1.2.0';
  * @see {@link expressRateLimiter}
  * @since 1.0.0
  */
-export { expressRateLimiter };
+export { expressRateLimiter, type ExpressRateLimiterHandler } from './middleware/express.js';
+
+export {
+  assertHistogramBucketBounds,
+  CallbackAdapter,
+  Histogram,
+  MetricsCollector,
+  MetricsCounters,
+  MetricsManager,
+  OpenTelemetryAdapter,
+  PrometheusAdapter,
+  createMetricsCountersIfEnabled,
+  normalizeMetricsConfig,
+  type OpenTelemetryAdapterOptions,
+  type PrometheusAdapterOptions,
+} from './metrics/index.js';
 
 /**
  * Core engine, default key extraction, and engine factory.
@@ -118,7 +133,9 @@ export {
  * @see {@link expressRateLimiter}
  * @since 1.0.0
  */
-export function createRateLimiter(options: Partial<RateLimitOptions>) {
+export function createRateLimiter(options: Partial<RateLimitOptions>): {
+  express: ExpressRateLimiterHandler;
+} {
   return {
     express: expressRateLimiter(options),
   };

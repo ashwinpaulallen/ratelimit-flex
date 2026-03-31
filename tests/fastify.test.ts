@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fastifyRateLimiter } from '../src/fastify.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../src/types/index.js';
@@ -253,5 +253,33 @@ describe('fastify plugin', () => {
     expect(blocked.statusCode).toBe(503);
 
     await app.close();
+  });
+
+  it('exposes native Prometheus GET /metrics via fastifyMetricsRoute when prometheus is enabled', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const app = Fastify();
+    await app.register(fastifyRateLimiter, {
+      strategy: RateLimitStrategy.FIXED_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      store: trackedStore({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 100,
+      }),
+      metrics: { enabled: true, intervalMs: 10_000, prometheus: { enabled: true } },
+    });
+
+    expect(app.fastifyMetricsRoute).toBeDefined();
+    app.get('/metrics', app.fastifyMetricsRoute!);
+
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers['content-type'])).toMatch(/text\/plain/);
+    expect(res.payload).toContain('# HELP');
+
+    await app.close();
+    vi.restoreAllMocks();
   });
 });

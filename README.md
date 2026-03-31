@@ -13,6 +13,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **Stores:** `MemoryStore` (in-process) and `RedisStore` (shared, Lua-backed)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** `fail-open` or `fail-closed` when Redis is unavailable
+- **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 
 ## Installation
@@ -36,6 +37,8 @@ pnpm add ratelimit-flex
 | `express` (+ `@types/express` for TS) | Express middleware |
 | `fastify`, `fastify-plugin` | Fastify plugin (`ratelimit-flex/fastify`) |
 | `ioredis` | `RedisStore` with `url` (or use your own Redis client adapter) |
+| `prom-client` | Optional: `metrics.prometheus.registry` integration |
+| `@opentelemetry/api` | Optional: `metrics.openTelemetry.meter` integration |
 
 All peers are optional at install time; the runtime you choose must be present when you import that integration.
 
@@ -302,6 +305,356 @@ new RedisStore({
 
 **Policy vs counters:** **Allowlist**, **blocklist**, and **penalty box** are enforced in the **RateLimitEngine** (in-memory) **before** the store runs. They **still apply** when Redis is down. Only **quota / window / bucket** counting depends on `RedisStore.increment`.
 
+## Metrics & Observability
+
+You get production-grade observability for free — just flip a switch (`metrics: true`) on **Express** (`expressRateLimiter`) or **Fastify** (`fastifyRateLimiter` from `ratelimit-flex/fastify`). The same `RateLimitOptions.metrics` / `MetricsConfig` applies to both; only the **surface API** differs (handler methods vs. Fastify decorations — see below).
+
+### Why metrics matter for rate limiting
+
+Rate limiters are invisible infrastructure: when they work, nobody notices; when they misconfigure or drift, they either let attacks through or frustrate legitimate users. Metrics make the invisible visible — throughput, block rates, latency, and hot keys — so you can tune limits, catch abuse, and prove SLAs.
+
+### Quick start
+
+**Express** — the middleware is also a metrics handle (`getMetricsSnapshot`, `on('metrics', …)`, etc.):
+
+```ts
+const limiter = expressRateLimiter({ maxRequests: 100, metrics: true });
+app.get('/stats', (req, res) => res.json(limiter.getMetricsSnapshot()));
+```
+
+**Fastify** — same `RateLimitOptions.metrics`; the plugin decorates the instance when metrics are enabled (`rateLimitMetrics`, `getMetricsSnapshot`, `getMetricsHistory`, `on('metrics', …)` on `rateLimitMetrics`):
+
+```ts
+await app.register(fastifyRateLimiter, { maxRequests: 100, metrics: true });
+app.get('/stats', async (request, reply) => {
+  const snap = app.getMetricsSnapshot?.() ?? null;
+  return reply.send(snap ?? { message: 'No snapshot yet' });
+});
+```
+
+**Framework API (same metrics, different wiring):**
+
+| Surface | Express (`expressRateLimiter`) | Fastify (`fastifyRateLimiter`) |
+|--------|-------------------------------|--------------------------------|
+| Metrics manager | `limiter.metricsManager` | `app.rateLimitMetrics` |
+| Latest / history | `limiter.getMetricsSnapshot()`, `getMetricsHistory()` | `app.getMetricsSnapshot?.()`, `getMetricsHistory?.()` |
+| `metrics` events | `limiter.on('metrics', …)` | `app.rateLimitMetrics?.on('metrics', …)` |
+| Prometheus `GET` | `limiter.metricsEndpoint` → `app.use('/metrics', …)` | `app.fastifyMetricsRoute` → `app.get('/metrics', …)` (native; `metricsEndpoint` still available for `@fastify/express`) |
+| Clean shutdown | `limiter.shutdownMetrics()` | Plugin **`onClose`** calls `metricsManager.shutdown()`; optional `await app.rateLimitMetrics?.shutdown()` |
+
+### What’s collected
+
+Aggregated snapshots (and Prometheus / OpenTelemetry exporters when enabled) expose the following concepts. **Prometheus** metric names use the default prefix `ratelimit_` (configurable). **OpenTelemetry** uses `{prefix}_…` with default prefix `ratelimit` (e.g. `ratelimit_requests_total`). Prometheus also emits **`ratelimit_requests_skipped_total`** and **`ratelimit_requests_allowlisted_total`** as separate counters.
+
+| Metric (concept / series) | Type | Description |
+|---------------------------|------|-------------|
+| `requests_total` | Counter | Total requests by **status** and **reason** (allowed, blocked: rate_limit, blocklist, penalty, service_unavailable; skipped / allowlisted where applicable) |
+| `middleware_duration_ms` / `middleware_duration_milliseconds` | Histogram | Time spent in the rate limiter middleware per request (ms) |
+| `store_duration_ms` / `store_duration_milliseconds` | Histogram | Store `increment` latency (e.g. Redis) per operation (ms) |
+| `requests_per_second` | Gauge | Estimated throughput over the aggregation window |
+| `block_rate` | Gauge | Share of requests blocked (0–1) over the window |
+| `hot_key_hits` | Gauge | Top keys by hit count (cardinality capped; label `key`) |
+
+### Performance guarantee
+
+Metrics collection adds **less than ~2 microseconds per request** on typical hardware. Recording is **synchronous** — numeric increments and fixed ring buffers only: **no allocations** and **no I/O** on the request path. Aggregation runs on a **background timer** (default: every **10 seconds**).
+
+### Callback / Event-based metrics
+
+**Push — `onMetrics` callback** (fires each aggregation tick; same option for Express and Fastify):
+
+Express:
+
+```ts
+expressRateLimiter({
+  maxRequests: 100,
+  windowMs: 60_000,
+  metrics: {
+    enabled: true,
+    onMetrics: (snapshot) => {
+      if (snapshot.window.blockRate > 0.1) console.warn('High block rate', snapshot);
+    },
+  },
+});
+```
+
+Fastify:
+
+```ts
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+
+await app.register(fastifyRateLimiter, {
+  maxRequests: 100,
+  windowMs: 60_000,
+  metrics: {
+    enabled: true,
+    onMetrics: (snapshot) => {
+      if (snapshot.window.blockRate > 0.1) console.warn('High block rate', snapshot);
+    },
+  },
+});
+```
+
+**Events — `on('metrics', …)`** (same snapshots as `onMetrics`):
+
+Express — on the middleware handler:
+
+```ts
+const limiter = expressRateLimiter({ maxRequests: 100, metrics: true });
+limiter.on('metrics', (snapshot) => {
+  /* same shape as onMetrics */
+});
+```
+
+Fastify — on `rateLimitMetrics` (a `MetricsManager`; only present when metrics are enabled):
+
+```ts
+await app.register(fastifyRateLimiter, { maxRequests: 100, metrics: true });
+app.rateLimitMetrics?.on('metrics', (snapshot) => {
+  /* same shape as onMetrics */
+});
+```
+
+**Pull — latest snapshot** (`null` before the first aggregation tick):
+
+Express:
+
+```ts
+const snap = limiter.getMetricsSnapshot();
+res.json(snap ?? { message: 'No snapshot yet' });
+```
+
+Fastify — the plugin decorates **`getMetricsSnapshot`** and **`getMetricsHistory`** on the instance:
+
+```ts
+const snap = app.getMetricsSnapshot?.() ?? null;
+return reply.send(snap ?? { message: 'No snapshot yet' });
+```
+
+### Prometheus integration
+
+**Standalone (Express)** — text exposition **without** installing `prom-client`; use the middleware from the limiter:
+
+```ts
+const limiter = expressRateLimiter({
+  maxRequests: 100,
+  metrics: { enabled: true, prometheus: { enabled: true } },
+});
+if (limiter.metricsEndpoint) {
+  app.use('/metrics', limiter.metricsEndpoint);
+}
+```
+
+**Standalone (Fastify)** — use the **native** route handler (no Express adapter):
+
+```ts
+await app.register(fastifyRateLimiter, {
+  maxRequests: 100,
+  metrics: { enabled: true, prometheus: { enabled: true } },
+});
+if (app.fastifyMetricsRoute) {
+  app.get('/metrics', app.fastifyMetricsRoute);
+}
+```
+
+(`metricsEndpoint` is still set for apps that mount Express middleware via `@fastify/express` / `middie`; prefer `fastifyMetricsRoute` for plain Fastify.)
+
+**With an existing `prom-client` registry** — pass your `Registry`; scrape your global `/metrics` as usual.
+
+Express:
+
+```ts
+import { Registry } from 'prom-client';
+
+const registry = new Registry();
+expressRateLimiter({
+  maxRequests: 100,
+  metrics: { enabled: true, prometheus: { enabled: true, registry } },
+});
+```
+
+Fastify (same `metrics` object; register the plugin, then mount `/metrics` with `fastifyMetricsRoute` as above):
+
+```ts
+import { Registry } from 'prom-client';
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+
+const registry = new Registry();
+await app.register(fastifyRateLimiter, {
+  maxRequests: 100,
+  metrics: { enabled: true, prometheus: { enabled: true, registry } },
+});
+if (app.fastifyMetricsRoute) {
+  app.get('/metrics', app.fastifyMetricsRoute);
+}
+```
+
+**Example PromQL / Grafana queries:**
+
+```promql
+sum(rate(ratelimit_requests_total{status="blocked"}[5m]))
+```
+
+```promql
+histogram_quantile(
+  0.99,
+  sum(rate(ratelimit_middleware_duration_milliseconds_bucket[5m])) by (le)
+)
+```
+
+### OpenTelemetry integration
+
+Pass a **`Meter`** from `@opentelemetry/api` (optional peer dependency). Works with any **OTLP-compatible** backend — **Grafana Cloud**, **Datadog**, **New Relic**, **Honeycomb**, self-hosted collectors, etc.
+
+Express:
+
+```ts
+import { metrics } from '@opentelemetry/api';
+import { expressRateLimiter } from 'ratelimit-flex';
+
+const meter = metrics.getMeter('my-service');
+app.use(
+  expressRateLimiter({
+    maxRequests: 100,
+    metrics: { enabled: true, openTelemetry: { enabled: true, meter, prefix: 'ratelimit' } },
+  }),
+);
+```
+
+Fastify:
+
+```ts
+import { metrics } from '@opentelemetry/api';
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+
+const meter = metrics.getMeter('my-service');
+await app.register(fastifyRateLimiter, {
+  maxRequests: 100,
+  metrics: { enabled: true, openTelemetry: { enabled: true, meter, prefix: 'ratelimit' } },
+});
+```
+
+On shutdown, call **`limiter.openTelemetryAdapter?.shutdown()`** (Express) or **`app.rateLimitMetrics?.getOpenTelemetryAdapter()?.shutdown()`** (Fastify) if you need to tear down observable gauge callbacks cleanly. The Fastify plugin also runs **`metricsManager.shutdown()`** on `onClose`.
+
+### Snapshot API
+
+**`MetricsSnapshot`** (from the collector; `getMetricsSnapshot()` returns the latest):
+
+```ts
+interface MetricsSnapshot {
+  readonly timestamp: Date;
+  readonly window: {
+    readonly durationMs: number;
+    readonly requestsPerSecond: number;
+    readonly blocksPerSecond: number;
+    readonly blockRate: number;
+    readonly allowRate: number;
+  };
+  readonly totals: {
+    readonly requests: number;
+    readonly allowed: number;
+    readonly blocked: number;
+    readonly skipped: number;
+    readonly allowlisted: number;
+  };
+  readonly blockReasons: {
+    readonly rateLimit: number;
+    readonly blocklist: number;
+    readonly penalty: number;
+    readonly serviceUnavailable: number;
+  };
+  readonly latency: {
+    readonly min: number;
+    readonly max: number;
+    readonly mean: number;
+    readonly p50: number;
+    readonly p95: number;
+    readonly p99: number;
+    readonly stdDev: number;
+  };
+  readonly storeLatency: {
+    readonly min: number;
+    readonly max: number;
+    readonly mean: number;
+    readonly p50: number;
+    readonly p95: number;
+    readonly p99: number;
+  };
+  readonly hotKeys: ReadonlyArray<{ readonly key: string; readonly hits: number; readonly blocked: number }>;
+  readonly trends: {
+    readonly requestRateTrend: 'increasing' | 'decreasing' | 'stable';
+    readonly blockRateTrend: 'increasing' | 'decreasing' | 'stable';
+    readonly latencyTrend: 'increasing' | 'decreasing' | 'stable';
+  };
+  readonly latencySamplesMs?: readonly number[];
+  readonly storeLatencySamplesMs?: readonly number[];
+}
+```
+
+**Alerting — block rate above a threshold:**
+
+Express:
+
+```ts
+limiter.on('metrics', (s) => {
+  if (s.window.blockRate > 0.25) {
+    void alerting.notify('Block rate above 25%', { blockRate: s.window.blockRate });
+  }
+});
+```
+
+Fastify:
+
+```ts
+app.rateLimitMetrics?.on('metrics', (s) => {
+  if (s.window.blockRate > 0.25) {
+    void alerting.notify('Block rate above 25%', { blockRate: s.window.blockRate });
+  }
+});
+```
+
+**Logging hot keys (abuse / capacity planning):**
+
+Express:
+
+```ts
+limiter.on('metrics', (s) => {
+  for (const row of s.hotKeys.slice(0, 5)) {
+    logger.info({ key: row.key, hits: row.hits, blocked: row.blocked }, 'top rate-limit key');
+  }
+});
+```
+
+Fastify:
+
+```ts
+app.rateLimitMetrics?.on('metrics', (s) => {
+  for (const row of s.hotKeys.slice(0, 5)) {
+    logger.info({ key: row.key, hits: row.hits, blocked: row.blocked }, 'top rate-limit key');
+  }
+});
+```
+
+### Trends
+
+The collector compares **recent vs earlier** samples in a sliding window (request rate, block rate, mean latency) and labels each series **`increasing`**, **`decreasing`**, or **`stable`**. Use **`snapshot.trends.*`** for proactive alerts (e.g. rising block rate before user complaints, or rising latency before timeouts).
+
+### MetricsConfig reference
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `boolean` | — | **Required** when using object form; master switch |
+| `intervalMs` | `number` | `10000` | Aggregation / emit interval (ms) |
+| `topKSize` | `number` | `20` | How many hot keys to keep in snapshots |
+| `histogramBuckets` | `number[]` | (library defaults) | Upper bounds (ms) for latency histograms |
+| `onMetrics` | `(snapshot: MetricsSnapshot) => void` | — | Called each tick with the latest snapshot |
+| `prometheus` | `{ enabled: boolean; prefix?: string; registry?: unknown }` | — | Prometheus text + optional `prom-client` registry |
+| `openTelemetry` | `{ enabled: boolean; meter?: unknown; prefix?: string }` | — | OTel instruments via user-supplied `Meter` |
+
+Use **`metrics: true`** as shorthand for `{ enabled: true }` with the defaults above. **Express:** call **`shutdownMetrics()`** on the middleware handler when the process exits (alongside store shutdown). **Fastify:** the plugin registers **`onClose`** to stop the collector and adapters when the server closes; call **`await app.rateLimitMetrics?.shutdown()`** only if you need an explicit teardown without closing Fastify.
+
+---
+
 ## Configuration reference
 
 Options are merged with strategy defaults. Omit **`store`** to get an auto-created **`MemoryStore`** (unless you use **`limits`**, which builds grouped in-memory stores).
@@ -324,6 +677,7 @@ Options are merged with strategy defaults. Omit **`store`** to get an auto-creat
 | `skipFailedRequests` | `boolean` | `false` | Decrement on `>= 400` responses |
 | `skipSuccessfulRequests` | `boolean` | `false` | Decrement on `< 400` responses |
 | `onLimitReached` | `(req, result) => void` | — | After a block |
+| `metrics` | `MetricsConfig` \| `boolean` | — | Aggregated metrics, Prometheus, OTel ([Metrics & Observability](#metrics--observability)) |
 | `allowlist` | `string[]` | — | Keys that skip limiting |
 | `blocklist` | `string[]` | — | Keys rejected before quota (`403` default) |
 | `blocklistStatusCode` | `number` | `403` | Status for blocklist |
@@ -481,6 +835,7 @@ Pass your store as **`store`** in middleware options.
 | **`RedisStore`** | Redis-backed store (Lua) |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
 | **`createRateLimiter`** | `{ express }` middleware helper |
+| **`MetricsManager`**, **`normalizeMetricsConfig`**, **`PrometheusAdapter`**, **`OpenTelemetryAdapter`** | Metrics wiring and exporters ([Metrics & Observability](#metrics--observability)) |
 
 Default export = **`expressRateLimiter`**.
 
