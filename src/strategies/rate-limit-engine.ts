@@ -13,6 +13,8 @@ import type {
   WindowRateLimitOptions,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import type { MetricsCounters } from '../metrics/counters.js';
+import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
 /**
  * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
@@ -144,7 +146,9 @@ function resolveIncrementOpts(
  * @since 1.0.0
  */
 export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEngine {
-  return new RateLimitEngine(resolveOptions(options));
+  const resolved = resolveOptions(options);
+  const counters = createMetricsCountersIfEnabled(resolved.metrics);
+  return new RateLimitEngine(resolved, counters);
 }
 
 /**
@@ -157,6 +161,8 @@ export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEng
  */
 export class RateLimitEngine {
   private readonly options: RateLimitOptions;
+
+  private readonly metrics: MetricsCounters | undefined;
 
   private readonly allowSet: ReadonlySet<string> | null;
 
@@ -178,10 +184,12 @@ export class RateLimitEngine {
    *   store: myStore,
    * });
    * ```
+   * @param metrics - Optional {@link MetricsCounters}; when omitted, no per-request metrics overhead.
    * @since 1.0.0
    */
-  constructor(options: RateLimitOptions) {
+  constructor(options: RateLimitOptions, metrics?: MetricsCounters | null) {
     this.options = options;
+    this.metrics = metrics ?? undefined;
     const allow = options.allowlist;
     const block = options.blocklist;
     this.allowSet = allow && allow.length > 0 ? new Set(allow) : null;
@@ -211,21 +219,32 @@ export class RateLimitEngine {
    * @since 1.0.0
    */
   async consumeWithKey(key: string, req: unknown = key): Promise<RateLimitConsumeResult> {
+    const m = this.metrics;
+    const t0 = m ? performance.now() : 0;
+
     if (this.options.skip?.(req) === true) {
-      return this.buildPassthroughResult(req);
+      const out = this.buildPassthroughResult(req);
+      if (m) this.recordMetricsSkip(m, key, t0);
+      return out;
     }
 
     if (this.allowSet?.has(key)) {
-      return this.buildPassthroughResult(req);
+      const out = this.buildPassthroughResult(req);
+      if (m) this.recordMetricsAllowlist(m, key, t0);
+      return out;
     }
 
     if (this.blockSet?.has(key)) {
-      return this.buildPolicyBlockResult(req, 'blocklist');
+      const out = this.buildPolicyBlockResult(req, 'blocklist');
+      if (m) this.recordMetricsPolicyBlock(m, key, t0, 'blocklist');
+      return out;
     }
 
     const penaltyActive = this.isPenaltyActive(key);
     if (penaltyActive) {
-      return this.buildPolicyBlockResult(req, 'penalty', key);
+      const out = this.buildPolicyBlockResult(req, 'penalty', key);
+      if (m) this.recordMetricsPolicyBlock(m, key, t0, 'penalty');
+      return out;
     }
 
     const grouped = isWindowOpts(this.options) ? this.options.groupedWindowStores : undefined;
@@ -235,11 +254,13 @@ export class RateLimitEngine {
     const incOpts = resolveIncrementOpts(this.options, req);
 
     if (grouped && grouped.length > 0) {
-      const g = await this.consumeGroupedWindows(key, grouped, draft);
+      const g = await this.consumeGroupedWindows(key, grouped, draft, m);
       result = g.result;
       blockedAtIndex = g.blockedAtIndex;
     } else {
+      const ts = m ? performance.now() : 0;
       result = await this.options.store.increment(key, incOpts);
+      if (m) m.recordStoreLatency(ts);
     }
 
     if (result.isBlocked && draft && !result.storeUnavailable) {
@@ -270,7 +291,7 @@ export class RateLimitEngine {
         },
         limit,
       );
-      return {
+      const draftOut: RateLimitConsumeResult = {
         totalHits: result.totalHits,
         remaining: result.remaining,
         resetTime: result.resetTime,
@@ -278,6 +299,8 @@ export class RateLimitEngine {
         headers,
         draftWouldBlock: true,
       };
+      if (m) this.recordMetricsAfterConsume(m, key, t0, draftOut);
+      return draftOut;
     }
 
     if (result.isBlocked && !result.storeUnavailable) {
@@ -291,7 +314,7 @@ export class RateLimitEngine {
       await Promise.resolve(this.options.onLimitReached(req, result));
     }
 
-    return {
+    const consumeResult: RateLimitConsumeResult = {
       ...result,
       headers,
       blockReason: result.isBlocked
@@ -300,6 +323,8 @@ export class RateLimitEngine {
           : 'rate_limit'
         : undefined,
     };
+    if (m) this.recordMetricsAfterConsume(m, key, t0, consumeResult);
+    return consumeResult;
   }
 
   private isPenaltyActive(key: string): boolean {
@@ -340,6 +365,68 @@ export class RateLimitEngine {
     }
   }
 
+  /** Only called when {@link RateLimitEngine.metrics} is set — avoids redundant `this.metrics` reads. */
+  private recordMetricsSkip(m: MetricsCounters, key: string, tStart: number): void {
+    m.totalRequests++;
+    m.skippedRequests++;
+    m.recordLatency(tStart);
+    m.recordKey(key);
+  }
+
+  private recordMetricsAllowlist(m: MetricsCounters, key: string, tStart: number): void {
+    m.totalRequests++;
+    m.allowlistedRequests++;
+    m.recordLatency(tStart);
+    m.recordKey(key);
+  }
+
+  private recordMetricsPolicyBlock(
+    m: MetricsCounters,
+    key: string,
+    tStart: number,
+    reason: 'blocklist' | 'penalty',
+  ): void {
+    m.totalRequests++;
+    m.blockedRequests++;
+    if (reason === 'blocklist') {
+      m.blockedByBlocklist++;
+    } else {
+      m.blockedByPenalty++;
+    }
+    m.recordLatency(tStart);
+    m.recordKey(key);
+    m.recordKeyBlocked(key);
+  }
+
+  private recordMetricsAfterConsume(
+    m: MetricsCounters,
+    key: string,
+    tStart: number,
+    out: RateLimitConsumeResult,
+  ): void {
+    m.totalRequests++;
+    m.recordLatency(tStart);
+    m.recordKey(key);
+    if (out.isBlocked) {
+      m.blockedRequests++;
+      m.recordKeyBlocked(key);
+      const br = out.blockReason;
+      if (br === 'rate_limit') {
+        m.blockedByRateLimit++;
+      } else if (br === 'blocklist') {
+        m.blockedByBlocklist++;
+      } else if (br === 'penalty') {
+        m.blockedByPenalty++;
+      } else if (br === 'service_unavailable') {
+        m.blockedByServiceUnavailable++;
+      } else if (out.storeUnavailable) {
+        m.blockedByServiceUnavailable++;
+      }
+    } else {
+      m.allowedRequests++;
+    }
+  }
+
   /**
    * @param draft - When true and the blocking increment is not `storeUnavailable`, rollback of
    *   prior windows is deferred to {@link RateLimitEngine.consumeWithKey} so draft mode can roll
@@ -349,11 +436,14 @@ export class RateLimitEngine {
     key: string,
     grouped: NonNullable<WindowRateLimitOptions['groupedWindowStores']>,
     draft: boolean,
+    metrics: MetricsCounters | undefined,
   ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
     const done: RateLimitResult[] = [];
     for (let i = 0; i < grouped.length; i++) {
       const g = grouped[i]!;
+      const ts = metrics ? performance.now() : 0;
       const r = await g.store.increment(key, { maxRequests: g.maxRequests });
+      if (metrics) metrics.recordStoreLatency(ts);
       done.push(r);
       if (r.isBlocked) {
         const deferRollbackToDraft = draft && !r.storeUnavailable;

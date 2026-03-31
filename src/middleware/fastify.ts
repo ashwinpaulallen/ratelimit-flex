@@ -1,11 +1,37 @@
+import type { RequestHandler } from 'express';
 import type { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
+import { MetricsManager } from '../metrics/manager.js';
 import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'fastify' {
+  interface FastifyInstance {
+    /**
+     * When {@link RateLimitOptions.metrics} is enabled: orchestrator for snapshots, history, Prometheus, and `on('metrics')`.
+     * @since 1.3.0
+     */
+    rateLimitMetrics?: MetricsManager;
+    /**
+     * When metrics are enabled: same as {@link MetricsManager.getSnapshot} (null before the first tick).
+     * @since 1.3.0
+     */
+    getMetricsSnapshot?: () => MetricsSnapshot | null;
+    /**
+     * When metrics are enabled: same as {@link MetricsManager.getHistory}.
+     * @since 1.3.0
+     */
+    getMetricsHistory?: () => MetricsSnapshot[];
+    /**
+     * When `metrics.prometheus.enabled` is true: Express-style `GET` handler for Prometheus text. `undefined` otherwise.
+     * @since 1.3.0
+     */
+    metricsEndpoint?: RequestHandler;
+  }
+
   interface FastifyRequest {
     /**
      * @description Snapshot after a successful consume. Set by {@link fastifyRateLimiter}.
@@ -47,13 +73,27 @@ function decrementStores(resolved: RateLimitOptions, key: string): void {
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
   const resolved = mergeRateLimiterOptions(options);
   warnIfMemoryStoreInCluster(resolved.store);
+  const metricsManager = new MetricsManager(resolved.metrics);
   const { onLimitReached, ...engineOptions } = resolved;
-  const engine = new RateLimitEngine(engineOptions);
+  const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
 
+  let metricsCollectorStarted = false;
+
+  if (metricsManager.isEnabled()) {
+    fastify.decorate('rateLimitMetrics', metricsManager);
+    fastify.decorate('getMetricsSnapshot', () => metricsManager.getSnapshot());
+    fastify.decorate('getMetricsHistory', () => metricsManager.getHistory());
+    fastify.decorate('metricsEndpoint', metricsManager.getPrometheusMiddleware() ?? undefined);
+    fastify.addHook('onClose', async () => {
+      await metricsManager.shutdown();
+    });
+  }
+
   fastify.addHook('onRequest', async (request, reply) => {
-    if (resolved.skip?.(request) === true) {
-      return;
+    if (!metricsCollectorStarted && metricsManager.getCounters()) {
+      metricsManager.start();
+      metricsCollectorStarted = true;
     }
 
     try {

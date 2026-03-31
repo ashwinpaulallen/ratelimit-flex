@@ -17,7 +17,10 @@ import {
   detectEnvironment,
   expressRateLimiter,
   fixedWindowDefaults,
+  Histogram,
   MemoryStore,
+  MetricsCounters,
+  MetricsManager,
   multiInstancePreset,
   publicApiPreset,
   RedisStore,
@@ -26,6 +29,7 @@ import {
   slidingWindowDefaults,
   tokenBucketDefaults,
 } from '../src/index.js';
+import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
 import { fastifyRateLimiter } from '../src/fastify.js';
 
@@ -85,6 +89,16 @@ describe('package exports', () => {
 
   it('exports Fastify plugin from subpath entry', () => {
     expect(typeof fastifyRateLimiter).toBe('function');
+  });
+
+  it('exports MetricsManager and metrics types', () => {
+    expect(MetricsManager).toBeDefined();
+    expect(MetricsCounters).toBeDefined();
+    expect(Histogram).toBeDefined();
+    const cfg: MetricsConfig = { enabled: false };
+    expect(cfg.enabled).toBe(false);
+    const snap = null as MetricsSnapshot | null;
+    expect(snap).toBeNull();
   });
 
   it('RedisErrorMode is a usable string union at compile time', () => {

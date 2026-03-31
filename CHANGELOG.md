@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.0] - 2026-03-31
+
+### Added
+
+- **Metrics & observability** — `MetricsCounters`, `MetricsCollector`, `MetricsManager`, `MetricsSnapshot`, `Histogram`, Prometheus / OpenTelemetry / callback adapters, Express and Fastify wiring (`getMetricsSnapshot`, `getMetricsHistory`, `metricsEndpoint`, `on('metrics')`).
+- **Fastify** — when metrics are enabled, `getMetricsSnapshot`, `getMetricsHistory`, and `metricsEndpoint` are decorated on the instance (alongside `rateLimitMetrics`) for parity with Express handler ergonomics.
+
+### Changed
+
+- **`MetricsConfig` validation** — `intervalMs` must be at least **1000** (warning logged if under **5000**); `topKSize` must be **1–1000**; `histogramBuckets` must be non-empty, strictly ascending, and all positive. Invalid values throw descriptive errors from `normalizeMetricsConfig`.
+- **`createRateLimiter`** return type now exposes `express` as `ExpressRateLimiterHandler` for metrics-related autocomplete.
+
+### Documentation
+
+- JSDoc expanded on metrics types, adapters (with usage examples), `Histogram`, and related APIs.
+
 ## [1.2.1] - 2026-03-31
 
 ### Fixed
