@@ -203,6 +203,34 @@ describe('draft mode', () => {
     expect((await request(app).get('/ok')).status).toBe(200);
     expect((await request(app).get('/ok')).status).toBe(200);
   });
+
+  it('draft + grouped windows rolls back every window touched (not only the blocking window)', async () => {
+    const merged = mergeRateLimiterOptions({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      draft: true,
+      limits: [
+        { windowMs: 60_000, max: 100 },
+        { windowMs: 60_000, max: 1 },
+      ],
+    });
+    const grouped = merged.groupedWindowStores!;
+    const dec0 = vi.spyOn(grouped[0]!.store, 'decrement');
+    const dec1 = vi.spyOn(grouped[1]!.store, 'decrement');
+    const engine = new RateLimitEngine(merged);
+
+    const first = await engine.consumeWithKey('draft-grouped', {});
+    expect(first.isBlocked).toBe(false);
+    expect(first.draftWouldBlock).toBeUndefined();
+    expect(dec0).not.toHaveBeenCalled();
+    expect(dec1).not.toHaveBeenCalled();
+
+    const wouldBlock = await engine.consumeWithKey('draft-grouped', {});
+    expect(wouldBlock.isBlocked).toBe(false);
+    expect(wouldBlock.draftWouldBlock).toBe(true);
+    // Blocking window is index 1; draft rollback must decrement every window 0..1, not only 1.
+    expect(dec0).toHaveBeenCalledTimes(1);
+    expect(dec1).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('RateLimitEngine blockReason', () => {

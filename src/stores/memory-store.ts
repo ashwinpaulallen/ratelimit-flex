@@ -245,12 +245,16 @@ export class MemoryStore implements RateLimitStore {
     return { totalHits, remaining, resetTime, isBlocked };
   }
 
+  /**
+   * Removes the **oldest** hit in the window (FIFO), matching the increment order used by
+   * skip-failed/skip-successful response handlers so concurrent requests undo the correct slot.
+   */
   private decrementSliding(key: string): void {
     const ts = this.sliding.get(key);
     if (!ts || ts.length === 0) {
       return;
     }
-    ts.pop();
+    ts.shift();
     if (ts.length === 0) {
       this.sliding.delete(key);
     } else {

@@ -56,44 +56,48 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
       return;
     }
 
-    const key = keyGen(request);
-    const result = await engine.consumeWithKey(key, request);
+    try {
+      const key = keyGen(request);
+      const result = await engine.consumeWithKey(key, request);
 
-    if (resolved.headers !== false) {
-      for (const [name, value] of Object.entries(result.headers)) {
-        reply.header(name, value);
+      if (resolved.headers !== false) {
+        for (const [name, value] of Object.entries(result.headers)) {
+          reply.header(name, value);
+        }
       }
-    }
 
-    if (result.isBlocked) {
-      // 503 first: Redis fail-closed. Blocklist/penalty never reach the store (engine order), so they
-      // cannot collide with storeUnavailable on the same response.
-      if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
-        await reply.status(503).send(jsonErrorBody('Service temporarily unavailable'));
+      if (result.isBlocked) {
+        // 503 first: Redis fail-closed. Blocklist/penalty never reach the store (engine order), so they
+        // cannot collide with storeUnavailable on the same response.
+        if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
+          await reply.status(503).send(jsonErrorBody('Service temporarily unavailable'));
+          return;
+        }
+        if (onLimitReached && result.blockReason === 'rate_limit') {
+          await Promise.resolve(onLimitReached(request, result));
+        }
+        const status =
+          result.blockReason === 'blocklist'
+            ? (resolved.blocklistStatusCode ?? 403)
+            : (resolved.statusCode ?? 429);
+        const msg =
+          result.blockReason === 'blocklist'
+            ? (resolved.blocklistMessage ?? 'Forbidden')
+            : (resolved.message ?? 'Too many requests');
+        await reply.status(status).send(jsonErrorBody(msg));
         return;
       }
-      if (onLimitReached && result.blockReason === 'rate_limit') {
-        await Promise.resolve(onLimitReached(request, result));
+
+      request.rateLimit = toRateLimitInfo(resolved, result, request);
+
+      const onFailed = resolved.skipFailedRequests === true;
+      const onSuccess = resolved.skipSuccessfulRequests === true;
+      if (onFailed || onSuccess) {
+        request.rateLimitKey = key;
+        request.rateLimitDecrementFlags = { onFailed, onSuccess };
       }
-      const status =
-        result.blockReason === 'blocklist'
-          ? (resolved.blocklistStatusCode ?? 403)
-          : (resolved.statusCode ?? 429);
-      const msg =
-        result.blockReason === 'blocklist'
-          ? (resolved.blocklistMessage ?? 'Forbidden')
-          : (resolved.message ?? 'Too many requests');
-      await reply.status(status).send(jsonErrorBody(msg));
-      return;
-    }
-
-    request.rateLimit = toRateLimitInfo(resolved, result, request);
-
-    const onFailed = resolved.skipFailedRequests === true;
-    const onSuccess = resolved.skipSuccessfulRequests === true;
-    if (onFailed || onSuccess) {
-      request.rateLimitKey = key;
-      request.rateLimitDecrementFlags = { onFailed, onSuccess };
+    } catch (err) {
+      return reply.send(err);
     }
   });
 
@@ -119,6 +123,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
  *
  * @description Same semantics as {@link expressRateLimiter}; import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
  * @param options - Partial {@link RateLimitOptions} (merged with defaults inside the plugin).
+ * @throws Errors from `keyGenerator`, `consumeWithKey`, or `onLimitReached` are passed to the Fastify error pipeline (`reply.send(err)`), matching Express `next(err)`.
  * @example
  * ```ts
  * import Fastify from 'fastify';

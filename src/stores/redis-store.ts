@@ -171,8 +171,9 @@ local reset_at = oldest_score + window_ms
 return { count, blocked, reset_at }
 `;
 
+/** Pop oldest by score (FIFO vs increment order); pairs with ZADD score=now per hit. */
 const LUA_SLIDING_DECR = `
-redis.call('ZPOPMAX', KEYS[1])
+redis.call('ZPOPMIN', KEYS[1])
 return 1
 `;
 

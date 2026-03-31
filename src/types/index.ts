@@ -82,6 +82,7 @@ export interface RateLimitStore {
 
   /**
    * @description Undo one hit when middleware “skip failed/successful” options apply after the response.
+   * Sliding-window stores remove the **oldest** hit (FIFO), matching completion order under concurrency.
    * @param key - Same key passed to {@link RateLimitStore.increment}.
    * @returns Promise that settles when decrement is complete.
    */

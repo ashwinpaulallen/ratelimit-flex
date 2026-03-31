@@ -229,27 +229,28 @@ export class RateLimitEngine {
     }
 
     const grouped = isWindowOpts(this.options) ? this.options.groupedWindowStores : undefined;
+    const draft = this.options.draft === true;
     let result: RateLimitResult;
     let blockedAtIndex: number | undefined;
     const incOpts = resolveIncrementOpts(this.options, req);
 
     if (grouped && grouped.length > 0) {
-      const g = await this.consumeGroupedWindows(key, grouped);
+      const g = await this.consumeGroupedWindows(key, grouped, draft);
       result = g.result;
       blockedAtIndex = g.blockedAtIndex;
     } else {
       result = await this.options.store.increment(key, incOpts);
     }
 
-    const draft = this.options.draft === true;
-
     if (result.isBlocked && draft && !result.storeUnavailable) {
       if (grouped && grouped.length > 0 && blockedAtIndex !== undefined) {
-        const slot = grouped[blockedAtIndex];
-        if (slot !== undefined) {
-          await slot.store.decrement(key).catch(() => {
-            /* ignore */
-          });
+        for (let k = 0; k <= blockedAtIndex; k++) {
+          const slot = grouped[k];
+          if (slot !== undefined) {
+            await slot.store.decrement(key).catch(() => {
+              /* ignore */
+            });
+          }
         }
       } else if (!grouped || grouped.length === 0) {
         await this.options.store.decrement(key).catch(() => {
@@ -339,9 +340,15 @@ export class RateLimitEngine {
     }
   }
 
+  /**
+   * @param draft - When true and the blocking increment is not `storeUnavailable`, rollback of
+   *   prior windows is deferred to {@link RateLimitEngine.consumeWithKey} so draft mode can roll
+   *   back **all** windows `0..blockedAtIndex` in one place (avoids leaving earlier windows incremented).
+   */
   private async consumeGroupedWindows(
     key: string,
     grouped: NonNullable<WindowRateLimitOptions['groupedWindowStores']>,
+    draft: boolean,
   ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
     const done: RateLimitResult[] = [];
     for (let i = 0; i < grouped.length; i++) {
@@ -349,11 +356,14 @@ export class RateLimitEngine {
       const r = await g.store.increment(key, { maxRequests: g.maxRequests });
       done.push(r);
       if (r.isBlocked) {
-        for (let j = 0; j < i; j++) {
-          const prev = grouped[j]!;
-          await prev.store.decrement(key).catch(() => {
-            /* ignore */
-          });
+        const deferRollbackToDraft = draft && !r.storeUnavailable;
+        if (!deferRollbackToDraft) {
+          for (let j = 0; j < i; j++) {
+            const prev = grouped[j]!;
+            await prev.store.decrement(key).catch(() => {
+              /* ignore */
+            });
+          }
         }
         return { result: this.mergeGroupedResults(done), blockedAtIndex: i };
       }

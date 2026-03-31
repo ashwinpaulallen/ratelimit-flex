@@ -2,7 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.2.0] - 2026-03-30
+## [1.2.1] - 2026-03-31
+
+### Fixed
+
+- **Draft mode with grouped windows (`limits`)** — when `draft: true` and a later window blocked, only that window’s increment was rolled back; earlier windows that had already been incremented are now decremented as well, so draft probes do not leak counts on looser windows.
+- **Sliding-window `decrement`** — `MemoryStore` and `RedisStore` now remove the **oldest** hit (FIFO), not the newest, so `skipFailedRequests` / `skipSuccessfulRequests` align with the request that finished under concurrency.
+- **Fastify middleware** — `onRequest` uses an explicit `try`/`catch` and `reply.send(err)` to match Express error handling, so failures from `keyGenerator`, the engine, or `onLimitReached` go through the same explicit path.
+
+## [1.2.0] - 2026-03-31
 
 ### Added
 
