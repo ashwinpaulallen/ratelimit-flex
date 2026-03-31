@@ -27,6 +27,7 @@ export const VERSION = '1.3.0';
 export { expressRateLimiter, type ExpressRateLimiterHandler } from './middleware/express.js';
 
 export {
+  assertHistogramBucketBounds,
   CallbackAdapter,
   Histogram,
   MetricsCollector,
@@ -39,8 +40,6 @@ export {
   type OpenTelemetryAdapterOptions,
   type PrometheusAdapterOptions,
 } from './metrics/index.js';
-
-export type { MetricsConfig, MetricsSnapshot } from './types/metrics.js';
 
 /**
  * Core engine, default key extraction, and engine factory.

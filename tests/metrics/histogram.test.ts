@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { Histogram } from '../../src/metrics/histogram.js';
+import { Histogram, assertHistogramBucketBounds } from '../../src/metrics/histogram.js';
 
 describe('Histogram', () => {
+  it('throws when bucket bounds are empty, unsorted, duplicate, or non-positive', () => {
+    expect(() => new Histogram([])).toThrow(/non-empty/);
+    expect(() => new Histogram([10, 5, 20])).toThrow(/ascending/);
+    expect(() => new Histogram([1, 1, 2])).toThrow(/ascending/);
+    expect(() => new Histogram([0, 1])).toThrow(/> 0/);
+  });
+
+  it('assertHistogramBucketBounds uses label in error messages', () => {
+    expect(() => assertHistogramBucketBounds([], 'metrics.histogramBuckets')).toThrow(/metrics\.histogramBuckets/);
+  });
+
   it('places values into correct buckets', () => {
     const h = new Histogram([0.1, 0.5, 1, 2]);
     h.observe(0.05);

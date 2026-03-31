@@ -1,3 +1,4 @@
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { NextFunction, Request, Response } from 'express';
 import type { Registry } from 'prom-client';
 import { CallbackAdapter } from './adapters/callback-adapter.js';
@@ -104,6 +105,19 @@ export class MetricsManager {
 
   getPrometheusMiddleware(): ((req: Request, res: Response, next: NextFunction) => void) | null {
     return this.prometheusAdapter?.metricsEndpoint() ?? null;
+  }
+
+  /**
+   * Native Fastify handler for `GET /metrics` (Prometheus text exposition). Use with
+   * `app.get('/metrics', app.fastifyMetricsRoute)` when the Fastify plugin decorates it.
+   * `null` when `metrics.prometheus.enabled` is not set — use {@link getPrometheusMiddleware} for Express instead.
+   */
+  getPrometheusFastifyHandler(): ((request: FastifyRequest, reply: FastifyReply) => Promise<void>) | null {
+    const adapter = this.prometheusAdapter;
+    if (adapter === null) return null;
+    return async (_request: FastifyRequest, reply: FastifyReply) => {
+      await reply.type('text/plain; version=0.0.4; charset=utf-8').send(adapter.getMetricsText());
+    };
   }
 
   on(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): void {

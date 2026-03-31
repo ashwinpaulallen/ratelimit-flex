@@ -1,6 +1,50 @@
 /**
+ * Validates upper-bound arrays for {@link Histogram} and {@link MetricsConfig.histogramBuckets}
+ * (non-empty, finite, strictly positive, strictly ascending).
+ *
+ * @param label - Prefix for error messages (`metrics.histogramBuckets` vs `Histogram bucket bounds`).
+ * @throws Error when validation fails.
+ * @since 1.3.0
+ */
+export function assertHistogramBucketBounds(
+  buckets: readonly number[],
+  label = 'Histogram bucket bounds',
+): void {
+  if (!Array.isArray(buckets) || buckets.length === 0) {
+    throw new Error(
+      `ratelimit-flex: ${label} must be a non-empty array of positive numbers in strictly ascending order.`,
+    );
+  }
+  for (let i = 0; i < buckets.length; i++) {
+    const v = buckets[i];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+      throw new Error(
+        `ratelimit-flex: ${label} must contain only finite numbers > 0 (got ${String(v)} at index ${i}).`,
+      );
+    }
+  }
+  for (let i = 1; i < buckets.length; i++) {
+    if (buckets[i]! <= buckets[i - 1]!) {
+      throw new Error(
+        `ratelimit-flex: ${label} must be sorted in strictly ascending order (invalid at index ${i}).`,
+      );
+    }
+  }
+}
+
+/**
  * Fixed-bucket latency histogram: O(log b) {@link Histogram.observe} via binary search.
  * Bucket counts use a pre-allocated buffer — no allocations after construction.
+ *
+ * **Boundary semantics (not Prometheus `le`):** this class uses **right-open** finite intervals
+ * aligned to the upper bounds you pass. An observation `v` is assigned to the **first** bucket
+ * whose upper bound is **strictly greater** than `v` (equivalently: slot `i` holds
+ * `buckets[i - 1] <= v < buckets[i]`, treating `buckets[-1]` as `0` for non‑negative latencies).
+ * So with `buckets = [1, 5, 10]`, the value **`5` falls in the `[5, 10)` slot**, not the slot whose
+ * label is `5`. **Prometheus** histograms use cumulative **`le`** labels (each boundary counts
+ * `observations <= le`); that model is different. The package’s {@link PrometheusAdapter} does **not**
+ * use this class for exposition — it applies `<=` when mapping samples to Prometheus buckets. If you
+ * export {@link Histogram} counts to Prometheus yourself, re-bucket or interpret boundaries explicitly.
  *
  * @example
  * ```ts
@@ -22,14 +66,15 @@ export class Histogram {
   private _sum = 0;
 
   /**
-   * @param buckets - Strictly ascending upper bounds (ms). Intervals are
-   *   `[buckets[i-1], buckets[i])` with `buckets[-1]` treated as 0 for the first bucket when values are non-negative.
-   *   Index `i` counts values `v` with all `buckets[j] <= v` for `j < i` and `v < buckets[i]` (or overflow when `i === buckets.length`).
+   * @param buckets - Strictly ascending upper bounds (ms); must pass {@link assertHistogramBucketBounds}
+   *   (same rules as `metrics.histogramBuckets`). Slot `i` (for `i < length`) holds counts for
+   *   `buckets[i - 1] <= v < buckets[i]` (with `buckets[-1] = 0` for typical non‑negative samples);
+   *   the last slot is overflow `v >= buckets[length - 1]`. See class **Boundary semantics** for Prometheus.
    */
   constructor(buckets: readonly number[]) {
-    const sorted = buckets.length === 0 ? [] : [...buckets].sort((a, b) => a - b);
-    this._buckets = sorted;
-    this.counts = new Float64Array(sorted.length + 1);
+    assertHistogramBucketBounds(buckets);
+    this._buckets = Object.freeze([...buckets]);
+    this.counts = new Float64Array(this._buckets.length + 1);
   }
 
   get buckets(): readonly number[] {
@@ -47,7 +92,8 @@ export class Histogram {
   }
 
   /**
-   * Increment the bucket for `value` in O(log b) time.
+   * Increment the bucket for `value` in O(log b) time. Uses **strict** upper bounds
+   * (first `buckets[i] > value`); see class docs — not the same as Prometheus `le`.
    */
   observe(value: number): void {
     const idx = bucketIndex(value, this._buckets);
@@ -57,8 +103,9 @@ export class Histogram {
   }
 
   /**
-   * All buckets with counts and running cumulative counts.
-   * (Allocates the result array — the histogram storage itself does not grow.)
+   * All buckets with per-bucket `count`, running `cumulative`, and `bucket` set to that row’s
+   * **upper bound** label (or `+Inf` for overflow). Cumulative here is for this histogram’s layout,
+   * not Prometheus cumulative `le` series.
    */
   getDistribution(): { bucket: number; count: number; cumulative: number }[] {
     const out: { bucket: number; count: number; cumulative: number }[] = [];
@@ -102,8 +149,9 @@ export class Histogram {
 }
 
 /**
- * Smallest `i` in `[0, buckets.length]` with `value < buckets[i]` (first upper bound strictly above `value`);
- * if none, `buckets.length` (overflow bucket).
+ * Index of the bucket that receives `value`: smallest `i` with `value < buckets[i]`.
+ * Equivalently, right-open slabs `[\_, buckets[i])` — values **equal** to a boundary fall in the **next** slab,
+ * unlike Prometheus `le` histograms (see {@link Histogram} class doc).
  */
 function bucketIndex(value: number, buckets: readonly number[]): number {
   let lo = 0;

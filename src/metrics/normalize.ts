@@ -1,4 +1,5 @@
 import { MetricsCounters } from './counters.js';
+import { assertHistogramBucketBounds } from './histogram.js';
 import type { MetricsConfig } from '../types/metrics.js';
 
 const DEFAULT_INTERVAL_MS = 10_000;
@@ -39,27 +40,7 @@ export function validateMetricsConfig(config: MetricsConfig): void {
   }
 
   if (histogramBuckets !== undefined) {
-    const b = histogramBuckets;
-    if (!Array.isArray(b) || b.length === 0) {
-      throw new Error(
-        'ratelimit-flex: metrics.histogramBuckets must be a non-empty array of positive numbers in ascending order.',
-      );
-    }
-    for (let i = 0; i < b.length; i++) {
-      const v = b[i];
-      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
-        throw new Error(
-          `ratelimit-flex: metrics.histogramBuckets must contain only finite numbers > 0 (got ${String(v)} at index ${i}).`,
-        );
-      }
-    }
-    for (let i = 1; i < b.length; i++) {
-      if (b[i]! <= b[i - 1]!) {
-        throw new Error(
-          `ratelimit-flex: metrics.histogramBuckets must be sorted in strictly ascending order (invalid at index ${i}).`,
-        );
-      }
-    }
+    assertHistogramBucketBounds(histogramBuckets, 'metrics.histogramBuckets');
   }
 }
 

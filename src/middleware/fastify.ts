@@ -30,6 +30,14 @@ declare module 'fastify' {
      * @since 1.3.0
      */
     metricsEndpoint?: RequestHandler;
+    /**
+     * When `metrics.prometheus.enabled` is true: native Fastify handler for `GET /metrics` (no Express). `undefined` otherwise.
+     * @since 1.3.0
+     */
+    fastifyMetricsRoute?: (
+      request: import('fastify').FastifyRequest,
+      reply: import('fastify').FastifyReply,
+    ) => Promise<void>;
   }
 
   interface FastifyRequest {
@@ -85,6 +93,10 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     fastify.decorate('getMetricsSnapshot', () => metricsManager.getSnapshot());
     fastify.decorate('getMetricsHistory', () => metricsManager.getHistory());
     fastify.decorate('metricsEndpoint', metricsManager.getPrometheusMiddleware() ?? undefined);
+    const fastifyMetricsRoute = metricsManager.getPrometheusFastifyHandler();
+    if (fastifyMetricsRoute !== null) {
+      fastify.decorate('fastifyMetricsRoute', fastifyMetricsRoute);
+    }
     fastify.addHook('onClose', async () => {
       await metricsManager.shutdown();
     });
@@ -161,7 +173,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
 /**
  * Fastify plugin (`fastify-plugin`): rate limiting via `onRequest` / `onResponse` hooks.
  *
- * @description Same semantics as {@link expressRateLimiter}; import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
+ * @description Same semantics as {@link expressRateLimiter} (including `metrics`, snapshots, Prometheus / OTel when configured). Import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
  * @param options - Partial {@link RateLimitOptions} (merged with defaults inside the plugin).
  * @throws Errors from `keyGenerator`, `consumeWithKey`, or `onLimitReached` are passed to the Fastify error pipeline (`reply.send(err)`), matching Express `next(err)`.
  * @example

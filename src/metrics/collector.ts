@@ -127,12 +127,18 @@ export class MetricsCollector extends EventEmitter {
     this.pushSeries(this.intervalBlockRate, instBr);
 
     const latMm = minMaxMean(lat);
-    const [p50, p95, p99] = percentilesQuick(lat, [50, 95, 99]);
+    const latPct = percentilesQuick(lat, [50, 95, 99]);
+    const p50 = latPct[0]!;
+    const p95 = latPct[1]!;
+    const p99 = latPct[2]!;
     const stdDev = standardDeviation(lat, latMm.mean);
     this.pushSeries(this.intervalLatencyMean, latMm.mean);
 
     const stMm = minMaxMean(st);
-    const [stP50, stP95, stP99] = percentilesQuick(st, [50, 95, 99]);
+    const stPct = percentilesQuick(st, [50, 95, 99]);
+    const stP50 = stPct[0]!;
+    const stP95 = stPct[1]!;
+    const stP99 = stPct[2]!;
 
     const durationMs = Math.max(1, this.deltaTotals.length) * this.intervalMs;
     const sumT = sumArray(this.deltaTotals);
