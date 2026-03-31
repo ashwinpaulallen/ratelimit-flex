@@ -6,39 +6,75 @@ import type {
 import { RateLimitStrategy } from '../types/index.js';
 import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
-/** Options for window-based strategies (sliding / fixed). */
+/**
+ * Constructor options for window-based strategies (sliding or fixed).
+ *
+ * @description Use with {@link RateLimitStrategy.SLIDING_WINDOW} or {@link RateLimitStrategy.FIXED_WINDOW}.
+ * @see {@link MemoryStoreTokenBucketOptions}
+ * @see {@link RedisStore} — distributed alternative
+ * @since 1.0.0
+ */
 export type MemoryStoreWindowOptions = {
+  /**
+   * @description Window vs fixed counter.
+   */
   strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
-  /** Length of the rate-limit window in milliseconds. */
+  /**
+   * @description Length of the rate-limit window in milliseconds (sanitized by the constructor).
+   */
   windowMs: number;
-  /** Maximum number of requests allowed per window. */
+  /**
+   * @description Maximum requests allowed per window (sanitized by the constructor).
+   */
   maxRequests: number;
 };
 
-/** Options for the token-bucket strategy. */
+/**
+ * Constructor options for the token-bucket strategy.
+ *
+ * @description Use with {@link RateLimitStrategy.TOKEN_BUCKET}.
+ * @see {@link MemoryStoreWindowOptions}
+ * @since 1.0.0
+ */
 export type MemoryStoreTokenBucketOptions = {
+  /** @description Must be {@link RateLimitStrategy.TOKEN_BUCKET}. */
   strategy: RateLimitStrategy.TOKEN_BUCKET;
-  /** Tokens added on each refill interval. */
+  /**
+   * @description Tokens added on each refill interval.
+   */
   tokensPerInterval: number;
-  /** Refill interval length in milliseconds. */
+  /**
+   * @description Refill interval length in milliseconds (also drives cleanup cadence).
+   */
   interval: number;
-  /** Maximum tokens (burst capacity). */
+  /**
+   * @description Maximum tokens (burst capacity).
+   */
   bucketSize: number;
 };
 
+/**
+ * Discriminated union of {@link MemoryStore} constructor options.
+ *
+ * @since 1.0.0
+ */
 export type MemoryStoreOptions = MemoryStoreWindowOptions | MemoryStoreTokenBucketOptions;
 
 type FixedEntry = { count: number; resetTime: number };
 type BucketEntry = { tokens: number; lastRefill: number };
 
 /**
- * In-memory {@link RateLimitStore} with per-strategy algorithms.
+ * In-process {@link RateLimitStore} (not shared across Node processes).
  *
- * - **Sliding window**: keeps request timestamps per key; counts only those inside `windowMs`.
- * - **Fixed window**: stores a counter and window end time; resets when the window expires.
- * - **Token bucket**: refills tokens on a schedule, then consumes one token per request.
+ * @description
+ * - **Sliding window**: request timestamps per key; counts hits inside `windowMs`.
+ * - **Fixed window**: counter + window end; resets when the slice expires.
+ * - **Token bucket**: refills tokens on a schedule; consumes one token per allowed hit.
  *
- * A background timer runs periodically to drop stale keys / trim old timestamps.
+ * A background timer periodically purges stale keys / trims timestamps (`unref` so it does not keep the process alive alone).
+ *
+ * @see {@link RedisStore} — use when multiple instances must share counters
+ * @since 1.0.0
  */
 export class MemoryStore implements RateLimitStore {
   private readonly strategy: RateLimitStrategy;
@@ -67,6 +103,20 @@ export class MemoryStore implements RateLimitStore {
 
   private cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
+  /**
+   * @description Creates a store for one strategy; dispatches to sliding, fixed, or token-bucket internals.
+   * @param options - Window or token-bucket configuration (see {@link MemoryStoreOptions}).
+   * @example
+   * ```ts
+   * const store = new MemoryStore({
+   *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+   *   windowMs: 60_000,
+   *   maxRequests: 100,
+   * });
+   * ```
+   * @see {@link MemoryStore.shutdown} — stop the background timer and clear maps
+   * @since 1.0.0
+   */
   constructor(options: MemoryStoreOptions) {
     this.strategy = options.strategy;
 
@@ -101,7 +151,13 @@ export class MemoryStore implements RateLimitStore {
     }
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Client identifier.
+   * @param options - Optional `{ maxRequests }` override for sliding/fixed window.
+   * @returns Synchronous promise with {@link RateLimitResult}.
+   * @throws If strategy is not handled (should be unreachable).
+   */
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
@@ -117,7 +173,11 @@ export class MemoryStore implements RateLimitStore {
     }
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Same key used for {@link MemoryStore.increment}.
+   * @throws If strategy is not handled (should be unreachable).
+   */
   async decrement(key: string): Promise<void> {
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
@@ -137,7 +197,10 @@ export class MemoryStore implements RateLimitStore {
     return Promise.resolve();
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Key to clear from all internal maps.
+   */
   async reset(key: string): Promise<void> {
     this.sliding.delete(key);
     this.fixed.delete(key);
@@ -145,7 +208,10 @@ export class MemoryStore implements RateLimitStore {
     return Promise.resolve();
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @description Clears the cleanup timer and empties all maps.
+   */
   async shutdown(): Promise<void> {
     if (this.cleanupTimer !== undefined) {
       clearInterval(this.cleanupTimer);

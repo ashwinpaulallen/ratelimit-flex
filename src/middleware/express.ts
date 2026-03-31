@@ -1,11 +1,15 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
-    /** Populated by {@link expressRateLimiter} after a successful consume (not blocked). */
+    /**
+     * @description Snapshot after a successful consume (not blocked). Set by {@link expressRateLimiter}.
+     * @default undefined
+     */
     rateLimit?: RateLimitInfo;
   }
 }
@@ -32,15 +36,30 @@ function decrementStores(resolved: RateLimitOptions, key: string): void {
 }
 
 /**
- * Express middleware factory. One {@link RateLimitEngine} and store are created per call (singleton for that middleware instance).
+ * Express middleware: merges options, warns if {@link MemoryStore} is used in a likely multi-instance environment, then runs {@link RateLimitEngine.consumeWithKey} per request.
  *
+ * @description
+ * - Blocked responses: **429** (rate limit), **403** (blocklist), **503** (Redis fail-closed / service unavailable).
+ * - On allow: sets `req.rateLimit` and optional `X-RateLimit-*` headers.
+ * @param options - Partial {@link RateLimitOptions}; `store` defaults to a new {@link MemoryStore} when omitted (unless `limits` is used).
+ * @returns Express `RequestHandler`.
  * @example
  * ```ts
- * app.use(expressRateLimiter({ maxRequests: 50 }));
+ * import express from 'express';
+ * import { expressRateLimiter } from 'ratelimit-flex';
+ *
+ * const app = express();
+ * app.use(expressRateLimiter({ maxRequests: 50, windowMs: 60_000 }));
  * ```
+ * @throws Errors from `keyGenerator` or `onLimitReached` propagate via `next(err)`.
+ * @see {@link fastifyRateLimiter}
+ * @see {@link RateLimitEngine}
+ * @see {@link warnIfMemoryStoreInCluster}
+ * @since 1.0.0
  */
 export function expressRateLimiter(options: Partial<RateLimitOptions>): RequestHandler {
   const resolved = mergeRateLimiterOptions(options);
+  warnIfMemoryStoreInCluster(resolved.store);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
