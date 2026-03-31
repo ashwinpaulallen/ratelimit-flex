@@ -16,6 +16,7 @@ export type RedisStoreConnectionOptions =
       client: RedisLikeClient;
       /** @description Disallow `url` on this branch. */
       url?: never;
+      /**
        * @description Redis key prefix for this store.
        * @default `"rlf:"` (inside {@link RedisStore})
        */
