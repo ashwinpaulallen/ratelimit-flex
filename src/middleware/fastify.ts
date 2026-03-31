@@ -2,17 +2,28 @@ import type { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
 import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
-    /** Populated by {@link fastifyRateLimiter} after a successful consume (not blocked). */
+    /**
+     * @description Snapshot after a successful consume. Set by {@link fastifyRateLimiter}.
+     * @default undefined
+     */
     rateLimit?: RateLimitInfo;
-    /** Internal: storage key for optional response-based decrement. */
+    /**
+     * @description Internal: key for optional decrement on `onResponse`.
+     * @default undefined
+     */
     rateLimitKey?: string;
-    /** Internal: when to consider decrement on `onResponse`. */
+    /**
+     * @description Internal: which response outcomes trigger {@link RateLimitStore.decrement}.
+     */
     rateLimitDecrementFlags?: {
+      /** @description Decrement when HTTP status is 400 or greater. */
       onFailed: boolean;
+      /** @description Decrement when HTTP status is less than 400. */
       onSuccess: boolean;
     };
   }
@@ -35,6 +46,7 @@ function decrementStores(resolved: RateLimitOptions, key: string): void {
 
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
   const resolved = mergeRateLimiterOptions(options);
+  warnIfMemoryStoreInCluster(resolved.store);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
@@ -103,8 +115,21 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
 };
 
 /**
- * Fastify plugin (wrapped with `fastify-plugin` for correct encapsulation).
- * Registers `onRequest` / `onResponse` hooks; one {@link RateLimitEngine} and store per registration.
+ * Fastify plugin (`fastify-plugin`): rate limiting via `onRequest` / `onResponse` hooks.
+ *
+ * @description Same semantics as {@link expressRateLimiter}; import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
+ * @param options - Partial {@link RateLimitOptions} (merged with defaults inside the plugin).
+ * @example
+ * ```ts
+ * import Fastify from 'fastify';
+ * import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+ *
+ * const app = Fastify();
+ * await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
+ * ```
+ * @see {@link expressRateLimiter}
+ * @see {@link RateLimitEngine}
+ * @since 1.0.0
  */
 export const fastifyRateLimiter = fp(plugin, {
   name: 'ratelimit-flex',

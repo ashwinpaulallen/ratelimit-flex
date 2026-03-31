@@ -14,23 +14,53 @@ import type {
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 
-/** Result of {@link RateLimitEngine.consume} including standard rate-limit headers. */
+/**
+ * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
+ *
+ * @description Extends {@link RateLimitResult} with standard rate-limit headers and block metadata.
+ * @see {@link RateLimitEngine}
+ * @since 1.0.0
+ */
 export interface RateLimitConsumeResult extends RateLimitResult {
+  /**
+   * @description `X-RateLimit-*` and optional `Retry-After` when headers are enabled.
+   */
   headers: Record<string, string>;
-  /** When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked. */
+  /**
+   * @description When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked.
+   * @default undefined
+   */
   draftWouldBlock?: boolean;
-  /** Why the request was blocked (when {@link RateLimitResult.isBlocked}). */
+  /**
+   * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
+   * @default undefined when allowed
+   */
   blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
 }
 
-/** Options for {@link createRateLimiter}: `store` is optional — a {@link MemoryStore} is created when omitted. */
+/**
+ * Input for {@link createRateLimiter} (engine factory): `store` is optional.
+ *
+ * @description If `store` is omitted, a {@link MemoryStore} is synthesized from strategy fields.
+ * @see {@link RateLimitEngine}
+ * @since 1.0.0
+ */
 export type RateLimiterConfigInput =
   | (Omit<WindowRateLimitOptions, 'store'> & { store?: RateLimitStore })
   | (Omit<TokenBucketRateLimitOptions, 'store'> & { store?: RateLimitStore });
 
 /**
- * Default key extractor: uses `req.ip`, then `socket.remoteAddress`, else `"unknown"`.
- * Strings are returned as-is so you can pass a precomputed key.
+ * Default HTTP key extractor: `req.ip`, then `socket.remoteAddress`, else `"unknown"`.
+ *
+ * @description If `req` is a string, returns it unchanged (precomputed key).
+ * @param req - Framework request or string key.
+ * @returns Stable string key for {@link RateLimitStore}.
+ * @example
+ * ```ts
+ * defaultKeyGenerator({ ip: '198.51.100.1' }); // '198.51.100.1'
+ * ```
+ * @see {@link RateLimitOptionsBase.keyGenerator}
+ * @since 1.0.0
  */
 export function defaultKeyGenerator(req: unknown): string {
   if (typeof req === 'string') {
@@ -100,14 +130,30 @@ function resolveIncrementOpts(
 }
 
 /**
- * Build a {@link RateLimitEngine} with optional in-memory store when `store` is omitted.
+ * Builds a {@link RateLimitEngine} with an optional synthesized {@link MemoryStore} when `store` is omitted.
+ *
+ * @description Re-exported from the package entry as `createRateLimitEngine`.
+ * @param options - Window or token-bucket config; `store` optional.
+ * @returns A configured {@link RateLimitEngine}.
+ * @example
+ * ```ts
+ * const engine = createRateLimiter({ maxRequests: 50, windowMs: 60_000 });
+ * const result = await engine.consume(req);
+ * ```
+ * @see {@link RateLimitEngine}
+ * @since 1.0.0
  */
 export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEngine {
   return new RateLimitEngine(resolveOptions(options));
 }
 
 /**
- * Orchestrates key extraction, store increments, header generation, and limit callbacks.
+ * Core rate limiting orchestrator (policy + store + headers).
+ *
+ * @description Used by Express/Fastify middleware and for non-HTTP pipelines. Applies allow/block lists, penalty box, draft mode, then {@link RateLimitStore.increment}.
+ * @see {@link MemoryStore}
+ * @see {@link RedisStore}
+ * @since 1.0.0
  */
 export class RateLimitEngine {
   private readonly options: RateLimitOptions;
@@ -120,6 +166,20 @@ export class RateLimitEngine {
 
   private readonly violationTimestamps = new Map<string, number[]>();
 
+  /**
+   * @description Builds lookup sets for allow/block lists; does not connect to Redis.
+   * @param options - Fully resolved {@link RateLimitOptions} (including `store`).
+   * @example
+   * ```ts
+   * const engine = new RateLimitEngine({
+   *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+   *   windowMs: 60_000,
+   *   maxRequests: 100,
+   *   store: myStore,
+   * });
+   * ```
+   * @since 1.0.0
+   */
   constructor(options: RateLimitOptions) {
     this.options = options;
     const allow = options.allowlist;
@@ -130,7 +190,11 @@ export class RateLimitEngine {
 
   /**
    * Applies rate limiting for an incoming request-like value.
-   * Uses {@link RateLimitOptionsBase.keyGenerator} (or {@link defaultKeyGenerator}) to derive the storage key.
+   *
+   * @description Uses {@link RateLimitOptionsBase.keyGenerator} or {@link defaultKeyGenerator} to derive the storage key.
+   * @param req - Framework request or arbitrary value passed to `keyGenerator`.
+   * @returns {@link RateLimitConsumeResult} with headers and block metadata.
+   * @since 1.0.0
    */
   async consume(req: unknown): Promise<RateLimitConsumeResult> {
     const key = (this.options.keyGenerator ?? defaultKeyGenerator)(req);
@@ -139,7 +203,12 @@ export class RateLimitEngine {
 
   /**
    * Rate limit using a precomputed storage key (skips `keyGenerator`).
-   * Pass the same `req` for `onLimitReached` / `skip` callbacks when applicable.
+   *
+   * @description Use when the key is computed upstream (e.g. API gateway). Pass the same `req` for callbacks.
+   * @param key - Storage key string.
+   * @param req - Original request for `onLimitReached`, `skip`, penalty, draft hooks (defaults to `key`).
+   * @returns {@link RateLimitConsumeResult}.
+   * @since 1.0.0
    */
   async consumeWithKey(key: string, req: unknown = key): Promise<RateLimitConsumeResult> {
     if (this.options.skip?.(req) === true) {

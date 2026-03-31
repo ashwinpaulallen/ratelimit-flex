@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.0] - 2026-03-30
+
+### Added
+
+- **Presets** (`singleInstancePreset`, `multiInstancePreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`) — opinionated `Partial<RateLimitOptions>` for common deployments; `apiKeyHeaderKeyGenerator` for gateway-style API keys.
+- **`createStore`**, **`CreateStoreOptions`**, **`RedisStoreConnectionOptions`** — factory for `MemoryStore` or `RedisStore` with discriminated unions (window vs token bucket; Redis `client` xor `url`).
+- **`detectEnvironment`**, **`EnvironmentInfo`** — best-effort deployment hints (Kubernetes, Docker, cluster, PM2 markers) and `recommended: 'memory' | 'redis'`.
+- **`warnIfMemoryStoreInCluster`** (via Express/Fastify) — one-time stderr warning when `MemoryStore` is used in a likely multi-instance environment. Suppress with `RATELIMIT_FLEX_NO_MEMORY_WARN=1` or `true`.
+
+### Documentation
+
+- **README** — restructured (deployment guide, presets, Redis failure handling, configuration tables, migration notes, API reference).
+- **JSDoc** — expanded on public types, stores, middleware, engine, presets, `createStore`, `detectEnvironment`, and package entry exports for IntelliSense.
+
+### Tests
+
+- **Presets** — unit and Express integration tests.
+- **Exports** — `tests/exports.test.ts` validates main and `fastify` entry exports resolve at runtime.
+
 ## [1.1.0] - 2026-03-30
 
 ### Added
@@ -22,6 +41,7 @@ All notable changes to this project are documented in this file.
 ## [1.0.0] - 2026-03-27
 
 ### Added
+
 - Initial public release of `ratelimit-flex`.
 - Rate limiting strategies: sliding window, fixed window, and token bucket.
 - Express middleware and Fastify plugin integrations.

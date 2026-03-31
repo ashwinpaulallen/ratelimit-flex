@@ -6,65 +6,137 @@ import type {
 import { RateLimitStrategy } from '../types/index.js';
 import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
-/** Window-based strategies (sliding / fixed). */
+/**
+ * Strategy options for sliding or fixed window when using {@link RedisStore}.
+ *
+ * @since 1.0.0
+ */
 export type RedisStoreWindowOptions = {
+  /** @description Must be {@link RateLimitStrategy.SLIDING_WINDOW} or {@link RateLimitStrategy.FIXED_WINDOW}. */
   strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+  /**
+   * @description Window length in milliseconds (sanitized in the constructor).
+   */
   windowMs: number;
+  /**
+   * @description Max requests per window (sanitized in the constructor).
+   */
   maxRequests: number;
 };
 
-/** Token-bucket strategy. */
+/**
+ * Strategy options for token bucket when using {@link RedisStore}.
+ *
+ * @since 1.0.0
+ */
 export type RedisStoreTokenBucketOptions = {
+  /** @description Must be {@link RateLimitStrategy.TOKEN_BUCKET}. */
   strategy: RateLimitStrategy.TOKEN_BUCKET;
+  /**
+   * @description Tokens added per {@link RedisStoreTokenBucketOptions.interval}.
+   */
   tokensPerInterval: number;
+  /**
+   * @description Refill interval in milliseconds.
+   */
   interval: number;
+  /**
+   * @description Maximum tokens (burst capacity).
+   */
   bucketSize: number;
 };
 
+/**
+ * Discriminated union of Redis-backed strategy options (before connection fields).
+ *
+ * @since 1.0.0
+ */
 export type RedisStoreStrategyOptions = RedisStoreWindowOptions | RedisStoreTokenBucketOptions;
 
 /**
- * Minimal Redis surface used by {@link RedisStore}.
- * Matches common `EVAL` calling conventions (e.g. ioredis: `eval(script, numKeys, ...keys, ...args)`).
+ * Minimal Redis client surface used by {@link RedisStore}.
+ *
+ * @description Matches ioredis-style `eval(script, numKeys, ...keysAndArgs)` (keys first, then argv).
+ * @see {@link adaptIoRedisClient}
+ * @see {@link adaptNodeRedisClient}
+ * @since 1.0.0
  */
 export interface RedisLikeClient {
+  /**
+   * @description Redis GET (not used by all increment paths; available for adapters).
+   * @param key - Redis key.
+   */
   get(key: string): Promise<string | null | undefined>;
+  /**
+   * @description Redis SET (optional for some flows).
+   */
   set(key: string, value: string, ...args: unknown[]): Promise<unknown>;
   /**
-   * `EVAL` / `EVALSHA` compatible entry point (ioredis-style):
-   * `eval(script, numKeys, key1, key2, ..., arg1, arg2, ...)`.
+   * @description Lua `EVAL` / `EVALSHA` entry point (`eval(script, numKeys, ...keys, ...args)`).
    */
   eval(script: string, numKeys: number, ...keysAndArgs: string[]): Promise<unknown>;
+  /**
+   * @description Optional bulk delete for reset/shutdown paths.
+   * @default undefined
+   */
   del?: (...keys: string[]) => Promise<unknown>;
+  /**
+   * @description Optional graceful close (used when {@link RedisStore} owns a connection from `url`).
+   * @default undefined
+   */
   quit?: () => Promise<unknown>;
+  /**
+   * @description Optional disconnect.
+   * @default undefined
+   */
   disconnect?: () => void | Promise<void>;
 }
 
 /**
- * How {@link RedisStore} behaves when Redis is unreachable or returns an error.
- * - `fail-open` (default): allow traffic through; log a warning.
- * - `fail-closed`: treat as blocked with {@link RateLimitResult.storeUnavailable}; middleware responds with HTTP 503.
+ * Behavior when Redis is unreachable or returns an error during quota operations.
+ *
+ * @description
+ * - **`fail-open`** (default): allow traffic; log via {@link RedisStoreOptions.onWarn}.
+ * - **`fail-closed`**: block with {@link RateLimitResult.storeUnavailable}; HTTP middleware returns **503**.
+ * @see {@link RedisStore}
+ * @since 1.0.0
  */
 export type RedisErrorMode = 'fail-open' | 'fail-closed';
 
+/**
+ * Full options for {@link RedisStore}.
+ *
+ * @description Pass **either** `client` **or** `url`, not both.
+ * @see {@link RedisStoreWindowOptions}
+ * @see {@link RedisStoreTokenBucketOptions}
+ * @since 1.0.0
+ */
 export type RedisStoreOptions = RedisStoreStrategyOptions & {
-  /** Existing Redis client — use {@link adaptIoRedisClient} / {@link adaptNodeRedisClient} if needed. */
+  /**
+   * @description Existing Redis-compatible client (recommended for production).
+   * @default undefined (use `url` or pass one of them)
+   * @see {@link adaptIoRedisClient}
+   * @see {@link adaptNodeRedisClient}
+   */
   client?: RedisLikeClient;
   /**
-   * Connection URL. Requires optional peer dependency `ioredis` (dynamic import).
-   * Do not pass both `url` and `client`.
+   * @description Connection URL; dynamically loads optional peer `ioredis`.
+   * @default undefined
    */
   url?: string;
-  /** Prefix for all keys. @default "rlf:" */
+  /**
+   * @description Prefix for all keys written by this store.
+   * @default `"rlf:"`
+   */
   keyPrefix?: string;
   /**
-   * Invoked on Redis errors (connection, eval, etc.). Defaults to `console.warn`.
-   * Errors are swallowed after warning so your HTTP server keeps running.
+   * @description Logger for Redis errors (connection, `EVAL`, `DEL`, etc.).
+   * @default `console.warn` with a `[ratelimit-flex]` prefix
    */
   onWarn?: (message: string, error?: unknown) => void;
   /**
-   * When Redis cannot be reached or a command fails.
-   * @default 'fail-open'
+   * @description Policy when Redis cannot evaluate a limit (see {@link RedisErrorMode}).
+   * @default `'fail-open'`
    */
   onRedisError?: RedisErrorMode;
 };
@@ -199,7 +271,22 @@ return redis.call('DEL', unpack(KEYS))
 `;
 
 /**
- * Wrap an **ioredis** client instance to satisfy {@link RedisLikeClient} without adding a compile-time dependency.
+ * Adapts an **ioredis**-style client to {@link RedisLikeClient}.
+ *
+ * @description Coerces `eval` arguments to strings for compatibility with {@link RedisStore}.
+ * @param client - ioredis instance with `get`, `set`, `eval`, optional `del` / `quit` / `disconnect`.
+ * @returns A {@link RedisLikeClient} wrapper.
+ * @example
+ * ```ts
+ * import Redis from 'ioredis';
+ * const store = new RedisStore({
+ *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+ *   windowMs: 60_000,
+ *   maxRequests: 100,
+ *   client: adaptIoRedisClient(new Redis(process.env.REDIS_URL!)),
+ * });
+ * ```
+ * @since 1.0.0
  */
 export function adaptIoRedisClient(client: {
   get(key: string): Promise<string | null>;
@@ -220,8 +307,24 @@ export function adaptIoRedisClient(client: {
 }
 
 /**
- * Wrap **node-redis** v4+ clients (`eval(script, { keys, arguments })`).
- * Does not add a `redis` package dependency — pass your connected client instance.
+ * Adapts **node-redis** v4+ clients (`eval(script, { keys, arguments })`) to {@link RedisLikeClient}.
+ *
+ * @description Does not add a `redis` package dependency — pass your connected client.
+ * @param client - node-redis client with `get`, `set`, `eval`, optional `del` / `quit` / `disconnect`.
+ * @returns A {@link RedisLikeClient} wrapper.
+ * @example
+ * ```ts
+ * import { createClient } from 'redis';
+ * const raw = createClient({ url: process.env.REDIS_URL });
+ * await raw.connect();
+ * const store = new RedisStore({
+ *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+ *   windowMs: 60_000,
+ *   maxRequests: 100,
+ *   client: adaptNodeRedisClient(raw),
+ * });
+ * ```
+ * @since 1.0.0
  */
 export function adaptNodeRedisClient(client: {
   get(key: string): Promise<string | null | undefined>;
@@ -255,9 +358,13 @@ type IoRedisInstance = {
 };
 
 /**
- * Redis-backed {@link RateLimitStore} using Lua for atomicity.
+ * Redis-backed {@link RateLimitStore} using Lua scripts for atomic increments.
  *
+ * @description Shares counters across nodes; use when multiple processes must enforce one global limit.
  * Pass either `client` (recommended) or `url` (loads optional peer `ioredis` at runtime).
+ * @see {@link MemoryStore} — single-process alternative
+ * @see {@link RedisErrorMode}
+ * @since 1.0.0
  */
 export class RedisStore implements RateLimitStore {
   private readonly strategy: RateLimitStrategy;
@@ -288,6 +395,24 @@ export class RedisStore implements RateLimitStore {
   /** Connection created from `url` — closed on {@link RedisStore.shutdown}. */
   private ownedRedis: IoRedisInstance | null = null;
 
+  /**
+   * @description Validates connection options, normalizes caps/window, and prepares the Redis client (or `ioredis` import from `url`).
+   * @param options - Strategy fields plus `client` or `url`, optional `keyPrefix`, `onWarn`, `onRedisError`.
+   * @example
+   * ```ts
+   * const store = new RedisStore({
+   *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+   *   windowMs: 60_000,
+   *   maxRequests: 100,
+   *   url: 'redis://127.0.0.1:6379',
+   *   onRedisError: 'fail-open',
+   * });
+   * ```
+   * @throws If both `url` and `client` are set, or neither is set.
+   * @throws If `url` is used and `ioredis` fails to load (dynamic import error).
+   * @see {@link RedisStore.shutdown}
+   * @since 1.0.0
+   */
   constructor(options: RedisStoreOptions) {
     if (options.url && options.client) {
       throw new Error('RedisStore: pass either "url" or "client", not both');
@@ -461,7 +586,13 @@ export class RedisStore implements RateLimitStore {
     return this.failOpenResult();
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Client identifier (same key namespace as {@link MemoryStore}).
+   * @param options - Optional `{ maxRequests }` override for sliding/fixed window strategies.
+   * @returns Promise resolving to {@link RateLimitResult}; may return fail-open or fail-closed shape when Redis errors.
+   * @description Catches Redis errors and applies {@link RedisErrorMode} via {@link RedisStoreOptions.onRedisError}.
+   */
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
     const maxOverride = options?.maxRequests;
     try {
@@ -560,7 +691,11 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Same key passed to {@link RedisStore.increment}.
+   * @description Swallows most errors; in `fail-closed` mode may log extra warnings if `EVAL` fails.
+   */
   async decrement(key: string): Promise<void> {
     try {
       switch (this.strategy) {
@@ -608,7 +743,11 @@ export class RedisStore implements RateLimitStore {
     }
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @param key - Key whose Redis keys should be deleted.
+   * @throws In `fail-closed` mode if Redis cannot delete keys.
+   */
   async reset(key: string): Promise<void> {
     try {
       const keys: string[] = [];
@@ -634,7 +773,10 @@ export class RedisStore implements RateLimitStore {
     }
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   * @description Clears the client reference and calls `quit` / `disconnect` on a connection created from `url`.
+   */
   async shutdown(): Promise<void> {
     this.client = null;
     const owned = this.ownedRedis;
