@@ -10,7 +10,13 @@
     "sliding-window",
     "token-bucket",
     "middleware",
-    "rate-limiting"
+    "rate-limiting",
+    "metrics",
+    "observability",
+    "prometheus",
+    "opentelemetry",
+    "monitoring",
+    "histogram"
   ],
   "author": "",
   "type": "module",
