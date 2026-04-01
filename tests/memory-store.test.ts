@@ -124,6 +124,65 @@ describe('MemoryStore', () => {
     await store.shutdown();
   });
 
+  it('applies cost on sliding window (weighted increment)', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 1000,
+      maxRequests: 5,
+    });
+
+    const a = await store.increment('w', { cost: 2 });
+    const b = await store.increment('w', { cost: 2 });
+    const c = await store.increment('w', { cost: 2 });
+
+    expect(a.totalHits).toBe(2);
+    expect(b.totalHits).toBe(4);
+    expect(c.isBlocked).toBe(true);
+    expect(c.totalHits).toBe(6);
+
+    await store.decrement('w', { cost: 2 });
+    const d = await store.increment('w', { cost: 1 });
+    expect(d.isBlocked).toBe(false);
+    expect(d.totalHits).toBe(5);
+
+    await store.shutdown();
+  });
+
+  it('applies cost on fixed window', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.FIXED_WINDOW,
+      windowMs: 1000,
+      maxRequests: 10,
+    });
+
+    const r = await store.increment('fwc', { cost: 7 });
+    expect(r.isBlocked).toBe(false);
+    expect(r.totalHits).toBe(7);
+
+    const blocked = await store.increment('fwc', { cost: 4 });
+    expect(blocked.isBlocked).toBe(true);
+
+    await store.shutdown();
+  });
+
+  it('applies cost on token bucket', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: 10,
+      interval: 1000,
+      bucketSize: 10,
+    });
+
+    const r1 = await store.increment('tbw', { cost: 6 });
+    expect(r1.isBlocked).toBe(false);
+    expect(r1.remaining).toBe(4);
+
+    const r2 = await store.increment('tbw', { cost: 5 });
+    expect(r2.isBlocked).toBe(true);
+
+    await store.shutdown();
+  });
+
   it('handles concurrent increments correctly', async () => {
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,

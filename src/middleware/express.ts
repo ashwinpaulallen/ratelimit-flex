@@ -1,7 +1,12 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
 import { MetricsManager } from '../metrics/manager.js';
-import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
+import {
+  RateLimitEngine,
+  defaultKeyGenerator,
+  matchingDecrementOptions,
+  resolveIncrementOpts,
+} from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
@@ -23,17 +28,19 @@ function applyHeaders(res: Response, headers: Record<string, string>): void {
   }
 }
 
-function decrementStores(resolved: RateLimitOptions, key: string): void {
+function decrementStores(resolved: RateLimitOptions, key: string, req: unknown): void {
+  const incOpts = resolveIncrementOpts(resolved, req);
+  const decOpts = matchingDecrementOptions(incOpts);
   const w = resolved as WindowRateLimitOptions;
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
     for (const g of w.groupedWindowStores) {
-      void g.store.decrement(key).catch(() => {
+      void g.store.decrement(key, decOpts).catch(() => {
         /* ignore */
       });
     }
     return;
   }
-  void resolved.store.decrement(key).catch(() => {
+  void resolved.store.decrement(key, decOpts).catch(() => {
     /* ignore */
   });
 }
@@ -71,6 +78,7 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
  * @description
  * - Blocked responses: **429** (rate limit), **403** (blocklist), **503** (Redis fail-closed / service unavailable).
  * - On allow: sets `req.rateLimit` and optional `X-RateLimit-*` headers.
+ * - **`incrementCost`** / weighted increments: skip-response decrements use {@link matchingDecrementOptions} so rollback matches consumed quota.
  * @param options - Partial {@link RateLimitOptions}; `store` defaults to a new {@link MemoryStore} when omitted (unless `limits` is used).
  * @returns Express `RequestHandler` with {@link ExpressRateLimiterHandler}: always includes {@link MetricsManager} and snapshot/history/Prometheus helpers (no-ops when `metrics` is disabled).
  * @example
@@ -144,7 +152,7 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
           const failed = status >= 400;
           const success = status < 400;
           if ((shouldDecrementFailed && failed) || (shouldDecrementSuccess && success)) {
-            decrementStores(resolved, key);
+            decrementStores(resolved, key, req);
           }
         });
       }

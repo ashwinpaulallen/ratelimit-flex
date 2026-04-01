@@ -1,10 +1,11 @@
 import type {
+  RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitResult,
   RateLimitStore,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
-import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
+import { sanitizeIncrementCost, sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /**
  * Constructor options for window-based strategies (sliding or fixed).
@@ -67,9 +68,9 @@ type BucketEntry = { tokens: number; lastRefill: number };
  * In-process {@link RateLimitStore} (not shared across Node processes).
  *
  * @description
- * - **Sliding window**: request timestamps per key; counts hits inside `windowMs`.
+ * - **Sliding window**: request timestamps per key; counts **units** inside `windowMs` (each increment adds {@link RateLimitIncrementOptions.cost} defaulting to `1`).
  * - **Fixed window**: counter + window end; resets when the slice expires.
- * - **Token bucket**: refills tokens on a schedule; consumes one token per allowed hit.
+ * - **Token bucket**: refills tokens on a schedule; each allowed increment consumes **`cost`** tokens (default `1`).
  *
  * A background timer periodically purges stale keys / trims timestamps (`unref` so it does not keep the process alive alone).
  *
@@ -154,18 +155,19 @@ export class MemoryStore implements RateLimitStore {
   /**
    * @inheritdoc
    * @param key - Client identifier.
-   * @param options - Optional `{ maxRequests }` override for sliding/fixed window.
+   * @param options - Optional **`maxRequests`** (sliding/fixed) and **`cost`** (all strategies; default `1`).
    * @returns Synchronous promise with {@link RateLimitResult}.
    * @throws If strategy is not handled (should be unreachable).
    */
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
+    const cost = sanitizeIncrementCost(options?.cost, 1);
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
-        return Promise.resolve(this.incrementSliding(key, options?.maxRequests));
+        return Promise.resolve(this.incrementSliding(key, options?.maxRequests, cost));
       case RateLimitStrategy.FIXED_WINDOW:
-        return Promise.resolve(this.incrementFixed(key, options?.maxRequests));
+        return Promise.resolve(this.incrementFixed(key, options?.maxRequests, cost));
       case RateLimitStrategy.TOKEN_BUCKET:
-        return Promise.resolve(this.incrementTokenBucket(key));
+        return Promise.resolve(this.incrementTokenBucket(key, cost));
       default: {
         const exhaustive: never = this.strategy;
         return Promise.reject(new Error(`Unsupported strategy: ${String(exhaustive)}`));
@@ -176,18 +178,20 @@ export class MemoryStore implements RateLimitStore {
   /**
    * @inheritdoc
    * @param key - Same key used for {@link MemoryStore.increment}.
+   * @param options - Optional **`cost`** to match the prior increment (default `1`).
    * @throws If strategy is not handled (should be unreachable).
    */
-  async decrement(key: string): Promise<void> {
+  async decrement(key: string, options?: RateLimitDecrementOptions): Promise<void> {
+    const cost = sanitizeIncrementCost(options?.cost, 1);
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
-        this.decrementSliding(key);
+        this.decrementSliding(key, cost);
         break;
       case RateLimitStrategy.FIXED_WINDOW:
-        this.decrementFixed(key);
+        this.decrementFixed(key, cost);
         break;
       case RateLimitStrategy.TOKEN_BUCKET:
-        this.decrementTokenBucket(key);
+        this.decrementTokenBucket(key, cost);
         break;
       default: {
         const exhaustive: never = this.strategy;
@@ -225,14 +229,16 @@ export class MemoryStore implements RateLimitStore {
 
   // --- Sliding window -----------------------------------------------------
 
-  private incrementSliding(key: string, maxOverride?: number): RateLimitResult {
+  private incrementSliding(key: string, maxOverride?: number, cost = 1): RateLimitResult {
     const cap = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const cutoff = now - this.windowMs;
 
     const prev = this.sliding.get(key) ?? [];
     const trimmed = prev.filter((ts) => ts > cutoff);
-    trimmed.push(now);
+    for (let i = 0; i < cost; i++) {
+      trimmed.push(now);
+    }
     this.sliding.set(key, trimmed);
 
     const totalHits = trimmed.length;
@@ -246,15 +252,18 @@ export class MemoryStore implements RateLimitStore {
   }
 
   /**
-   * Removes the **oldest** hit in the window (FIFO), matching the increment order used by
-   * skip-failed/skip-successful response handlers so concurrent requests undo the correct slot.
+   * Removes the **`cost`** oldest hits in the window (FIFO), matching the increment order used by
+   * skip-failed/skip-successful response handlers so concurrent requests undo the correct slots.
    */
-  private decrementSliding(key: string): void {
+  private decrementSliding(key: string, cost = 1): void {
     const ts = this.sliding.get(key);
     if (!ts || ts.length === 0) {
       return;
     }
-    ts.shift();
+    let n = Math.min(cost, ts.length);
+    while (n-- > 0) {
+      ts.shift();
+    }
     if (ts.length === 0) {
       this.sliding.delete(key);
     } else {
@@ -264,15 +273,15 @@ export class MemoryStore implements RateLimitStore {
 
   // --- Fixed window ---------------------------------------------------------
 
-  private incrementFixed(key: string, maxOverride?: number): RateLimitResult {
+  private incrementFixed(key: string, maxOverride?: number, cost = 1): RateLimitResult {
     const cap = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     let entry = this.fixed.get(key);
 
     if (!entry || now >= entry.resetTime) {
-      entry = { count: 1, resetTime: now + this.windowMs };
+      entry = { count: cost, resetTime: now + this.windowMs };
     } else {
-      entry = { count: entry.count + 1, resetTime: entry.resetTime };
+      entry = { count: entry.count + cost, resetTime: entry.resetTime };
     }
 
     this.fixed.set(key, entry);
@@ -285,12 +294,12 @@ export class MemoryStore implements RateLimitStore {
     return { totalHits, remaining, resetTime, isBlocked };
   }
 
-  private decrementFixed(key: string): void {
+  private decrementFixed(key: string, cost = 1): void {
     const entry = this.fixed.get(key);
     if (!entry || entry.count <= 0) {
       return;
     }
-    const next = entry.count - 1;
+    const next = entry.count - cost;
     if (next <= 0) {
       this.fixed.delete(key);
     } else {
@@ -300,7 +309,7 @@ export class MemoryStore implements RateLimitStore {
 
   // --- Token bucket ---------------------------------------------------------
 
-  private incrementTokenBucket(key: string): RateLimitResult {
+  private incrementTokenBucket(key: string, cost = 1): RateLimitResult {
     const now = Date.now();
     let state = this.buckets.get(key);
 
@@ -318,8 +327,8 @@ export class MemoryStore implements RateLimitStore {
       lastRefill += intervals * this.refillIntervalMs;
     }
 
-    if (tokens >= 1) {
-      tokens -= 1;
+    if (tokens >= cost) {
+      tokens -= cost;
       this.buckets.set(key, { tokens, lastRefill });
 
       const remaining = tokens;
@@ -346,12 +355,12 @@ export class MemoryStore implements RateLimitStore {
     };
   }
 
-  private decrementTokenBucket(key: string): void {
+  private decrementTokenBucket(key: string, cost = 1): void {
     const state = this.buckets.get(key);
     if (!state) {
       return;
     }
-    const tokens = Math.min(this.bucketSize, state.tokens + 1);
+    const tokens = Math.min(this.bucketSize, state.tokens + cost);
     this.buckets.set(key, { tokens, lastRefill: state.lastRefill });
   }
 

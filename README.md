@@ -14,6 +14,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** `fail-open` or `fail-closed` when Redis is unavailable
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
+- **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 
 ## Installation
@@ -118,6 +119,39 @@ app.use(
   }),
 );
 ```
+
+## Weighted / cost-based rate limiting
+
+By default each request consumes **one** quota unit. For endpoints that should count more (file uploads, heavy database work, high GraphQL complexity), use a **cost** greater than `1`.
+
+**Middleware / engine** — set **`incrementCost`** on the rate limiter options (number or function of the request):
+
+```ts
+import { expressRateLimiter } from 'ratelimit-flex';
+
+app.use(
+  expressRateLimiter({
+    maxRequests: 100,
+    windowMs: 60_000,
+    incrementCost: (req) =>
+      String((req as import('express').Request).path ?? '').startsWith('/upload') ? 10 : 1,
+  }),
+);
+```
+
+**Custom pipelines** — call the store directly with **`increment`** / **`decrement`** options:
+
+```ts
+await store.increment(key, { cost: 10 });
+// … later, undo the same weight (e.g. custom skip logic):
+await store.decrement(key, { cost: 10 });
+```
+
+Dynamic caps plus cost still work together: **`increment`** accepts **`{ maxRequests?, cost? }`** on window strategies.
+
+Helpers **`resolveIncrementOpts(options, req)`** and **`matchingDecrementOptions(incOpts)`** are exported if you build your own middleware and need the same increment/decrement pairing as the built-in engine.
+
+**Redis implementation note:** for sliding windows with **`cost > 1`**, each ZSET member is a distinct random value so Redis never silently merges two hits into one.
 
 ## Deployment guide
 
@@ -665,6 +699,7 @@ Options are merged with strategy defaults. Omit **`store`** to get an auto-creat
 | `store` | `RateLimitStore` | auto `MemoryStore` | Backing store |
 | `windowMs` | `number` | `60000` | Window length (sliding / fixed) |
 | `maxRequests` | `number` \| `(req) => number` | `100` | Max requests per window (sliding / fixed) |
+| `incrementCost` | `number` \| `(req) => number` | — | Quota units per request (`1` if omitted); use with weighted `store.increment` semantics |
 | `limits` | `{ windowMs, max }[]` | — | Multiple windows; block if **any** exceeded |
 | `tokensPerInterval` | `number` | `10` | Token bucket refill rate |
 | `interval` | `number` | `60000` | Refill interval (token bucket) |
@@ -739,6 +774,8 @@ app.use(
 );
 ```
 
+**Weighted / cost-based limits** — see [Weighted / cost-based rate limiting](#weighted--cost-based-rate-limiting) (`incrementCost` or `store.increment(..., { cost })`).
+
 **Allowlist / blocklist**
 
 ```ts
@@ -799,6 +836,13 @@ Implement **`RateLimitStore`**:
 ```ts
 export interface RateLimitIncrementOptions {
   maxRequests?: number;
+  /** Quota units consumed by this call (default 1). */
+  cost?: number;
+}
+
+export interface RateLimitDecrementOptions {
+  /** Must match the `cost` of the increment being rolled back. */
+  cost?: number;
 }
 
 export interface RateLimitStore {
@@ -812,13 +856,13 @@ export interface RateLimitStore {
     isBlocked: boolean;
     storeUnavailable?: boolean;
   }>;
-  decrement(key: string): Promise<void>;
+  decrement(key: string, options?: RateLimitDecrementOptions): Promise<void>;
   reset(key: string): Promise<void>;
   shutdown(): Promise<void>;
 }
 ```
 
-Use **`increment`’s optional `{ maxRequests }`** for dynamic caps on window strategies. Back your store with PostgreSQL, DynamoDB, etc., if you need persistence without Redis—mind latency and atomicity for hot keys.
+Use **`increment`’s optional `{ maxRequests }`** for dynamic caps on window strategies, and **`{ cost }`** for weighted requests. Implement **`decrement`** with the same **`cost`** when your integration rolls back a weighted increment. Back your store with PostgreSQL, DynamoDB, etc., if you need persistence without Redis—mind latency and atomicity for hot keys.
 
 Pass your store as **`store`** in middleware options.
 
@@ -834,6 +878,7 @@ Pass your store as **`store`** in middleware options.
 | **`MemoryStore`** | In-memory store |
 | **`RedisStore`** | Redis-backed store (Lua) |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
+| **`resolveIncrementOpts`**, **`matchingDecrementOptions`** | Resolve per-request `increment` / `decrement` options (weighted limits) |
 | **`createRateLimiter`** | `{ express }` middleware helper |
 | **`MetricsManager`**, **`normalizeMetricsConfig`**, **`PrometheusAdapter`**, **`OpenTelemetryAdapter`** | Metrics wiring and exporters ([Metrics & Observability](#metrics--observability)) |
 

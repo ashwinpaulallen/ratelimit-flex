@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.1] - 2026-04-01
+
+### Added
+
+- **Weighted / cost-based rate limiting** — `rateLimitOptions.incrementCost` (`number` or `(req) => number`) so a single request can consume more than one quota unit (for example large uploads or expensive GraphQL operations). Applies to **`MemoryStore`** and **`RedisStore`** for sliding window, fixed window, and token bucket.
+- **`RateLimitIncrementOptions.cost`** — optional per-call weight on `store.increment(key, { cost })` (default `1`, sanitized to an integer ≥ 1).
+- **`RateLimitDecrementOptions`** — optional `cost` on `store.decrement(key, { cost })` so rollbacks match weighted increments (used by draft mode, grouped-window rollback, and `skipFailedRequests` / `skipSuccessfulRequests` middleware).
+- **`resolveIncrementOpts(options, req)`** and **`matchingDecrementOptions(incOpts)`** — exported helpers for custom middleware or custom stores.
+
+### Fixed
+
+- **Redis sliding window (`RedisStore`)** — ZSET members for multi-`cost` increments are now unique per slot using **cryptographically random** hex strings passed from Node into the Lua script, avoiding collisions where `ZADD` would overwrite an existing member instead of adding another hit.
+
 ## [1.3.0] - 2026-03-31
 
 ### Added

@@ -1,10 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import type {
+  RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitResult,
   RateLimitStore,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
-import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
+import { sanitizeIncrementCost, sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /**
  * Strategy options for sliding or fixed window when using {@link RedisStore}.
@@ -143,16 +145,27 @@ export type RedisStoreOptions = RedisStoreStrategyOptions & {
 
 const DEFAULT_PREFIX = 'rlf:';
 
-/** Sliding window: ZSET prune + ZADD + ZCARD. KEYS[1]=zset, ARGV: now, windowMs, maxRequests, member */
+/**
+ * Sliding window: ZSET prune + ZADD (cost entries) + ZCARD.
+ * KEYS[1]=zset. ARGV: now, windowMs, maxRequests, cost, member1..memberN (each member must be unique within this ZADD batch).
+ * Members are generated with crypto randomness in TS so concurrent calls cannot collide (unlike Math.random + suffix).
+ */
 const LUA_SLIDING_INCR = `
 local zkey = KEYS[1]
 local now = tonumber(ARGV[1])
 local window_ms = tonumber(ARGV[2])
 local max_requests = tonumber(ARGV[3])
-local member = ARGV[4]
+local cost = tonumber(ARGV[4]) or 1
+if cost < 1 then cost = 1 end
 
 redis.call('ZREMRANGEBYSCORE', zkey, '-inf', now - window_ms)
-redis.call('ZADD', zkey, now, member)
+for i = 1, cost do
+  local m = ARGV[4 + i]
+  if m == nil then
+    return redis.error_reply('ratelimit-flex: sliding window missing member for slot ' .. i)
+  end
+  redis.call('ZADD', zkey, now, m)
+end
 local count = tonumber(redis.call('ZCARD', zkey))
 redis.call('PEXPIRE', zkey, window_ms)
 
@@ -171,21 +184,27 @@ local reset_at = oldest_score + window_ms
 return { count, blocked, reset_at }
 `;
 
-/** Pop oldest by score (FIFO vs increment order); pairs with ZADD score=now per hit. */
+/** Pop oldest by score (FIFO); ARGV[1]=cost — ZPOPMIN that many times. */
 const LUA_SLIDING_DECR = `
-redis.call('ZPOPMIN', KEYS[1])
+local n = tonumber(ARGV[1]) or 1
+if n < 1 then n = 1 end
+for i = 1, n do
+  redis.call('ZPOPMIN', KEYS[1])
+end
 return 1
 `;
 
-/** Fixed window: atomic INCR + PEXPIRE on first hit. KEYS[1]=counter, ARGV: windowMs, maxRequests, now */
+/** Fixed window: atomic INCRBY + PEXPIRE on first hit. KEYS[1]=counter, ARGV: windowMs, maxRequests, now, cost */
 const LUA_FIXED_INCR = `
 local k = KEYS[1]
 local window_ms = tonumber(ARGV[1])
 local max_requests = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4]) or 1
+if cost < 1 then cost = 1 end
 
-local current = tonumber(redis.call('INCR', k))
-if current == 1 then
+local current = tonumber(redis.call('INCRBY', k, cost))
+if current == cost then
   redis.call('PEXPIRE', k, window_ms)
 end
 
@@ -201,20 +220,24 @@ return { current, blocked, reset_at }
 
 const LUA_FIXED_DECR = `
 local k = KEYS[1]
+local dec = tonumber(ARGV[1]) or 1
+if dec < 1 then dec = 1 end
 local v = tonumber(redis.call('GET', k) or '0')
-if v > 0 then
-  redis.call('DECR', k)
-end
+if v <= 0 then return v end
+local take = math.min(v, dec)
+redis.call('DECRBY', k, take)
 return v
 `;
 
-/** Token bucket: HSET tokens + last_refill. KEYS[1]=hash, ARGV: now, tpi, interval_ms, bucket_size */
+/** Token bucket: HSET tokens + last_refill. KEYS[1]=hash, ARGV: now, tpi, interval_ms, bucket_size, cost */
 const LUA_BUCKET_INCR = `
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local tokens_per_interval = tonumber(ARGV[2])
 local interval_ms = tonumber(ARGV[3])
 local bucket_size = tonumber(ARGV[4])
+local cost = tonumber(ARGV[5]) or 1
+if cost < 1 then cost = 1 end
 
 local tokens_s = redis.call('HGET', key, 'tokens')
 local last_s = redis.call('HGET', key, 'last_refill')
@@ -237,8 +260,8 @@ if intervals > 0 then
   last_refill = last_refill + intervals * interval_ms
 end
 
-if tokens >= 1 then
-  tokens = tokens - 1
+if tokens >= cost then
+  tokens = tokens - cost
   redis.call('HSET', key, 'tokens', tostring(tokens), 'last_refill', tostring(last_refill))
   redis.call('PEXPIRE', key, interval_ms * 10)
   local remaining = tokens
@@ -256,13 +279,15 @@ return { 0, tokens, bucket_size, 1, next_refill }
 const LUA_BUCKET_DECR = `
 local key = KEYS[1]
 local bucket_size = tonumber(ARGV[1])
+local add = tonumber(ARGV[2]) or 1
+if add < 1 then add = 1 end
 local tokens_s = redis.call('HGET', key, 'tokens')
 local tokens
 if tokens_s == false then
   return 0
 end
 tokens = tonumber(tokens_s)
-tokens = math.min(bucket_size, tokens + 1)
+tokens = math.min(bucket_size, tokens + add)
 redis.call('HSET', key, 'tokens', tostring(tokens))
 return 1
 `;
@@ -362,6 +387,7 @@ type IoRedisInstance = {
  * Redis-backed {@link RateLimitStore} using Lua scripts for atomic increments.
  *
  * @description Shares counters across nodes; use when multiple processes must enforce one global limit.
+ * Supports {@link RateLimitIncrementOptions.cost} on all strategies; sliding window uses unique ZSET members per unit (crypto randomness from Node) so `ZADD` never merges distinct hits.
  * Pass either `client` (recommended) or `url` (loads optional peer `ioredis` at runtime).
  * @see {@link MemoryStore} — single-process alternative
  * @see {@link RedisErrorMode}
@@ -590,20 +616,21 @@ export class RedisStore implements RateLimitStore {
   /**
    * @inheritdoc
    * @param key - Client identifier (same key namespace as {@link MemoryStore}).
-   * @param options - Optional `{ maxRequests }` override for sliding/fixed window strategies.
+   * @param options - Optional **`maxRequests`** (sliding/fixed) and **`cost`** (all strategies; default `1`).
    * @returns Promise resolving to {@link RateLimitResult}; may return fail-open or fail-closed shape when Redis errors.
    * @description Catches Redis errors and applies {@link RedisErrorMode} via {@link RedisStoreOptions.onRedisError}.
    */
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
     const maxOverride = options?.maxRequests;
+    const cost = sanitizeIncrementCost(options?.cost, 1);
     try {
       switch (this.strategy) {
         case RateLimitStrategy.SLIDING_WINDOW:
-          return await this.incrSliding(key, maxOverride);
+          return await this.incrSliding(key, maxOverride, cost);
         case RateLimitStrategy.FIXED_WINDOW:
-          return await this.incrFixed(key, maxOverride);
+          return await this.incrFixed(key, maxOverride, cost);
         case RateLimitStrategy.TOKEN_BUCKET:
-          return await this.incrBucket(key);
+          return await this.incrBucket(key, cost);
         default: {
           const _: never = this.strategy;
           return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
@@ -615,16 +642,18 @@ export class RedisStore implements RateLimitStore {
     }
   }
 
-  private async incrSliding(key: string, maxOverride?: number): Promise<RateLimitResult> {
+  private async incrSliding(key: string, maxOverride?: number, cost = 1): Promise<RateLimitResult> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
-    const member = `${now}:${Math.random().toString(36).slice(2)}`;
+    const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
     const rk = this.redisKey('sw', key);
-    const raw = await this.evalScript(
-      LUA_SLIDING_INCR,
-      [rk],
-      [now, this.windowMs, maxReq, member],
-    );
+    const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
+      now,
+      this.windowMs,
+      maxReq,
+      cost,
+      ...members,
+    ]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
       return this.redisIncrementFailure();
     }
@@ -643,11 +672,11 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrFixed(key: string, maxOverride?: number): Promise<RateLimitResult> {
+  private async incrFixed(key: string, maxOverride?: number, cost = 1): Promise<RateLimitResult> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const rk = this.redisKey('fw', key);
-    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, maxReq, now]);
+    const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, maxReq, now, cost]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
       return this.redisIncrementFailure();
     }
@@ -666,13 +695,13 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrBucket(key: string): Promise<RateLimitResult> {
+  private async incrBucket(key: string, cost = 1): Promise<RateLimitResult> {
     const now = Date.now();
     const rk = this.redisKey('tb', key);
     const raw = await this.evalScript(
       LUA_BUCKET_INCR,
       [rk],
-      [now, this.tokensPerInterval, this.refillIntervalMs, this.bucketSize],
+      [now, this.tokensPerInterval, this.refillIntervalMs, this.bucketSize, cost],
     );
     if (raw === null || !Array.isArray(raw) || raw.length < 5) {
       return this.redisIncrementFailure();
@@ -695,14 +724,16 @@ export class RedisStore implements RateLimitStore {
   /**
    * @inheritdoc
    * @param key - Same key passed to {@link RedisStore.increment}.
+   * @param options - Optional **`cost`** to match the prior increment (default `1`).
    * @description Swallows most errors; in `fail-closed` mode may log extra warnings if `EVAL` fails.
    */
-  async decrement(key: string): Promise<void> {
+  async decrement(key: string, options?: RateLimitDecrementOptions): Promise<void> {
+    const cost = sanitizeIncrementCost(options?.cost, 1);
     try {
       switch (this.strategy) {
         case RateLimitStrategy.SLIDING_WINDOW: {
           const rk = this.redisKey('sw', key);
-          const out = await this.evalScript(LUA_SLIDING_DECR, [rk], []);
+          const out = await this.evalScript(LUA_SLIDING_DECR, [rk], [cost]);
           if (out === null) {
             this.warn('Redis decrement: EVAL returned no result');
             if (this.redisErrorMode === 'fail-closed') {
@@ -713,7 +744,7 @@ export class RedisStore implements RateLimitStore {
         }
         case RateLimitStrategy.FIXED_WINDOW: {
           const rk = this.redisKey('fw', key);
-          const out = await this.evalScript(LUA_FIXED_DECR, [rk], []);
+          const out = await this.evalScript(LUA_FIXED_DECR, [rk], [cost]);
           if (out === null) {
             this.warn('Redis decrement: EVAL returned no result');
             if (this.redisErrorMode === 'fail-closed') {
@@ -724,7 +755,7 @@ export class RedisStore implements RateLimitStore {
         }
         case RateLimitStrategy.TOKEN_BUCKET: {
           const rk = this.redisKey('tb', key);
-          const out = await this.evalScript(LUA_BUCKET_DECR, [rk], [this.bucketSize]);
+          const out = await this.evalScript(LUA_BUCKET_DECR, [rk], [this.bucketSize, cost]);
           if (out === null) {
             this.warn('Redis decrement: EVAL returned no result');
             if (this.redisErrorMode === 'fail-closed') {

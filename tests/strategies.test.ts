@@ -4,7 +4,9 @@ import {
   RateLimitEngine,
   createRateLimiter as createEngineRateLimiter,
   defaultKeyGenerator,
+  resolveIncrementOpts,
 } from '../src/strategies/rate-limit-engine.js';
+import type { RateLimitOptions } from '../src/types/index.js';
 import { RateLimitStrategy } from '../src/types/index.js';
 
 describe('RateLimitEngine / strategies', () => {
@@ -82,6 +84,43 @@ describe('RateLimitEngine / strategies', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('respects incrementCost on the engine', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 5,
+    });
+    const engine = new RateLimitEngine({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 5,
+      incrementCost: 5,
+      store,
+    });
+
+    const r1 = await engine.consume('k');
+    const r2 = await engine.consume('k');
+    expect(r1.isBlocked).toBe(false);
+    expect(r2.isBlocked).toBe(true);
+    await store.shutdown();
+  });
+
+  it('resolveIncrementOpts merges dynamic maxRequests and incrementCost', () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+    });
+    const opts = {
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: (req: unknown) => (req as { n: number }).n,
+      incrementCost: 2,
+      store,
+    } as RateLimitOptions;
+    expect(resolveIncrementOpts(opts, { n: 7 })).toEqual({ maxRequests: 7, cost: 2 });
   });
 
   it('uses key generation correctly', async () => {

@@ -29,13 +29,13 @@ export enum RateLimitStrategy {
 /**
  * Result of calling {@link RateLimitStore.increment}.
  *
- * @description Snapshot of usage after recording (or attempting) one hit for a key.
+ * @description Snapshot of usage after recording (or attempting) a weighted increment for a key. When {@link RateLimitIncrementOptions.cost} is above `1`, window strategies count **units** (not only HTTP requests); token bucket `totalHits` reflects consumed capacity (`bucketSize - remaining`).
  * @see {@link RateLimitStore}
  * @since 1.0.0
  */
 export interface RateLimitResult {
   /**
-   * @description Number of hits counted in the current window/bucket context (semantics depend on strategy).
+   * @description Usage in the current window/bucket (sliding/fixed: counted units including {@link RateLimitIncrementOptions.cost}; token bucket: derived from remaining tokens).
    */
   totalHits: number;
   /**
@@ -59,17 +59,38 @@ export interface RateLimitResult {
 }
 
 /**
- * Optional per-call overrides for {@link RateLimitStore.increment} (window strategies only).
+ * Optional per-call overrides for {@link RateLimitStore.increment}.
  *
- * @description Lets {@link RateLimitEngine} pass a dynamic cap when `maxRequests` is a function.
+ * @description **`maxRequests`** applies to sliding/fixed window only (dynamic cap when `maxRequests` is a function). **`cost`** applies to all strategies (sliding, fixed, token bucket) for weighted requests.
+ * @see {@link RateLimitOptionsBase.incrementCost}
  * @since 1.1.0
  */
 export interface RateLimitIncrementOptions {
   /**
-   * @description Overrides the store’s configured max for this increment only (sliding/fixed window).
+   * @description Overrides the store’s configured max for this increment only (sliding/fixed window; ignored for token bucket).
    * @default undefined (use store’s configured cap)
    */
   maxRequests?: number;
+  /**
+   * @description How many quota units this call consumes (default `1`). Use for weighted endpoints (e.g. uploads, expensive GraphQL).
+   * @default 1
+   * @since 1.3.1
+   */
+  cost?: number;
+}
+
+/**
+ * Optional per-call weight for {@link RateLimitStore.decrement}.
+ *
+ * @description When rolling back a weighted increment, pass the same **`cost`** as that increment. Sliding window: removes **`cost`** oldest entries (FIFO).
+ * @since 1.3.1
+ */
+export interface RateLimitDecrementOptions {
+  /**
+   * @description How many units to remove (must match the increment’s `cost` when undoing that request).
+   * @default 1
+   */
+  cost?: number;
 }
 
 /**
@@ -82,20 +103,21 @@ export interface RateLimitIncrementOptions {
  */
 export interface RateLimitStore {
   /**
-   * @description Record one request for `key` and return quota state.
+   * @description Record one weighted increment for `key` and return quota state.
    * @param key - Stable client identifier (from {@link RateLimitOptionsBase.keyGenerator}).
-   * @param options - Optional per-call max override for window strategies.
+   * @param options - Optional **`maxRequests`** (sliding/fixed only) and **`cost`** (all strategies; default `1`).
    * @returns Promise resolving to {@link RateLimitResult}.
    */
   increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult>;
 
   /**
-   * @description Undo one hit when middleware “skip failed/successful” options apply after the response.
-   * Sliding-window stores remove the **oldest** hit (FIFO), matching completion order under concurrency.
+   * @description Undo quota when middleware “skip failed/successful” options apply after the response, or when draft/grouped rollback runs.
+   * Sliding-window stores remove the **oldest** entries first (**FIFO**), **`cost`** times when the prior increment used a {@link RateLimitIncrementOptions.cost} above `1`.
    * @param key - Same key passed to {@link RateLimitStore.increment}.
+   * @param options - Match the prior increment’s **`cost`** (default `1`). See {@link RateLimitDecrementOptions}.
    * @returns Promise that settles when decrement is complete.
    */
-  decrement(key: string): Promise<void>;
+  decrement(key: string, options?: RateLimitDecrementOptions): Promise<void>;
 
   /**
    * @description Clear stored state for `key` (admin / logout flows).
@@ -249,6 +271,13 @@ export interface RateLimitOptionsBase {
    * @since 1.3.0
    */
   metrics?: MetricsConfig | boolean;
+
+  /**
+   * @description Per-request quota weight for {@link RateLimitStore.increment} (equivalent to passing `{ cost }` on each increment).
+   * @default undefined (cost `1`)
+   * @since 1.3.1
+   */
+  incrementCost?: number | ((req: unknown) => number);
 }
 
 /**
