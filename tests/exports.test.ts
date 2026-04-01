@@ -15,6 +15,8 @@ import {
   createStore,
   defaultKeyGenerator,
   detectEnvironment,
+  matchingDecrementOptions,
+  resolveIncrementOpts,
   expressRateLimiter,
   fixedWindowDefaults,
   Histogram,
@@ -53,6 +55,8 @@ describe('package exports', () => {
     expect(RateLimitEngine).toBeDefined();
     expect(typeof createRateLimitEngine).toBe('function');
     expect(typeof defaultKeyGenerator).toBe('function');
+    expect(typeof resolveIncrementOpts).toBe('function');
+    expect(typeof matchingDecrementOptions).toBe('function');
   });
 
   it('exports stores and factory', () => {

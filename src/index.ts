@@ -16,7 +16,7 @@ import type { RateLimitOptions } from './types/index.js';
  *
  * @since 1.0.0
  */
-export const VERSION = '1.3.0';
+export const VERSION = '1.3.1';
 
 /**
  * Express middleware factory — same implementation as {@link expressRateLimiter} in `./middleware/express.js`.
@@ -47,12 +47,16 @@ export {
  * @see {@link RateLimitEngine}
  * @see {@link createRateLimitEngine}
  * @see {@link defaultKeyGenerator}
+ * @see {@link resolveIncrementOpts} — per-request `increment` options (dynamic `maxRequests`, `incrementCost`)
+ * @see {@link matchingDecrementOptions} — `decrement` options that match a prior increment
  * @since 1.0.0
  */
 export {
   RateLimitEngine,
   createRateLimiter as createRateLimitEngine,
   defaultKeyGenerator,
+  matchingDecrementOptions,
+  resolveIncrementOpts,
   type RateLimitConsumeResult,
   type RateLimiterConfigInput,
 } from './strategies/rate-limit-engine.js';

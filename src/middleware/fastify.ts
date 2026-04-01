@@ -2,7 +2,12 @@ import type { RequestHandler } from 'express';
 import type { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
 import { MetricsManager } from '../metrics/manager.js';
-import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
+import {
+  RateLimitEngine,
+  defaultKeyGenerator,
+  matchingDecrementOptions,
+  resolveIncrementOpts,
+} from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
@@ -52,7 +57,7 @@ declare module 'fastify' {
      */
     rateLimitKey?: string;
     /**
-     * @description Internal: which response outcomes trigger {@link RateLimitStore.decrement}.
+     * @description Internal: which response outcomes trigger {@link RateLimitStore.decrement} with the same **`cost`** as the consume (see `incrementCost` / {@link resolveIncrementOpts}).
      */
     rateLimitDecrementFlags?: {
       /** @description Decrement when HTTP status is 400 or greater. */
@@ -63,17 +68,19 @@ declare module 'fastify' {
   }
 }
 
-function decrementStores(resolved: RateLimitOptions, key: string): void {
+function decrementStores(resolved: RateLimitOptions, key: string, req: unknown): void {
+  const incOpts = resolveIncrementOpts(resolved, req);
+  const decOpts = matchingDecrementOptions(incOpts);
   const w = resolved as WindowRateLimitOptions;
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
     for (const g of w.groupedWindowStores) {
-      void g.store.decrement(key).catch(() => {
+      void g.store.decrement(key, decOpts).catch(() => {
         /* ignore */
       });
     }
     return;
   }
-  void resolved.store.decrement(key).catch(() => {
+  void resolved.store.decrement(key, decOpts).catch(() => {
     /* ignore */
   });
 }
@@ -165,7 +172,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     const success = status < 400;
 
     if ((flags.onFailed && failed) || (flags.onSuccess && success)) {
-      decrementStores(resolved, key);
+      decrementStores(resolved, key, request);
     }
   });
 };

@@ -1,10 +1,12 @@
 import { MemoryStore } from '../stores/memory-store.js';
 import {
+  sanitizeIncrementCost,
   sanitizePenaltyDurationMs,
   sanitizeRateLimitCap,
   sanitizeWindowMs,
 } from '../utils/clamp.js';
 import type {
+  RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitOptions,
   RateLimitResult,
@@ -117,18 +119,52 @@ function resolveWindowMaxRequests(opts: WindowRateLimitOptions, req: unknown): n
   return sanitizeRateLimitCap(mr, 100);
 }
 
-function resolveIncrementOpts(
+/**
+ * Resolves per-request {@link RateLimitIncrementOptions} from engine options (dynamic `maxRequests`, `incrementCost`).
+ *
+ * @description Used by {@link RateLimitEngine} and framework middleware for weighted increments and matching decrements.
+ * @param opts - Merged `RateLimitOptions` (including `store`).
+ * @param req - Request (or arbitrary value) passed to `incrementCost` / `maxRequests` when they are functions.
+ * @returns `undefined` when neither a dynamic `maxRequests` nor `incrementCost` applies; otherwise `{ maxRequests?, cost? }`.
+ * @since 1.3.1
+ */
+export function resolveIncrementOpts(
   opts: RateLimitOptions,
   req: unknown,
 ): RateLimitIncrementOptions | undefined {
+  const costRaw = opts.incrementCost;
+  let costPart: { cost: number } | undefined;
+  if (costRaw !== undefined) {
+    const v = typeof costRaw === 'function' ? costRaw(req) : costRaw;
+    costPart = { cost: sanitizeIncrementCost(v, 1) };
+  }
+
   if (!isWindowOpts(opts)) {
+    return costPart ? { ...costPart } : undefined;
+  }
+
+  const mr = opts.maxRequests;
+  const maxPart =
+    typeof mr === 'function'
+      ? { maxRequests: sanitizeRateLimitCap(mr(req), 100) }
+      : undefined;
+
+  if (!maxPart && !costPart) {
     return undefined;
   }
-  const mr = opts.maxRequests;
-  if (typeof mr === 'function') {
-    return { maxRequests: sanitizeRateLimitCap(mr(req), 100) };
-  }
-  return undefined;
+  return { ...maxPart, ...costPart };
+}
+
+/**
+ * Builds {@link RateLimitDecrementOptions} that undo a prior {@link RateLimitStore.increment} for the same request.
+ *
+ * @description Pass the object returned by {@link resolveIncrementOpts} (or the same shape) so **`cost`** matches the increment being rolled back.
+ * @param inc - Result of {@link resolveIncrementOpts}, or `undefined` (treated as cost `1`).
+ * @returns {@link RateLimitDecrementOptions} with sanitized **`cost`**.
+ * @since 1.3.1
+ */
+export function matchingDecrementOptions(inc?: RateLimitIncrementOptions): RateLimitDecrementOptions {
+  return { cost: sanitizeIncrementCost(inc?.cost, 1) };
 }
 
 /**
@@ -154,7 +190,7 @@ export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEng
 /**
  * Core rate limiting orchestrator (policy + store + headers).
  *
- * @description Used by Express/Fastify middleware and for non-HTTP pipelines. Applies allow/block lists, penalty box, draft mode, then {@link RateLimitStore.increment}.
+ * @description Used by Express/Fastify middleware and for non-HTTP pipelines. Applies allow/block lists, penalty box, draft mode, then {@link RateLimitStore.increment}. Honors {@link RateLimitOptionsBase.incrementCost} and dynamic **`maxRequests`** via {@link resolveIncrementOpts}.
  * @see {@link MemoryStore}
  * @see {@link RedisStore}
  * @since 1.0.0
@@ -252,9 +288,10 @@ export class RateLimitEngine {
     let result: RateLimitResult;
     let blockedAtIndex: number | undefined;
     const incOpts = resolveIncrementOpts(this.options, req);
+    const decOpts = matchingDecrementOptions(incOpts);
 
     if (grouped && grouped.length > 0) {
-      const g = await this.consumeGroupedWindows(key, grouped, draft, m);
+      const g = await this.consumeGroupedWindows(key, grouped, draft, m, incOpts);
       result = g.result;
       blockedAtIndex = g.blockedAtIndex;
     } else {
@@ -268,13 +305,13 @@ export class RateLimitEngine {
         for (let k = 0; k <= blockedAtIndex; k++) {
           const slot = grouped[k];
           if (slot !== undefined) {
-            await slot.store.decrement(key).catch(() => {
+            await slot.store.decrement(key, decOpts).catch(() => {
               /* ignore */
             });
           }
         }
       } else if (!grouped || grouped.length === 0) {
-        await this.options.store.decrement(key).catch(() => {
+        await this.options.store.decrement(key, decOpts).catch(() => {
           /* ignore */
         });
       }
@@ -437,12 +474,17 @@ export class RateLimitEngine {
     grouped: NonNullable<WindowRateLimitOptions['groupedWindowStores']>,
     draft: boolean,
     metrics: MetricsCounters | undefined,
+    incOpts: RateLimitIncrementOptions | undefined,
   ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
+    const decOpts = matchingDecrementOptions(incOpts);
     const done: RateLimitResult[] = [];
     for (let i = 0; i < grouped.length; i++) {
       const g = grouped[i]!;
       const ts = metrics ? performance.now() : 0;
-      const r = await g.store.increment(key, { maxRequests: g.maxRequests });
+      const r = await g.store.increment(key, {
+        maxRequests: g.maxRequests,
+        ...(incOpts?.cost !== undefined ? { cost: incOpts.cost } : {}),
+      });
       if (metrics) metrics.recordStoreLatency(ts);
       done.push(r);
       if (r.isBlocked) {
@@ -450,7 +492,7 @@ export class RateLimitEngine {
         if (!deferRollbackToDraft) {
           for (let j = 0; j < i; j++) {
             const prev = grouped[j]!;
-            await prev.store.decrement(key).catch(() => {
+            await prev.store.decrement(key, decOpts).catch(() => {
               /* ignore */
             });
           }
