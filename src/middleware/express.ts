@@ -9,7 +9,7 @@ import {
 } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
-import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
+import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'express-serve-static-core' {
@@ -77,7 +77,7 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
  *
  * @description
  * - Blocked responses: **429** (rate limit), **403** (blocklist), **503** (Redis fail-closed / service unavailable).
- * - On allow: sets `req.rateLimit` and optional `X-RateLimit-*` headers.
+ * - On allow: sets `req.rateLimit` and optional `X-RateLimit-*` headers; when the store reports {@link RateLimitResult.storeUnavailable}, adds **`X-RateLimit-Store: fallback`** (insurance / degraded path).
  * - **`incrementCost`** / weighted increments: skip-response decrements use {@link matchingDecrementOptions} so rollback matches consumed quota.
  * @param options - Partial {@link RateLimitOptions}; `store` defaults to a new {@link MemoryStore} when omitted (unless `limits` is used).
  * @returns Express `RequestHandler` with {@link ExpressRateLimiterHandler}: always includes {@link MetricsManager} and snapshot/history/Prometheus helpers (no-ops when `metrics` is disabled).
@@ -98,6 +98,7 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
 export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressRateLimiterHandler {
   const resolved = mergeRateLimiterOptions(options);
   warnIfMemoryStoreInCluster(resolved.store);
+  warnIfRedisStoreWithoutInsurance(resolved.store);
   const metricsManager = new MetricsManager(resolved.metrics);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
@@ -114,6 +115,10 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
     try {
       key = keyGen(req);
       const result = await engine.consumeWithKey(key, req);
+
+      if (result.storeUnavailable === true) {
+        res.setHeader('X-RateLimit-Store', 'fallback');
+      }
 
       if (resolved.headers !== false) {
         applyHeaders(res, result.headers);

@@ -5,7 +5,14 @@ import {
   type RateLimitOptions,
   type RateLimitStore,
 } from '../src/types/index.js';
+import type {
+  CircuitBreakerOptions,
+  InsuranceLimiterOptions,
+  RedisResilienceOptions,
+  ResilienceHooks,
+} from '../src/index.js';
 import {
+  CircuitBreaker,
   VERSION,
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
@@ -26,6 +33,7 @@ import {
   multiInstancePreset,
   publicApiPreset,
   RedisStore,
+  resilientRedisPreset,
   RateLimitEngine,
   singleInstancePreset,
   slidingWindowDefaults,
@@ -59,6 +67,32 @@ describe('package exports', () => {
     expect(typeof matchingDecrementOptions).toBe('function');
   });
 
+  it('exports CircuitBreaker', () => {
+    expect(CircuitBreaker).toBeDefined();
+    expect(new CircuitBreaker().state).toBe('CLOSED');
+  });
+
+  it('exports resilience-related types (compile-time re-exports from main entry)', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+    try {
+      const _hooks: ResilienceHooks = {};
+      const _insurance: InsuranceLimiterOptions = { store };
+      const _resilience: RedisResilienceOptions = {
+        insuranceLimiter: _insurance,
+        circuitBreaker: { failureThreshold: 2 } satisfies Partial<CircuitBreakerOptions>,
+      };
+      void _hooks;
+      void _resilience;
+      expect(_resilience.insuranceLimiter?.store).toBe(store);
+    } finally {
+      await store.shutdown();
+    }
+  });
+
   it('exports stores and factory', () => {
     expect(MemoryStore).toBeDefined();
     expect(RedisStore).toBeDefined();
@@ -88,6 +122,7 @@ describe('package exports', () => {
     expect(typeof apiGatewayPreset).toBe('function');
     expect(typeof authEndpointPreset).toBe('function');
     expect(typeof publicApiPreset).toBe('function');
+    expect(typeof resilientRedisPreset).toBe('function');
     expect(typeof apiKeyHeaderKeyGenerator).toBe('function');
   });
 

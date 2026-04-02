@@ -2,6 +2,7 @@ import cluster from 'node:cluster';
 import fs from 'node:fs';
 import type { RateLimitStore } from '../types/index.js';
 import { MemoryStore } from '../stores/memory-store.js';
+import { RedisStore } from '../stores/redis-store.js';
 
 /**
  * Snapshot of deployment-related signals detected from `process.env` and the Node cluster API.
@@ -9,6 +10,7 @@ import { MemoryStore } from '../stores/memory-store.js';
  * @description Best-effort; use for logging or startup hints, not security guarantees.
  * @see {@link detectEnvironment}
  * @see {@link warnIfMemoryStoreInCluster}
+ * @see {@link warnIfRedisStoreWithoutInsurance}
  * @since 1.2.0
  */
 export interface EnvironmentInfo {
@@ -85,6 +87,8 @@ export function detectEnvironment(): EnvironmentInfo {
 
 let hasWarned = false;
 
+let hasWarnedRedisNoInsurance = false;
+
 /**
  * Log a **one-time** warning when a {@link MemoryStore} is used in a detected multi-instance environment.
  *
@@ -121,5 +125,40 @@ export function warnIfMemoryStoreInCluster(store: RateLimitStore): void {
       '  Rate limits will be tracked per-instance, not globally.\n' +
       '  Consider using RedisStore for shared rate limiting.\n' +
       '  See: https://github.com/ashwinpaulallen/ratelimit-flex#deployment-guide',
+  );
+}
+
+/**
+ * Log a **one-time** warning when a {@link RedisStore} is used **without** an insurance limiter in a detected multi-instance environment.
+ *
+ * @description Invoked by Express/Fastify middleware after options merge. Suppress with `RATELIMIT_FLEX_NO_RESILIENCE_WARN=1` or `true`.
+ * @param store - The resolved store backing the limiter.
+ * @returns `void` (no throw).
+ * @see {@link detectEnvironment}
+ * @see {@link RedisStore.hasInsuranceLimiter}
+ * @since 1.3.2
+ */
+export function warnIfRedisStoreWithoutInsurance(store: RateLimitStore): void {
+  if (hasWarnedRedisNoInsurance || !(store instanceof RedisStore)) {
+    return;
+  }
+
+  const optOut = process.env['RATELIMIT_FLEX_NO_RESILIENCE_WARN'];
+  if (optOut === '1' || optOut?.toLowerCase() === 'true') {
+    return;
+  }
+
+  const env = detectEnvironment();
+  if (!env.isMultiInstance) {
+    return;
+  }
+
+  if (store.hasInsuranceLimiter()) {
+    return;
+  }
+
+  hasWarnedRedisNoInsurance = true;
+  console.warn(
+    'ratelimit-flex: RedisStore detected in a multi-instance environment without an insurance limiter. Consider using resilientRedisPreset() or adding an insuranceLimiter for Redis failover protection.',
   );
 }

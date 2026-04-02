@@ -203,4 +203,85 @@ describe('MemoryStore', () => {
     expect(maxTotalHits).toBe(100);
     await store.shutdown();
   });
+
+  describe('getActiveKeys / resetAll', () => {
+    it('getActiveKeys returns correct entries after several increments', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 10_000,
+        maxRequests: 100,
+      });
+
+      const t0 = Date.now();
+      await store.increment('alpha');
+      await store.increment('alpha');
+      await store.increment('beta');
+
+      const act = store.getActiveKeys();
+      expect(act.size).toBe(2);
+      expect(act.get('alpha')).toEqual({
+        totalHits: 2,
+        resetTime: new Date(t0 + 10_000),
+      });
+      expect(act.get('beta')).toEqual({
+        totalHits: 1,
+        resetTime: new Date(t0 + 10_000),
+      });
+
+      await store.shutdown();
+    });
+
+    it('getActiveKeys excludes expired sliding-window keys', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 1000,
+        maxRequests: 10,
+      });
+
+      await store.increment('gone');
+      expect(store.getActiveKeys().has('gone')).toBe(true);
+
+      vi.advanceTimersByTime(1001);
+      expect(store.getActiveKeys().size).toBe(0);
+
+      await store.shutdown();
+    });
+
+    it('getActiveKeys excludes expired fixed-window keys', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 1000,
+        maxRequests: 10,
+      });
+
+      await store.increment('fw');
+      expect(store.getActiveKeys().has('fw')).toBe(true);
+
+      vi.advanceTimersByTime(1001);
+      expect(store.getActiveKeys().size).toBe(0);
+
+      await store.shutdown();
+    });
+
+    it('resetAll clears all state and getActiveKeys is empty', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+      });
+
+      await store.increment('x');
+      await store.increment('y');
+      expect(store.getActiveKeys().size).toBe(2);
+
+      store.resetAll();
+      expect(store.getActiveKeys().size).toBe(0);
+      expect((store as unknown as { sliding: Map<string, unknown> }).sliding.size).toBe(0);
+
+      const after = await store.increment('z');
+      expect(after.totalHits).toBe(1);
+
+      await store.shutdown();
+    });
+  });
 });

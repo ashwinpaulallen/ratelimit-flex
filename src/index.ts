@@ -5,6 +5,7 @@
  * - Default export: {@link expressRateLimiter}
  * - Fastify: import `fastifyRateLimiter` from `ratelimit-flex/fastify`
  * - Types: re-exported from `./types/index.js`
+ * - Resilience: {@link CircuitBreaker}, {@link RedisResilienceOptions}, {@link resilientRedisPreset}, related types
  * @packageDocumentation
  */
 
@@ -16,7 +17,7 @@ import type { RateLimitOptions } from './types/index.js';
  *
  * @since 1.0.0
  */
-export const VERSION = '1.3.1';
+export const VERSION = '1.3.2';
 
 /**
  * Express middleware factory — same implementation as {@link expressRateLimiter} in `./middleware/express.js`.
@@ -103,6 +104,20 @@ export { detectEnvironment, type EnvironmentInfo } from './utils/environment.js'
 export { fixedWindowDefaults, slidingWindowDefaults, tokenBucketDefaults } from './strategies/defaults.js';
 
 /**
+ * Resilience: {@link CircuitBreaker}, {@link CircuitBreakerOptions}, {@link ResilienceHooks}, {@link InsuranceLimiterOptions}, {@link RedisResilienceOptions}, {@link CircuitState}.
+ *
+ * @since 1.3.2
+ */
+export {
+  CircuitBreaker,
+  type CircuitBreakerOptions,
+  type CircuitState,
+  type InsuranceLimiterOptions,
+  type RedisResilienceOptions,
+  type ResilienceHooks,
+} from './resilience/index.js';
+
+/**
  * All shared TypeScript types and {@link RateLimitStrategy}.
  *
  * @since 1.0.0
@@ -121,7 +136,9 @@ export {
   authEndpointPreset,
   multiInstancePreset,
   publicApiPreset,
+  resilientRedisPreset,
   singleInstancePreset,
+  type ResilientRedisPresetRedisOptions,
 } from './presets/index.js';
 
 /**

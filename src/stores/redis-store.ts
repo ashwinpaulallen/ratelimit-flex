@@ -1,4 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { CircuitBreaker } from '../resilience/CircuitBreaker.js';
+import type { RedisResilienceOptions } from '../resilience/types.js';
+import type { MemoryStore } from './memory-store.js';
 import type {
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
@@ -137,10 +140,15 @@ export type RedisStoreOptions = RedisStoreStrategyOptions & {
    */
   onWarn?: (message: string, error?: unknown) => void;
   /**
-   * @description Policy when Redis cannot evaluate a limit (see {@link RedisErrorMode}).
+   * @description Policy when Redis cannot evaluate a limit (see {@link RedisErrorMode}). Ignored when `resilience.insuranceLimiter` is set — insurance replaces fail-open/fail-closed.
    * @default `'fail-open'`
    */
   onRedisError?: RedisErrorMode;
+  /**
+   * @description Optional insurance MemoryStore + circuit breaker around Redis. When set, failed Redis calls fall back to the in-memory store instead of {@link RedisStoreOptions.onRedisError}.
+   * @since 1.3.2
+   */
+  resilience?: RedisResilienceOptions;
 };
 
 const DEFAULT_PREFIX = 'rlf:';
@@ -296,6 +304,17 @@ const LUA_DEL = `
 return redis.call('DEL', unpack(KEYS))
 `;
 
+/** Sync token-bucket hash after insurance recovery. KEYS[1]=hash, ARGV: tokens, last_refill, interval_ms */
+const LUA_BUCKET_SYNC = `
+local key = KEYS[1]
+local tokens = tonumber(ARGV[1])
+local last_refill = tonumber(ARGV[2])
+local interval_ms = tonumber(ARGV[3])
+redis.call('HSET', key, 'tokens', tostring(tokens), 'last_refill', tostring(last_refill))
+redis.call('PEXPIRE', key, interval_ms * 10)
+return 1
+`;
+
 /**
  * Adapts an **ioredis**-style client to {@link RedisLikeClient}.
  *
@@ -422,6 +441,15 @@ export class RedisStore implements RateLimitStore {
   /** Connection created from `url` — closed on {@link RedisStore.shutdown}. */
   private ownedRedis: IoRedisInstance | null = null;
 
+  private readonly resilience?: RedisResilienceOptions;
+
+  private readonly insuranceStore: MemoryStore | null = null;
+
+  private readonly circuitBreaker: CircuitBreaker | null = null;
+
+  /** Set when consecutive Redis failures first open the circuit (for recovery downtime). */
+  private failoverStartedAtMs: number | null = null;
+
   /**
    * @description Validates connection options, normalizes caps/window, and prepares the Redis client (or `ioredis` import from `url`).
    * @param options - Strategy fields plus `client` or `url`, optional `keyPrefix`, `onWarn`, `onRedisError`.
@@ -473,6 +501,53 @@ export class RedisStore implements RateLimitStore {
     } else {
       this.clientPromise = this.connectFromUrl(options.url as string);
     }
+
+    this.resilience = options.resilience;
+    if (options.resilience?.insuranceLimiter) {
+      const hooks = options.resilience.hooks;
+      const userCb = options.resilience.circuitBreaker;
+      this.insuranceStore = options.resilience.insuranceLimiter.store;
+      this.circuitBreaker = new CircuitBreaker({
+        failureThreshold: userCb?.failureThreshold ?? 3,
+        recoveryTimeMs: userCb?.recoveryTimeMs ?? 5000,
+        halfOpenMaxProbes: userCb?.halfOpenMaxProbes ?? 1,
+        onOpen: () => {
+          hooks?.onCircuitOpen?.();
+          userCb?.onOpen?.();
+        },
+        onClose: () => {
+          hooks?.onCircuitClose?.();
+          const t0 = this.failoverStartedAtMs;
+          const downtime = t0 !== null ? Date.now() - t0 : 0;
+          this.failoverStartedAtMs = null;
+          hooks?.onRecovery?.(downtime);
+          void this.syncCountersToRedis();
+          userCb?.onClose?.();
+        },
+        onHalfOpen: () => {
+          userCb?.onHalfOpen?.();
+        },
+      });
+    }
+  }
+
+  /**
+   * @description `true` when {@link RedisStoreOptions.resilience.insuranceLimiter} was configured.
+   * @since 1.3.2
+   */
+  hasInsuranceLimiter(): boolean {
+    return this.insuranceStore !== null;
+  }
+
+  private usesInsurance(): boolean {
+    return this.insuranceStore !== null && this.circuitBreaker !== null;
+  }
+
+  /**
+   * @description When {@link CircuitBreaker.canAttempt} is false, quota ops must use the insurance store — same routing as {@link RedisStore.incrementWithResilience} (covers OPEN and HALF_OPEN when probes are exhausted).
+   */
+  private shouldRouteQuotaViaInsurance(): boolean {
+    return this.usesInsurance() && !this.circuitBreaker!.canAttempt();
   }
 
   private async connectFromUrl(url: string): Promise<RedisLikeClient> {
@@ -621,16 +696,34 @@ export class RedisStore implements RateLimitStore {
    * @description Catches Redis errors and applies {@link RedisErrorMode} via {@link RedisStoreOptions.onRedisError}.
    */
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
+    if (this.usesInsurance()) {
+      return this.incrementWithResilience(key, options);
+    }
     const maxOverride = options?.maxRequests;
     const cost = sanitizeIncrementCost(options?.cost, 1);
     try {
       switch (this.strategy) {
-        case RateLimitStrategy.SLIDING_WINDOW:
-          return await this.incrSliding(key, maxOverride, cost);
-        case RateLimitStrategy.FIXED_WINDOW:
-          return await this.incrFixed(key, maxOverride, cost);
-        case RateLimitStrategy.TOKEN_BUCKET:
-          return await this.incrBucket(key, cost);
+        case RateLimitStrategy.SLIDING_WINDOW: {
+          const r = await this.incrSlidingRedis(key, maxOverride, cost);
+          if (r === null) {
+            return this.redisIncrementFailure();
+          }
+          return r;
+        }
+        case RateLimitStrategy.FIXED_WINDOW: {
+          const r = await this.incrFixedRedis(key, maxOverride, cost);
+          if (r === null) {
+            return this.redisIncrementFailure();
+          }
+          return r;
+        }
+        case RateLimitStrategy.TOKEN_BUCKET: {
+          const r = await this.incrBucketRedis(key, cost);
+          if (r === null) {
+            return this.redisIncrementFailure();
+          }
+          return r;
+        }
         default: {
           const _: never = this.strategy;
           return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
@@ -642,7 +735,181 @@ export class RedisStore implements RateLimitStore {
     }
   }
 
-  private async incrSliding(key: string, maxOverride?: number, cost = 1): Promise<RateLimitResult> {
+  private async incrementWithResilience(
+    key: string,
+    options?: RateLimitIncrementOptions,
+  ): Promise<RateLimitResult> {
+    const maxOverride = options?.maxRequests;
+    const cost = sanitizeIncrementCost(options?.cost, 1);
+    const cb = this.circuitBreaker!;
+
+    if (this.shouldRouteQuotaViaInsurance()) {
+      return this.insuranceIncrement(key, options);
+    }
+
+    let result: RateLimitResult | null;
+    try {
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          result = await this.incrSlidingRedis(key, maxOverride, cost);
+          break;
+        case RateLimitStrategy.FIXED_WINDOW:
+          result = await this.incrFixedRedis(key, maxOverride, cost);
+          break;
+        case RateLimitStrategy.TOKEN_BUCKET:
+          result = await this.incrBucketRedis(key, cost);
+          break;
+        default: {
+          const _: never = this.strategy;
+          return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
+        }
+      }
+    } catch (err) {
+      this.warn('Redis increment failed', err);
+      return this.handleRedisFailureForIncrement(key, options, err);
+    }
+
+    if (result !== null) {
+      cb.recordSuccess();
+      return result;
+    }
+
+    return this.handleRedisFailureForIncrement(
+      key,
+      options,
+      new Error('Redis operation returned no result'),
+    );
+  }
+
+  private async insuranceIncrement(
+    key: string,
+    options?: RateLimitIncrementOptions,
+  ): Promise<RateLimitResult> {
+    const r = await this.insuranceStore!.increment(key, options);
+    this.resilience?.hooks?.onInsuranceHit?.(key);
+    return { ...r, storeUnavailable: true };
+  }
+
+  private handleRedisFailureForIncrement(
+    key: string,
+    options: RateLimitIncrementOptions | undefined,
+    err: unknown,
+  ): Promise<RateLimitResult> {
+    const error = err instanceof Error ? err : new Error(String(err));
+    const cb = this.circuitBreaker!;
+    const before = cb.state;
+    cb.recordFailure();
+    // onFailover only when the circuit first opens from CLOSED (threshold reached). A failed HALF_OPEN
+    // probe re-opens the circuit without onFailover — failover was already signaled.
+    if (before === 'CLOSED' && cb.state === 'OPEN') {
+      this.failoverStartedAtMs = Date.now();
+      this.resilience?.hooks?.onFailover?.(error);
+    }
+    return this.insuranceIncrement(key, options);
+  }
+
+  /**
+   * Pushes insurance {@link MemoryStore.getActiveKeys} into Redis after the circuit closes, then {@link MemoryStore.resetAll}.
+   *
+   * @description **Sliding window:** Replays `totalHits` through the same Lua as live increments; synthetic members all use score **`now`**, so the count is correct but timestamps are not spread across the original window — the effective window restarts from recovery (burst “resets” at sync time). **Fixed window:** One increment with **`totalHits`** as cost. **Token bucket:** Direct bucket sync script (tokens + last refill), not increment Lua. No-ops when **`syncOnRecovery`** is **`false`** (early return before iteration).
+   */
+  private async syncCountersToRedis(): Promise<void> {
+    if (!this.usesInsurance() || !this.insuranceStore) {
+      return;
+    }
+    if (this.resilience?.insuranceLimiter?.syncOnRecovery === false) {
+      return;
+    }
+
+    const hooks = this.resilience?.hooks;
+    let keysSynced = 0;
+    let errors = 0;
+
+    try {
+      const active = this.insuranceStore.getActiveKeys();
+      const now = Date.now();
+      for (const [key, entry] of active.entries()) {
+        try {
+          await this.syncOneKeyToRedis(key, entry, now);
+          keysSynced++;
+        } catch {
+          errors++;
+        }
+      }
+      this.insuranceStore.resetAll();
+      hooks?.onCounterSync?.(keysSynced, errors);
+    } catch (err) {
+      this.warn('Redis resilience: counter sync failed', err);
+    }
+  }
+
+  /** @see {@link RedisStore.syncCountersToRedis} for sliding-window timestamp semantics at recovery. */
+  private async syncOneKeyToRedis(
+    key: string,
+    entry: { totalHits: number; resetTime: Date },
+    now: number,
+  ): Promise<void> {
+    const maxReq = this.maxRequests;
+    switch (this.strategy) {
+      case RateLimitStrategy.SLIDING_WINDOW: {
+        const cost = entry.totalHits;
+        if (cost <= 0) {
+          return;
+        }
+        // Members all scored at `now` — restores ZCARD; does not reconstruct spread timestamps from MemoryStore.
+        const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
+        const rk = this.redisKey('sw', key);
+        const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
+          now,
+          this.windowMs,
+          maxReq,
+          cost,
+          ...members,
+        ]);
+        if (raw === null) {
+          throw new Error('sync sliding failed');
+        }
+        return;
+      }
+      case RateLimitStrategy.FIXED_WINDOW: {
+        const rk = this.redisKey('fw', key);
+        const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [
+          this.windowMs,
+          maxReq,
+          now,
+          entry.totalHits,
+        ]);
+        if (raw === null) {
+          throw new Error('sync fixed failed');
+        }
+        return;
+      }
+      case RateLimitStrategy.TOKEN_BUCKET: {
+        const remaining = Math.max(0, this.bucketSize - entry.totalHits);
+        const lastRefill = entry.resetTime.getTime() - this.refillIntervalMs;
+        const rk = this.redisKey('tb', key);
+        const raw = await this.evalScript(LUA_BUCKET_SYNC, [rk], [
+          remaining,
+          lastRefill,
+          this.refillIntervalMs,
+        ]);
+        if (raw === null) {
+          throw new Error('sync token bucket failed');
+        }
+        return;
+      }
+      default: {
+        const exhaustive: never = this.strategy;
+        throw new Error(`Unsupported strategy: ${String(exhaustive)}`);
+      }
+    }
+  }
+
+  private async incrSlidingRedis(
+    key: string,
+    maxOverride?: number,
+    cost = 1,
+  ): Promise<RateLimitResult | null> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
@@ -655,13 +922,13 @@ export class RedisStore implements RateLimitStore {
       ...members,
     ]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
-      return this.redisIncrementFailure();
+      return null;
     }
     const count = Number(raw[0]);
     const blocked = Number(raw[1]) === 1;
     const resetMs = Number(raw[2]);
     if (Number.isNaN(count) || Number.isNaN(resetMs)) {
-      return this.redisIncrementFailure();
+      return null;
     }
     const remaining = blocked ? 0 : Math.max(0, maxReq - count);
     return {
@@ -672,19 +939,23 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrFixed(key: string, maxOverride?: number, cost = 1): Promise<RateLimitResult> {
+  private async incrFixedRedis(
+    key: string,
+    maxOverride?: number,
+    cost = 1,
+  ): Promise<RateLimitResult | null> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
     const rk = this.redisKey('fw', key);
     const raw = await this.evalScript(LUA_FIXED_INCR, [rk], [this.windowMs, maxReq, now, cost]);
     if (raw === null || !Array.isArray(raw) || raw.length < 3) {
-      return this.redisIncrementFailure();
+      return null;
     }
     const current = Number(raw[0]);
     const blocked = Number(raw[1]) === 1;
     const resetMs = Number(raw[2]);
     if (Number.isNaN(current) || Number.isNaN(resetMs)) {
-      return this.redisIncrementFailure();
+      return null;
     }
     const remaining = blocked ? 0 : Math.max(0, maxReq - current);
     return {
@@ -695,7 +966,7 @@ export class RedisStore implements RateLimitStore {
     };
   }
 
-  private async incrBucket(key: string, cost = 1): Promise<RateLimitResult> {
+  private async incrBucketRedis(key: string, cost = 1): Promise<RateLimitResult | null> {
     const now = Date.now();
     const rk = this.redisKey('tb', key);
     const raw = await this.evalScript(
@@ -704,14 +975,14 @@ export class RedisStore implements RateLimitStore {
       [now, this.tokensPerInterval, this.refillIntervalMs, this.bucketSize, cost],
     );
     if (raw === null || !Array.isArray(raw) || raw.length < 5) {
-      return this.redisIncrementFailure();
+      return null;
     }
     const remaining = Number(raw[1]);
     const totalHits = Number(raw[2]);
     const blocked = Number(raw[3]) === 1;
     const nextMs = Number(raw[4]);
     if (Number.isNaN(remaining) || Number.isNaN(totalHits) || Number.isNaN(nextMs)) {
-      return this.redisIncrementFailure();
+      return null;
     }
     return {
       totalHits,
@@ -729,6 +1000,10 @@ export class RedisStore implements RateLimitStore {
    */
   async decrement(key: string, options?: RateLimitDecrementOptions): Promise<void> {
     const cost = sanitizeIncrementCost(options?.cost, 1);
+    if (this.shouldRouteQuotaViaInsurance()) {
+      await this.insuranceStore!.decrement(key, options);
+      return;
+    }
     try {
       switch (this.strategy) {
         case RateLimitStrategy.SLIDING_WINDOW: {
@@ -781,6 +1056,10 @@ export class RedisStore implements RateLimitStore {
    * @throws In `fail-closed` mode if Redis cannot delete keys.
    */
   async reset(key: string): Promise<void> {
+    if (this.shouldRouteQuotaViaInsurance()) {
+      await this.insuranceStore!.reset(key);
+      return;
+    }
     try {
       const keys: string[] = [];
       switch (this.strategy) {
@@ -810,6 +1089,7 @@ export class RedisStore implements RateLimitStore {
    * @description Clears the client reference and calls `quit` / `disconnect` on a connection created from `url`.
    */
   async shutdown(): Promise<void> {
+    this.circuitBreaker?.destroy();
     this.client = null;
     const owned = this.ownedRedis;
     this.ownedRedis = null;

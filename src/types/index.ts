@@ -94,6 +94,19 @@ export interface RateLimitDecrementOptions {
 }
 
 /**
+ * One key’s usage snapshot from {@link RateLimitStore.getActiveKeys}.
+ *
+ * @description **`totalHits`** matches the store’s notion of usage for that key; **`resetTime`** is the next window/bucket boundary (same semantics as {@link RateLimitResult.resetTime}).
+ * @since 1.3.2
+ */
+export interface RateLimitActiveKeyEntry {
+  /** @description Current counted usage (window units or bucket consumption). */
+  totalHits: number;
+  /** @description Next reset / meaningful boundary for this key. */
+  resetTime: Date;
+}
+
+/**
  * Pluggable persistence for rate limit state (counters, bucket fields, etc.).
  *
  * @description Implement this to back the limiter with custom storage (e.g. another database).
@@ -131,6 +144,19 @@ export interface RateLimitStore {
    * @returns Promise that settles when shutdown is complete.
    */
   shutdown(): Promise<void>;
+
+  /**
+   * @description Optional: snapshot all keys with non-expired quota state (for syncing in-memory counters elsewhere).
+   * @returns Map of key → `{ totalHits, resetTime }` for active entries only.
+   * @since 1.3.2
+   */
+  getActiveKeys?(): Map<string, RateLimitActiveKeyEntry>;
+
+  /**
+   * @description Optional: clear all keys and counters in one shot (e.g. before rehydrating from Redis). Implementations without shared memory may omit this.
+   * @since 1.3.2
+   */
+  resetAll?(): void;
 }
 
 /**

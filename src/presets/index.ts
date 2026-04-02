@@ -1,5 +1,10 @@
-import { RedisStore } from '../stores/redis-store.js';
+import cluster from 'node:cluster';
+import type { CircuitBreakerOptions } from '../resilience/CircuitBreaker.js';
+import type { ResilienceHooks } from '../resilience/types.js';
+import { MemoryStore } from '../stores/memory-store.js';
+import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
+import { detectEnvironment, type EnvironmentInfo } from '../utils/environment.js';
 import type { RedisStoreConnectionOptions } from '../utils/store-factory.js';
 import type {
   RateLimitOptions,
@@ -40,6 +45,204 @@ export function apiKeyHeaderKeyGenerator(req: unknown): string {
     }
   }
   return defaultKeyGenerator(req);
+}
+
+/**
+ * First argument to {@link resilientRedisPreset}: Redis connection (`client` or `url`) plus optional {@link RedisStore} tuning.
+ * Window or token-bucket fields are merged with the second argument (defaults: sliding window, 60s, 100 req).
+ *
+ * @since 1.3.2
+ */
+export type ResilientRedisPresetRedisOptions = RedisStoreConnectionOptions &
+  Partial<{
+    strategy: RateLimitStrategy;
+    windowMs: number;
+    maxRequests: number;
+    tokensPerInterval: number;
+    interval: number;
+    bucketSize: number;
+  }> &
+  Partial<Pick<RedisStoreOptions, 'onWarn' | 'keyPrefix' | 'onRedisError'>>;
+
+function ceilDiv(numerator: number, denominator: number): number {
+  if (denominator <= 0) {
+    return Math.max(1, numerator);
+  }
+  return Math.max(1, Math.ceil(numerator / denominator));
+}
+
+/**
+ * Best-effort replica count from {@link detectEnvironment} when `estimatedWorkers` is omitted.
+ *
+ * @description Returns `1` when no multi-instance signals; otherwise uses Kubernetes (4), Docker (2), or cluster worker count when available.
+ */
+function estimateWorkersFromEnvironment(
+  explicit: number | undefined,
+  env: EnvironmentInfo = detectEnvironment(),
+): number {
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0) {
+    return Math.max(1, Math.floor(explicit));
+  }
+  if (!env.isMultiInstance) {
+    return 1;
+  }
+  let n = 1;
+  if (env.isKubernetes) {
+    n = Math.max(n, 4);
+  }
+  if (env.isDocker) {
+    n = Math.max(n, 2);
+  }
+  if (env.isCluster) {
+    const workerCount =
+      cluster.isPrimary && cluster.workers
+        ? Object.keys(cluster.workers).length
+        : cluster.isWorker
+          ? 1
+          : 0;
+    n = Math.max(n, workerCount > 1 ? workerCount : 2);
+  }
+  return Math.max(1, n);
+}
+
+function extractStrategyFromRedisOptions(redisOptions: ResilientRedisPresetRedisOptions): Partial<RateLimitOptions> {
+  const s = redisOptions.strategy;
+  if (s === RateLimitStrategy.TOKEN_BUCKET) {
+    return {
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: redisOptions.tokensPerInterval,
+      interval: redisOptions.interval,
+      bucketSize: redisOptions.bucketSize,
+    };
+  }
+  if (s === RateLimitStrategy.SLIDING_WINDOW || s === RateLimitStrategy.FIXED_WINDOW) {
+    return {
+      strategy: s,
+      windowMs: redisOptions.windowMs,
+      maxRequests: redisOptions.maxRequests,
+    };
+  }
+  return {};
+}
+
+/**
+ * Distributed preset with **insurance** {@link MemoryStore} + circuit breaker around {@link RedisStore}.
+ *
+ * @description The in-memory store’s cap is `ceil(maxRequests / workers)` so failover traffic stays roughly fair across replicas. Worker count defaults from {@link detectEnvironment} when `estimatedWorkers` is omitted.
+ * @param redisOptions - `client` or `url`, optional `prefix` / `onWarn` / `onRedisError`, optional window overrides.
+ * @param options - Rate limit overrides plus `estimatedWorkers`, `hooks`, `circuitBreaker`, `syncOnRecovery`.
+ * @returns Partial {@link RateLimitOptions} with a configured {@link RedisStore}.
+ * @example
+ * ```ts
+ * app.use(
+ *   expressRateLimiter(
+ *     resilientRedisPreset(
+ *       { url: process.env.REDIS_URL! },
+ *       { maxRequests: 300, estimatedWorkers: 5 },
+ *     ),
+ *   ),
+ * );
+ * ```
+ * @see {@link multiInstancePreset}
+ * @see {@link detectEnvironment}
+ * @since 1.3.2
+ */
+export function resilientRedisPreset(
+  redisOptions: ResilientRedisPresetRedisOptions,
+  options?: Partial<RateLimitOptions> & {
+    estimatedWorkers?: number;
+    hooks?: ResilienceHooks;
+    circuitBreaker?: Partial<CircuitBreakerOptions>;
+    syncOnRecovery?: boolean;
+  },
+): Partial<RateLimitOptions> {
+  const {
+    estimatedWorkers,
+    hooks,
+    circuitBreaker,
+    syncOnRecovery,
+    ...rateLimitOverrides
+  } = options ?? {};
+
+  const merged: Partial<RateLimitOptions> = {
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    windowMs: 60_000,
+    maxRequests: 100,
+    ...extractStrategyFromRedisOptions(redisOptions),
+    ...rateLimitOverrides,
+  };
+
+  const workers = estimateWorkersFromEnvironment(estimatedWorkers);
+
+  const { resilience, ...redisConnectionOnly } = redisOptions as ResilientRedisPresetRedisOptions & {
+    resilience?: unknown;
+  };
+  void resilience;
+
+  const syncFlag = syncOnRecovery !== false;
+
+  if (merged.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+    const tokensPerInterval = merged.tokensPerInterval ?? 30;
+    const interval = merged.interval ?? 60_000;
+    const bucketSize = merged.bucketSize ?? 60;
+
+    const insurance = new MemoryStore({
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: ceilDiv(tokensPerInterval, workers),
+      interval,
+      bucketSize: ceilDiv(bucketSize, workers),
+    });
+
+    const store = new RedisStore({
+      ...redisConnectionOnly,
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval,
+      interval,
+      bucketSize,
+      resilience: {
+        insuranceLimiter: { store: insurance, syncOnRecovery: syncFlag },
+        circuitBreaker: circuitBreaker ?? {},
+        hooks,
+      },
+    });
+
+    return { ...merged, store };
+  }
+
+  const windowMs =
+    merged.strategy === RateLimitStrategy.FIXED_WINDOW ||
+    merged.strategy === RateLimitStrategy.SLIDING_WINDOW
+      ? (merged.windowMs ?? 60_000)
+      : 60_000;
+  const maxRequests =
+    merged.strategy === RateLimitStrategy.FIXED_WINDOW ||
+    merged.strategy === RateLimitStrategy.SLIDING_WINDOW
+      ? (typeof merged.maxRequests === 'number' ? merged.maxRequests : 100)
+      : 100;
+  const strategy =
+    merged.strategy === RateLimitStrategy.FIXED_WINDOW
+      ? RateLimitStrategy.FIXED_WINDOW
+      : RateLimitStrategy.SLIDING_WINDOW;
+
+  const insurance = new MemoryStore({
+    strategy,
+    windowMs,
+    maxRequests: ceilDiv(maxRequests, workers),
+  });
+
+  const store = new RedisStore({
+    ...redisConnectionOnly,
+    strategy,
+    windowMs,
+    maxRequests,
+    resilience: {
+      insuranceLimiter: { store: insurance, syncOnRecovery: syncFlag },
+      circuitBreaker: circuitBreaker ?? {},
+      hooks,
+    },
+  });
+
+  return { ...merged, store };
 }
 
 /**

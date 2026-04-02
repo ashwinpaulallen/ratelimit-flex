@@ -1,9 +1,25 @@
 import express from 'express';
 import request from 'supertest';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { expressRateLimiter } from '../src/middleware/express.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../src/types/index.js';
+import type { RateLimitStore } from '../src/types/index.js';
+
+function mockStoreWithFallback(): RateLimitStore {
+  return {
+    increment: vi.fn().mockResolvedValue({
+      totalHits: 1,
+      remaining: 9,
+      resetTime: new Date(Date.now() + 60_000),
+      isBlocked: false,
+      storeUnavailable: true,
+    }),
+    decrement: vi.fn().mockResolvedValue(undefined),
+    reset: vi.fn().mockResolvedValue(undefined),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+  };
+}
 
 function createExpressApp(
   options: Parameters<typeof expressRateLimiter>[0],
@@ -53,8 +69,38 @@ describe('express middleware', () => {
     expect(res1.headers['x-ratelimit-limit']).toBe('3');
     expect(res1.headers['x-ratelimit-remaining']).toBe('2');
     expect(res1.headers['x-ratelimit-reset']).toBeTruthy();
+    expect(res1.headers['x-ratelimit-store']).toBeUndefined();
     expect(res2.status).toBe(200);
     expect(res2.headers['x-ratelimit-remaining']).toBe('1');
+    expect(res2.headers['x-ratelimit-store']).toBeUndefined();
+  });
+
+  it('sets X-RateLimit-Store: fallback when increment returns storeUnavailable', async () => {
+    const app = createExpressApp({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      store: mockStoreWithFallback(),
+    });
+
+    const res = await request(app).get('/ok');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-ratelimit-store']).toBe('fallback');
+  });
+
+  it('sets fallback header even when headers: false', async () => {
+    const app = createExpressApp({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      headers: false,
+      store: mockStoreWithFallback(),
+    });
+
+    const res = await request(app).get('/ok');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined();
+    expect(res.headers['x-ratelimit-store']).toBe('fallback');
   });
 
   it('blocks over limit with 429 body and Retry-After', async () => {
