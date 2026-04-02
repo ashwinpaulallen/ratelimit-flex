@@ -205,6 +205,8 @@ app.use(expressRateLimiter({ store, strategy: RateLimitStrategy.SLIDING_WINDOW }
 
 Prefer passing a **shared Redis URL or client** from every instance. Use a **distinct key prefix** (`keyPrefix`) per app or per limiter if several services share one Redis.
 
+**Multi-window:** The convenience **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) creates one **`MemoryStore` per window**. It does **not** switch those slots to Redis automatically. For the same multi-window policy across horizontally scaled processes, build **`groupedWindowStores`** with one **`RedisStore`** (or other shared `RateLimitStore`) per slot.
+
 ### Deployment topology
 
 | Setup | Store | What’s shared | What’s per-process |
@@ -788,11 +790,11 @@ Options are merged with strategy defaults. Omit **`store`** to get an auto-creat
 | `windowMs` | `number` | `60000` | Window length (sliding / fixed) |
 | `maxRequests` | `number` \| `(req) => number` | `100` | Max requests per window (sliding / fixed) |
 | `incrementCost` | `number` \| `(req) => number` | — | Quota units per request (`1` if omitted); use with weighted `store.increment` semantics |
-| `limits` | `{ windowMs, max }[]` | — | Multiple windows; block if **any** exceeded |
+| `limits` | `{ windowMs, max }[]` | — | Multiple windows; block if **any** exceeded ([details](#multi-window-limits-limits)) |
 | `tokensPerInterval` | `number` | `10` | Token bucket refill rate |
 | `interval` | `number` | `60000` | Refill interval (token bucket) |
 | `bucketSize` | `number` | `100` | Max tokens / burst (token bucket) |
-| `keyGenerator` | `(req) => string` | IP / socket fallback | Storage key |
+| `keyGenerator` | `(req) => string` | IP / socket fallback | Storage key ([Client IP & reverse proxies](#client-ip-and-reverse-proxies)) |
 | `headers` | `boolean` | `true` | Legacy `X-RateLimit-*` when **`standardHeaders`** is omitted; see [Standard headers](#standard-headers) |
 | `standardHeaders` | `boolean` \| `'legacy'` \| `'draft-6'` \| `'draft-7'` \| `'draft-8'` | (see defaults) | Which response header profile to send ([Standard headers](#standard-headers)) |
 | `identifier` | `string` | `{limit}-per-{windowSeconds}` | Policy name for draft-8 / draft-7 policy strings |
@@ -849,7 +851,7 @@ On **429** (and other blocked responses where headers are enabled), **`Retry-Aft
 
 **Note:** If the store’s **`resetTime`** is already in the past when headers are formatted (clock skew, slow handling), the seconds-until-reset value is **0**, so you may see **`Retry-After: 0`**. RFC 7231 defines that as “retry immediately” (valid); some clients treat **`0`** as no backoff and may retry aggressively — not a spec violation, but worth knowing for operators.
 
-**Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters.
+**Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters. The shorthand **`limits`** array builds **in-memory** stores only; for shared counters across replicas, see [Multi-window limits (`limits`)](#multi-window-limits-limits).
 
 ### Example
 
@@ -876,6 +878,16 @@ The **`standardHeaders`** string values (`'draft-6'`, `'draft-7'`, `'draft-8'`) 
 
 ## Advanced features
 
+### Client IP and reverse proxies
+
+The default storage key comes from **`defaultKeyGenerator`**: it prefers **`req.ip`**, then **`socket.remoteAddress`**, else **`"unknown"`**. Behind one or more reverse proxies or load balancers, the connection’s **`remoteAddress`** is often the **proxy**, not the end client. If **`req.ip`** is not derived from **`X-Forwarded-For`** (or your platform’s equivalent), every user can appear as the **same** key — too strict for real clients, or too loose for abusers sharing a proxy.
+
+**Express** — Set [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) so **`req.ip`** reflects the client (e.g. `app.set('trust proxy', 1)` or a hop count / subnet list that matches your deployment).
+
+**Fastify** — Set [`trustProxy`](https://fastify.dev/docs/latest/Reference/Server/#trustproxy) on the server so the request’s IP used by plugins matches the real client.
+
+Alternatively, stop relying on IP for identity: set **`keyGenerator`** to a stable per-user or per-tenant id (session, JWT subject, API key header), which is often clearer than parsing forwarded headers yourself.
+
 **Per-user / per-key limiting** — Set `keyGenerator` (API key, user id, tenant).
 
 ```ts
@@ -895,6 +907,28 @@ app.use(
 app.use(expressRateLimiter({ maxRequests: 100, windowMs: 60_000 }));
 app.use('/login', expressRateLimiter({ maxRequests: 5, windowMs: 60_000 }));
 ```
+
+### Multi-window limits (`limits`)
+
+Apply **several** sliding or fixed windows at once: a request is blocked if **any** window is exceeded. Pass **`limits`** as an array of **`{ windowMs, max }`** (merged to **`groupedWindowStores`** internally):
+
+```ts
+import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
+
+app.use(
+  expressRateLimiter({
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    limits: [
+      { windowMs: 60_000, max: 30 },
+      { windowMs: 3_600_000, max: 500 },
+    ],
+  }),
+);
+```
+
+**Horizontal scale:** That shorthand creates **one `MemoryStore` per window** in each Node process. Behind multiple app instances, each replica keeps **its own** counters, so effective limits are **per process**, not global. To enforce the same multi-window policy cluster-wide, omit **`limits`** and set **`groupedWindowStores`** explicitly: one entry per window, each with a **`store`** that points at a shared backend (typically **`RedisStore`** with the same **`windowMs`** / **`maxRequests`** as the slot). Single-instance or dev setups can keep using **`limits`** as-is.
+
+**Binding slot:** For headers and **`getLimit`**, the engine picks one **binding** window among grouped slots. If the request is **blocked**, that is the blocking window with the **latest** **`resetTime`** when several windows block at once. If the request is **allowed**, the binding slot is the one with the **lowest absolute** **`remaining`** count — **not** “most exhausted” as a **percentage** of each window’s cap. That matches typical setups (e.g. a tight per-minute cap next to a loose per-hour cap). Unusual mixes where a **higher** limit has **fewer** tokens left in absolute terms could label a different slot as “most constrained” than a **%-of-limit** rule would.
 
 **Dynamic limits** — `maxRequests` as a function (window strategies).
 

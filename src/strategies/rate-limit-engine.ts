@@ -39,6 +39,8 @@ export type RateLimiterConfigInput =
  * @description If `req` is a string, returns it unchanged (precomputed key).
  * @param req - Framework request or string key.
  * @returns Stable string key for {@link RateLimitStore}.
+ * @remarks
+ * Without **trust proxy** configuration (Express) or **trustProxy** (Fastify), `req.ip` may not reflect the real client behind a load balancer; see {@link RateLimitOptionsBase.keyGenerator}.
  * @example
  * ```ts
  * defaultKeyGenerator({ ip: '198.51.100.1' }); // '198.51.100.1'
@@ -168,6 +170,11 @@ export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEng
   return new RateLimitEngine(resolved, counters);
 }
 
+/** When {@link RateLimitEngine} penalty map is at least this size, sweep expired entries on every consume. */
+const PENALTY_EXPIRED_SWEEP_ALWAYS_SIZE = 1024;
+/** Below that size, sweep expired penalty entries every N consumes (amortized cleanup for dead keys). */
+const PENALTY_EXPIRED_SWEEP_INTERVAL = 256;
+
 /**
  * Core rate limiting orchestrator (policy + store + headers).
  *
@@ -188,6 +195,8 @@ export class RateLimitEngine {
   private readonly penaltyUntil = new Map<string, number>();
 
   private readonly violationTimestamps = new Map<string, number[]>();
+
+  private penaltyExpiredSweepSeq = 0;
 
   /**
    * @description Builds lookup sets for allow/block lists; does not connect to Redis.
@@ -238,6 +247,8 @@ export class RateLimitEngine {
   async consumeWithKey(key: string, req: unknown = key): Promise<RateLimitConsumeResult> {
     const m = this.metrics;
     const t0 = m ? performance.now() : 0;
+
+    this.maybeSweepExpiredPenaltyEntries();
 
     if (this.options.skip?.(req) === true) {
       const out = this.buildPassthroughResult(req);
@@ -334,6 +345,30 @@ export class RateLimitEngine {
     };
     if (m) this.recordMetricsAfterConsume(m, key, t0, consumeResult);
     return consumeResult;
+  }
+
+  /**
+   * Removes penalty entries whose window has ended. Without this, keys that never hit the app again
+   * would never pass through {@link isPenaltyActive}, so {@link penaltyUntil} could grow without bound
+   * under high-cardinality traffic.
+   */
+  private maybeSweepExpiredPenaltyEntries(): void {
+    if (this.penaltyUntil.size === 0) {
+      return;
+    }
+    const size = this.penaltyUntil.size;
+    const seq = ++this.penaltyExpiredSweepSeq;
+    const sweepEveryConsume = size >= PENALTY_EXPIRED_SWEEP_ALWAYS_SIZE;
+    const sweepOnInterval = (seq & (PENALTY_EXPIRED_SWEEP_INTERVAL - 1)) === 0;
+    if (!sweepEveryConsume && !sweepOnInterval) {
+      return;
+    }
+    const now = Date.now();
+    for (const [k, until] of this.penaltyUntil) {
+      if (until <= now) {
+        this.penaltyUntil.delete(k);
+      }
+    }
   }
 
   private isPenaltyActive(key: string): boolean {

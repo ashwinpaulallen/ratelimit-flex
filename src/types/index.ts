@@ -231,6 +231,8 @@ export interface RateLimitOptionsBase {
   /**
    * @description Builds a stable storage key per request (IP, API key, user id, etc.).
    * @default Framework fallback uses `req.ip`, then `socket.remoteAddress`, else `"unknown"` ({@link defaultKeyGenerator}).
+   * @remarks
+   * Behind reverse proxies, **`req.ip`** / **`socket.remoteAddress`** may identify the proxy unless the app is configured to trust forwarded client addresses (e.g. Express **`trust proxy`**, Fastify **`trustProxy`**). Otherwise limits can apply to the wrong identity. Prefer a custom **`keyGenerator`** (API key, user id) when IP is not reliable.
    */
   keyGenerator?: (req: unknown) => string;
 

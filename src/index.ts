@@ -13,11 +13,11 @@ import { expressRateLimiter, type ExpressRateLimiterHandler } from './middleware
 import type { RateLimitOptions } from './types/index.js';
 
 /**
- * Current package version string (semver).
+ * Current package version string (semver). Same as **`package.json`** **`version`** (single source of truth).
  *
  * @since 1.0.0
  */
-export const VERSION = '1.4.0';
+export { VERSION } from './version.js';
 
 /**
  * Express middleware factory — same implementation as {@link expressRateLimiter} in `./middleware/express.js`.

@@ -1,6 +1,6 @@
 {
   "name": "ratelimit-flex",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Flexible rate limiting for Node.js (Express, Fastify, sliding window, token bucket)",
   "license": "MIT",
   "keywords": [
@@ -88,7 +88,8 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "sync-version": "node scripts/sync-version.mjs",
+    "build": "npm run sync-version && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
