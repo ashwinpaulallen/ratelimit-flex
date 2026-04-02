@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RedisErrorMode } from '../src/stores/redis-store.js';
 import {
@@ -51,10 +54,17 @@ import defaultExport from '../src/index.js';
 import { fastifyRateLimiter } from '../src/fastify.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
 describe('package exports', () => {
   it('exports VERSION string', () => {
     expect(typeof VERSION).toBe('string');
     expect(VERSION.length).toBeGreaterThan(0);
+  });
+
+  it('VERSION matches package.json (sync-version / build must stay aligned)', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version: string };
+    expect(VERSION).toBe(pkg.version);
   });
 
   it('exports Express middleware and default', () => {

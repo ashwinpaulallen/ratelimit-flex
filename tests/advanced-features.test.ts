@@ -115,6 +115,44 @@ describe('penalty box', () => {
     expect(penalty.status).toBe(429);
     expect(penalty.body).toEqual({ error: 'Too many requests' });
   });
+
+  it('prunes expired penalty map entries without each key revisiting', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    try {
+      const engine = new RateLimitEngine(
+        mergeRateLimiterOptions({
+          strategy: RateLimitStrategy.SLIDING_WINDOW,
+          windowMs: 60_000,
+          maxRequests: 1,
+          penaltyBox: {
+            violationsThreshold: 1,
+            violationWindowMs: 60_000,
+            penaltyDurationMs: 60_000,
+          },
+          store: trackedStore({
+            strategy: RateLimitStrategy.SLIDING_WINDOW,
+            windowMs: 60_000,
+            maxRequests: 1,
+          }),
+        }),
+      );
+      const penaltyUntil = (engine as unknown as { penaltyUntil: Map<string, number> }).penaltyUntil;
+
+      for (let i = 0; i < 2000; i++) {
+        const k = `pen-${i}`;
+        await engine.consumeWithKey(k, {});
+        await engine.consumeWithKey(k, {});
+      }
+      expect(penaltyUntil.size).toBe(2000);
+
+      vi.advanceTimersByTime(60_001);
+      await engine.consumeWithKey('sweeper', {});
+      expect(penaltyUntil.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('allowlist / blocklist', () => {
