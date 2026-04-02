@@ -239,6 +239,14 @@ Suppress with:
 RATELIMIT_FLEX_NO_MEMORY_WARN=1
 ```
 
+Similarly, if **`RedisStore`** is used **without** an insurance limiter (`resilience.insuranceLimiter`) in a multi-instance-looking environment, a **one-time** stderr reminder suggests **`resilientRedisPreset`** or configuring insurance for failover protection.
+
+Suppress with:
+
+```bash
+RATELIMIT_FLEX_NO_RESILIENCE_WARN=1
+```
+
 ## Presets
 
 Presets return a **`Partial<RateLimitOptions>`** you can pass to `expressRateLimiter` / `fastifyRateLimiter` (or spread and override).
@@ -271,6 +279,10 @@ app.use(
   ),
 );
 ```
+
+### `resilientRedisPreset(redisOptions, options?)`
+
+**When:** Production **Redis** with **insurance** (in-memory fallback), **circuit breaker**, optional **counter sync** on recovery, and per-worker limit scaling. See [Redis resilience](#redis-resilience) for behavior, examples, and comparison with fail-open / fail-closed.
 
 ### `apiGatewayPreset(redisOptions, options?)`
 
@@ -398,6 +410,8 @@ The breaker around Redis has three states:
 ### Counter sync
 
 When the circuit **closes** again after an outage, accumulated hits in the insurance **`MemoryStore`** can be **replayed into Redis** (`INCRBY`-style paths per strategy) so shared state catches up. This is **`syncOnRecovery: true`** by default on `resilience.insuranceLimiter` and can be set to **`false`** if you do not want that merge step.
+
+**Sliding window note:** replay bulk-inserts synthetic hits with timestamps at recovery time (counts match; the visible window is not time-smoothed across the outage — see JSDoc on `RedisStore` sync). **Fixed window** and **token bucket** sync paths behave as described in code comments.
 
 ### Comparison: fail-open / fail-closed vs insurance limiter
 
@@ -949,8 +963,9 @@ Pass your store as **`store`** in middleware options.
 | **`createStore(options)`** | Build `MemoryStore` or `RedisStore` (`CreateStoreOptions`) |
 | **`detectEnvironment()`** | `EnvironmentInfo` — deployment hints |
 | **`singleInstancePreset`**, **`multiInstancePreset`**, **`resilientRedisPreset`**, **`apiGatewayPreset`**, **`authEndpointPreset`**, **`publicApiPreset`** | Opinionated `Partial<RateLimitOptions>` |
-| **`MemoryStore`** | In-memory store |
-| **`RedisStore`** | Redis-backed store (Lua) |
+| **`CircuitBreaker`**, **`RedisResilienceOptions`**, **`ResilienceHooks`**, **`InsuranceLimiterOptions`**, **`CircuitBreakerOptions`**, **`CircuitState`** | Circuit breaker and Redis failover types ([Redis resilience](#redis-resilience)) |
+| **`MemoryStore`** | In-memory store (`getActiveKeys` / `resetAll` for advanced sync scenarios) |
+| **`RedisStore`** | Redis-backed store (Lua); optional **`resilience`** for insurance + breaker |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
 | **`resolveIncrementOpts`**, **`matchingDecrementOptions`** | Resolve per-request `increment` / `decrement` options (weighted limits) |
 | **`createRateLimiter`** | `{ express }` middleware helper |
@@ -976,7 +991,7 @@ expressRateLimiter({
 });
 ```
 
-For a **Redis** store, use **`RedisStore`** or **`multiInstancePreset`**, not the old `store: new RedisStore(...)` from third-party wrappers—wire **`url`** or **`client`** per this README.
+For a **Redis** store, use **`RedisStore`**, **`multiInstancePreset`**, or **`resilientRedisPreset`** (insurance + circuit breaker), not the old `store: new RedisStore(...)` from third-party wrappers—wire **`url`** or **`client`** per this README.
 
 ### From `rate-limiter-flexible`
 
