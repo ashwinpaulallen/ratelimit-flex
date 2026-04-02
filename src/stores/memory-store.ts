@@ -1,4 +1,5 @@
 import type {
+  RateLimitActiveKeyEntry,
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitResult,
@@ -60,6 +61,13 @@ export type MemoryStoreTokenBucketOptions = {
  * @since 1.0.0
  */
 export type MemoryStoreOptions = MemoryStoreWindowOptions | MemoryStoreTokenBucketOptions;
+
+/**
+ * Value shape for {@link MemoryStore.getActiveKeys} entries (alias of {@link RateLimitActiveKeyEntry}).
+ *
+ * @since 1.3.2
+ */
+export type { RateLimitActiveKeyEntry };
 
 type FixedEntry = { count: number; resetTime: number };
 type BucketEntry = { tokens: number; lastRefill: number };
@@ -227,6 +235,76 @@ export class MemoryStore implements RateLimitStore {
     return Promise.resolve();
   }
 
+  /**
+   * @description Read-only snapshot: does **not** mutate internal maps. **Sliding window** re-applies the current cutoff (`now - windowMs`) before counting, so stale timestamps are excluded. **Token bucket** uses {@link MemoryStore.refillBucketStateForNow} and {@link MemoryStore.isBucketIdleFullPurgeable} — same logic as increment and purge. **Fixed window** omits expired slices. Returns all keys with **non-expired** quota state.
+   * @returns Map of key → `{ totalHits, resetTime }` consistent with {@link RateLimitResult} semantics for each strategy.
+   * @since 1.3.2
+   */
+  getActiveKeys(): Map<string, RateLimitActiveKeyEntry> {
+    const now = Date.now();
+    const out = new Map<string, RateLimitActiveKeyEntry>();
+
+    switch (this.strategy) {
+      case RateLimitStrategy.SLIDING_WINDOW: {
+        const cutoff = now - this.windowMs;
+        for (const [k, ts] of this.sliding.entries()) {
+          const trimmed = ts.filter((t) => t > cutoff);
+          if (trimmed.length === 0) {
+            continue;
+          }
+          const oldest = trimmed[0]!;
+          out.set(k, {
+            totalHits: trimmed.length,
+            resetTime: new Date(oldest + this.windowMs),
+          });
+        }
+        break;
+      }
+      case RateLimitStrategy.FIXED_WINDOW: {
+        for (const [k, v] of this.fixed.entries()) {
+          if (now >= v.resetTime) {
+            continue;
+          }
+          out.set(k, {
+            totalHits: v.count,
+            resetTime: new Date(v.resetTime),
+          });
+        }
+        break;
+      }
+      case RateLimitStrategy.TOKEN_BUCKET: {
+        for (const [k, v] of this.buckets.entries()) {
+          if (this.isBucketIdleFullPurgeable(v, now)) {
+            continue;
+          }
+          const { tokens, lastRefill } = this.refillBucketStateForNow(v, now);
+          const totalHits = this.bucketSize - tokens;
+          out.set(k, {
+            totalHits,
+            resetTime: new Date(lastRefill + this.refillIntervalMs),
+          });
+        }
+        break;
+      }
+      default: {
+        const exhaustive: never = this.strategy;
+        throw new Error(`Unsupported strategy: ${String(exhaustive)}`);
+      }
+    }
+
+    return out;
+  }
+
+  /**
+   * @description Clears sliding, fixed, and bucket maps in one shot. Intended after a successful external sync (e.g. Redis counter replay); leaves the background cleanup **interval** running — only {@link MemoryStore.shutdown} stops that timer.
+   * @since 1.3.2
+   */
+  resetAll(): void {
+    this.sliding.clear();
+    this.fixed.clear();
+    this.buckets.clear();
+  }
+
   // --- Sliding window -----------------------------------------------------
 
   private incrementSliding(key: string, maxOverride?: number, cost = 1): RateLimitResult {
@@ -362,6 +440,24 @@ export class MemoryStore implements RateLimitStore {
     }
     const tokens = Math.min(this.bucketSize, state.tokens + cost);
     this.buckets.set(key, { tokens, lastRefill: state.lastRefill });
+  }
+
+  /** Same refill math as {@link MemoryStore.incrementTokenBucket} (without mutating). */
+  private refillBucketStateForNow(state: BucketEntry, now: number): { tokens: number; lastRefill: number } {
+    let { tokens, lastRefill } = state;
+    const elapsed = now - lastRefill;
+    const intervals = Math.floor(elapsed / this.refillIntervalMs);
+    if (intervals > 0) {
+      tokens = Math.min(this.bucketSize, tokens + intervals * this.tokensPerInterval);
+      lastRefill += intervals * this.refillIntervalMs;
+    }
+    return { tokens, lastRefill };
+  }
+
+  /** Matches {@link MemoryStore.purgeBuckets} eligibility. */
+  private isBucketIdleFullPurgeable(v: BucketEntry, now: number): boolean {
+    const idleMs = 10 * this.refillIntervalMs;
+    return v.tokens >= this.bucketSize && now - v.lastRefill > idleMs;
   }
 
   // --- Cleanup --------------------------------------------------------------

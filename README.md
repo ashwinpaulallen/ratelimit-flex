@@ -12,10 +12,10 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean)
 - **Stores:** `MemoryStore` (in-process) and `RedisStore` (shared, Lua-backed)
 - **TypeScript-first:** strict types, discriminated options where it matters
-- **Redis resilience:** `fail-open` or `fail-closed` when Redis is unavailable
+- **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance ([Redis failure handling](#redis-failure-handling), [Redis resilience](#redis-resilience))
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
-- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
+- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 
 ## Installation
 
@@ -43,7 +43,7 @@ pnpm add ratelimit-flex
 
 All peers are optional at install time; the runtime you choose must be present when you import that integration.
 
-**Node.js:** `>= 18` (see `package.json` `engines`).
+**Node.js:** `>= 20` (see `package.json` `engines`).
 
 ## Quick Start
 
@@ -338,6 +338,80 @@ new RedisStore({
 ```
 
 **Policy vs counters:** **Allowlist**, **blocklist**, and **penalty box** are enforced in the **RateLimitEngine** (in-memory) **before** the store runs. They **still apply** when Redis is down. Only **quota / window / bucket** counting depends on `RedisStore.increment`.
+
+## Redis resilience
+
+When Redis is unavailable, the default **`fail-open`** / **`fail-closed`** modes either allow every request or block every request globally—there is no per-client quota during the outage. An **insurance limiter** fixes that: a dedicated **`MemoryStore`** that activates automatically when the circuit breaker decides Redis is unhealthy, so each process still enforces **per-process** limits. Configure that in-memory cap as roughly **total shared limit ÷ expected worker count** (e.g. 300 requests/minute across 5 replicas → **60** per process) so failover traffic stays in the same ballpark as your global Redis budget.
+
+### Manual setup (`RedisStore` + `resilience`)
+
+```typescript
+import { expressRateLimiter, RedisStore, MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const insuranceStore = new MemoryStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 60, // 300 / 5 workers
+});
+
+const store = new RedisStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 300,
+  url: process.env.REDIS_URL!,
+  resilience: {
+    insuranceLimiter: { store: insuranceStore },
+    circuitBreaker: { failureThreshold: 3, recoveryTimeMs: 5000 },
+    hooks: {
+      onFailover: (err) => console.error('Redis down, using fallback', err),
+      onRecovery: (ms) => console.log(`Redis recovered after ${ms}ms`),
+    },
+  },
+});
+
+app.use(expressRateLimiter({ store, strategy: RateLimitStrategy.SLIDING_WINDOW }));
+```
+
+### Preset (`resilientRedisPreset`)
+
+`resilientRedisPreset` wires the same idea—**Redis** + **insurance `MemoryStore`** + **circuit breaker**—and estimates worker count from the environment (or `estimatedWorkers`) so you do not hand-divide limits yourself:
+
+```typescript
+import { expressRateLimiter, resilientRedisPreset } from 'ratelimit-flex';
+
+app.use(expressRateLimiter(
+  resilientRedisPreset(
+    { url: process.env.REDIS_URL! },
+    { maxRequests: 300, estimatedWorkers: 5 }
+  )
+));
+```
+
+### Circuit breaker
+
+The breaker around Redis has three states:
+
+- **Closed** — Redis is used; successes reset failure streaks.
+- **Open** — Too many consecutive failures; requests are **not** sent to Redis (they go to the insurance store instead), avoiding wasted round-trips to a dead server.
+- **Half-open** — After a recovery window, a probe allows one Redis attempt; success **closes** the circuit, failure **reopens** it.
+
+### Counter sync
+
+When the circuit **closes** again after an outage, accumulated hits in the insurance **`MemoryStore`** can be **replayed into Redis** (`INCRBY`-style paths per strategy) so shared state catches up. This is **`syncOnRecovery: true`** by default on `resilience.insuranceLimiter` and can be set to **`false`** if you do not want that merge step.
+
+### Comparison: fail-open / fail-closed vs insurance limiter
+
+| Feature | fail-open / fail-closed | Insurance limiter |
+|---------|------------------------|-------------------|
+| Redis down behavior | Allow all or block all | Fallback to in-memory rate limiting |
+| Rate limiting during outage | None (open) or total block (closed) | Per-process limits enforced |
+| Circuit breaker | No | Yes — avoids wasted Redis round-trips |
+| Counter sync on recovery | No | Yes — replays in-memory hits to Redis |
+| Observability hooks | onRedisError only | onFailover, onRecovery, onCircuitOpen, onCircuitClose, onInsuranceHit, onCounterSync |
+
+When insurance is configured, it **replaces** the binary fail-open/fail-closed behavior for quota operations (see [Redis failure handling](#redis-failure-handling)).
+
+**HTTP:** middleware sets **`X-RateLimit-Store: fallback`** when `storeUnavailable` is true (insurance path) so monitors can tell primary Redis from fallback.
 
 ## Metrics & Observability
 
@@ -874,7 +948,7 @@ Pass your store as **`store`** in middleware options.
 | **`fastifyRateLimiter`** | From `ratelimit-flex/fastify` — Fastify plugin |
 | **`createStore(options)`** | Build `MemoryStore` or `RedisStore` (`CreateStoreOptions`) |
 | **`detectEnvironment()`** | `EnvironmentInfo` — deployment hints |
-| **`singleInstancePreset`**, **`multiInstancePreset`**, **`apiGatewayPreset`**, **`authEndpointPreset`**, **`publicApiPreset`** | Opinionated `Partial<RateLimitOptions>` |
+| **`singleInstancePreset`**, **`multiInstancePreset`**, **`resilientRedisPreset`**, **`apiGatewayPreset`**, **`authEndpointPreset`**, **`publicApiPreset`** | Opinionated `Partial<RateLimitOptions>` |
 | **`MemoryStore`** | In-memory store |
 | **`RedisStore`** | Redis-backed store (Lua) |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
@@ -905,6 +979,8 @@ expressRateLimiter({
 For a **Redis** store, use **`RedisStore`** or **`multiInstancePreset`**, not the old `store: new RedisStore(...)` from third-party wrappers—wire **`url`** or **`client`** per this README.
 
 ### From `rate-limiter-flexible`
+
+`rate-limiter-flexible`'s **`insuranceLimiter`** option maps directly to ratelimit-flex's **`resilience.insuranceLimiter`**. The **`resilientRedisPreset`** provides equivalent functionality in one line.
 
 `rate-limiter-flexible` often uses **points + duration (seconds)**. Convert duration to **`windowMs`** (multiply seconds × 1000) and set **`maxRequests`** ≈ points for a rough sliding-window equivalent.
 

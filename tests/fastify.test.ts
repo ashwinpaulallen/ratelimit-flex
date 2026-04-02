@@ -3,6 +3,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fastifyRateLimiter } from '../src/fastify.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../src/types/index.js';
+import type { RateLimitStore } from '../src/types/index.js';
+
+function mockStoreWithFallback(): RateLimitStore {
+  return {
+    increment: vi.fn().mockResolvedValue({
+      totalHits: 1,
+      remaining: 9,
+      resetTime: new Date(Date.now() + 60_000),
+      isBlocked: false,
+      storeUnavailable: true,
+    }),
+    decrement: vi.fn().mockResolvedValue(undefined),
+    reset: vi.fn().mockResolvedValue(undefined),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+  };
+}
 
 const stores: MemoryStore[] = [];
 function trackedStore(options: ConstructorParameters<typeof MemoryStore>[0]) {
@@ -36,8 +52,46 @@ describe('fastify plugin', () => {
     expect(r1.statusCode).toBe(200);
     expect(r1.headers['x-ratelimit-limit']).toBe('3');
     expect(r1.headers['x-ratelimit-remaining']).toBe('2');
+    expect(r1.headers['x-ratelimit-store']).toBeUndefined();
     expect(r2.statusCode).toBe(200);
     expect(r2.headers['x-ratelimit-remaining']).toBe('1');
+    expect(r2.headers['x-ratelimit-store']).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('sets X-RateLimit-Store: fallback when increment returns storeUnavailable', async () => {
+    const app = Fastify();
+    await app.register(fastifyRateLimiter, {
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      store: mockStoreWithFallback(),
+    });
+    app.get('/ok', async () => ({ ok: true }));
+
+    const res = await app.inject({ method: 'GET', url: '/ok' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-store']).toBe('fallback');
+
+    await app.close();
+  });
+
+  it('sets fallback header even when headers: false', async () => {
+    const app = Fastify();
+    await app.register(fastifyRateLimiter, {
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      headers: false,
+      store: mockStoreWithFallback(),
+    });
+    app.get('/ok', async () => ({ ok: true }));
+
+    const res = await app.inject({ method: 'GET', url: '/ok' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined();
+    expect(res.headers['x-ratelimit-store']).toBe('fallback');
 
     await app.close();
   });

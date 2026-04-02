@@ -18,7 +18,7 @@
     "monitoring",
     "histogram"
   ],
-  "author": "",
+  "author": "Ashwin Paul Allen",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

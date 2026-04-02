@@ -3,12 +3,14 @@ import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { expressRateLimiter } from '../src/middleware/express.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
+import * as environment from '../src/utils/environment.js';
 import {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
   multiInstancePreset,
   publicApiPreset,
+  resilientRedisPreset,
   singleInstancePreset,
 } from '../src/presets/index.js';
 import { defaultKeyGenerator } from '../src/strategies/rate-limit-engine.js';
@@ -59,6 +61,14 @@ function assertResolvedOptions(merged: RateLimitOptions): void {
   expect(typeof merged.store.increment).toBe('function');
   expect(typeof merged.store.shutdown).toBe('function');
   expect(merged.strategy).toBeDefined();
+}
+
+function memoryMaxRequests(store: MemoryStore): number {
+  return (store as unknown as { maxRequests: number }).maxRequests;
+}
+
+function insuranceStoreFromRedis(store: RedisStore): MemoryStore {
+  return store['insuranceStore' as keyof RedisStore] as MemoryStore;
 }
 
 const memoryStores: MemoryStore[] = [];
@@ -269,6 +279,67 @@ describe('presets — unit', () => {
       expect(merged.maxRequests).toBe(50);
     });
   });
+
+  describe('resilientRedisPreset', () => {
+    it('merges to valid RateLimitOptions with RedisStore and insurance MemoryStore (defaults)', () => {
+      const client = mockRedisClient();
+      const merged = mergeRateLimiterOptions(resilientRedisPreset({ client }));
+      assertResolvedOptions(merged);
+      expect(merged.store).toBeInstanceOf(RedisStore);
+      expect(merged.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
+      expect(merged.windowMs).toBe(60_000);
+      expect(merged.maxRequests).toBe(100);
+      const ins = insuranceStoreFromRedis(merged.store as RedisStore);
+      expect(memoryMaxRequests(ins)).toBe(100);
+    });
+
+    it('sets insurance maxRequests to ceil(maxRequests / estimatedWorkers)', () => {
+      const client = mockRedisClient();
+      const merged = mergeRateLimiterOptions(
+        resilientRedisPreset({ client }, { maxRequests: 300, estimatedWorkers: 5 }),
+      );
+      const ins = insuranceStoreFromRedis(merged.store as RedisStore);
+      expect(memoryMaxRequests(ins)).toBe(60);
+    });
+
+    it('uses detectEnvironment when estimatedWorkers is omitted (Kubernetes → 4 workers)', () => {
+      const spy = vi.spyOn(environment, 'detectEnvironment').mockReturnValue({
+        isCluster: false,
+        isKubernetes: true,
+        isDocker: false,
+        isMultiInstance: true,
+        recommended: 'redis',
+      });
+      const client = mockRedisClient();
+      const merged = mergeRateLimiterOptions(
+        resilientRedisPreset({ client }, { maxRequests: 300 }),
+      );
+      const ins = insuranceStoreFromRedis(merged.store as RedisStore);
+      expect(memoryMaxRequests(ins)).toBe(75);
+      spy.mockRestore();
+    });
+
+    it('passes hooks, circuitBreaker, and syncOnRecovery into RedisStore resilience', () => {
+      const onFailover = vi.fn();
+      const circuitBreaker = { failureThreshold: 9, recoveryTimeMs: 12_000 };
+      const client = mockRedisClient();
+      const partial = resilientRedisPreset(
+        { client },
+        {
+          hooks: { onFailover },
+          circuitBreaker,
+          syncOnRecovery: false,
+        },
+      );
+      const store = partial.store as RedisStore;
+      trackRedisStore(store);
+      const resilience = store['resilience' as keyof RedisStore] as import('../src/resilience/types.js').RedisResilienceOptions;
+      expect(resilience?.hooks?.onFailover).toBe(onFailover);
+      expect(resilience?.circuitBreaker?.failureThreshold).toBe(9);
+      expect(resilience?.circuitBreaker?.recoveryTimeMs).toBe(12_000);
+      expect(resilience?.insuranceLimiter?.syncOnRecovery).toBe(false);
+    });
+  });
 });
 
 describe('presets — integration (Express + supertest)', () => {
@@ -330,5 +401,31 @@ describe('presets — integration (Express + supertest)', () => {
     expect(statuses.slice(0, 5).every((s) => s === 200)).toBe(true);
     expect(statuses[5]).toBe(429);
     expect(evalMock.mock.calls.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('resilientRedisPreset: enforces maxRequests when passed to expressRateLimiter', async () => {
+    let count = 0;
+    const evalMock = vi.fn().mockImplementation(async () => {
+      count++;
+      const blocked = count > 2 ? 1 : 0;
+      return [count, blocked, String(Date.now() + 2000)];
+    });
+    const client = mockRedisClient({ eval: evalMock });
+    const merged = mergeRateLimiterOptions(
+      resilientRedisPreset({ client }, { windowMs: 2000, maxRequests: 2 }),
+    );
+    trackRedisStore(merged.store as RedisStore);
+
+    const app = express();
+    app.use(expressRateLimiter(merged));
+    app.get('/ok', (_req, res) => res.status(200).json({ ok: true }));
+
+    const a = await request(app).get('/ok');
+    const b = await request(app).get('/ok');
+    const c = await request(app).get('/ok');
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(c.status).toBe(429);
   });
 });

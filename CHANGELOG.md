@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.2] - 2026-04-02
+
+### Added
+
+- **Insurance limiter** — automatic `MemoryStore` fallback when Redis is unreachable.
+- **Circuit breaker** — three-state (closed / open / half-open) circuit breaker avoids wasted Redis round-trips during outage.
+- **Counter sync** — in-memory counters replay to Redis on recovery (configurable via `syncOnRecovery`).
+- **Resilience hooks** — `onFailover`, `onRecovery`, `onCircuitOpen`, `onCircuitClose`, `onInsuranceHit`, `onCounterSync`.
+- **`resilientRedisPreset()`** — one-line setup for production Redis with insurance, circuit breaker, and auto-scaled per-worker limits.
+- **`X-RateLimit-Store: fallback`** response header when serving from insurance store.
+- **`MemoryStore.getActiveKeys()`** and **`MemoryStore.resetAll()`** public methods.
+- **Startup warning** when `RedisStore` is used without insurance in multi-instance environments.
+
+### Changed
+
+- **`RedisStore`** constructor now accepts optional **`resilience`** field (non-breaking, fully backward compatible).
+
 ## [1.3.1] - 2026-04-01
 
 ### Added

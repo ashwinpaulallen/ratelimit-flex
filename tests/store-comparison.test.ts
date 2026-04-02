@@ -33,6 +33,7 @@ const ENV_KEYS = [
   'KUBERNETES_SERVICE_HOST',
   'DOCKER',
   'RATELIMIT_FLEX_NO_MEMORY_WARN',
+  'RATELIMIT_FLEX_NO_RESILIENCE_WARN',
 ] as const;
 
 /** Save the current env vars and delete them so each test starts clean. */
@@ -298,6 +299,143 @@ describe('warnIfMemoryStoreInCluster', () => {
     });
 
     warnIfMemoryStoreInCluster(store);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    await store.shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// warnIfRedisStoreWithoutInsurance
+// ---------------------------------------------------------------------------
+
+describe('warnIfRedisStoreWithoutInsurance', () => {
+  let savedEnv: Record<string, string | undefined>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    savedEnv = saveAndClearEnv();
+    fsMock.existsSync.mockReturnValue(false);
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    restoreEnv(savedEnv);
+    warnSpy.mockRestore();
+  });
+
+  it('logs a warning when isMultiInstance is true and RedisStore has no insurance limiter', async () => {
+    process.env.PM2_HOME = '/root/.pm2';
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { RedisStore: FreshRedisStore } = await import('../src/stores/redis-store.js');
+    const store = new FreshRedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+      client: mockRedisClient(),
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0]?.[0]).toBe(
+      'ratelimit-flex: RedisStore detected in a multi-instance environment without an insurance limiter. Consider using resilientRedisPreset() or adding an insuranceLimiter for Redis failover protection.',
+    );
+    await store.shutdown();
+  });
+
+  it('does not warn when resilience.insuranceLimiter is configured', async () => {
+    process.env.PM2_HOME = '/root/.pm2';
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { MemoryStore: FreshMemoryStore } = await import('../src/stores/memory-store.js');
+    const { RedisStore: FreshRedisStore } = await import('../src/stores/redis-store.js');
+    const insurance = new FreshMemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 5,
+    });
+    const store = new FreshRedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+      client: mockRedisClient(),
+      resilience: {
+        insuranceLimiter: { store: insurance },
+      },
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    await store.shutdown();
+    await insurance.shutdown();
+  });
+
+  it('does not warn when RATELIMIT_FLEX_NO_RESILIENCE_WARN=1', async () => {
+    process.env.PM2_HOME = '/root/.pm2';
+    process.env.RATELIMIT_FLEX_NO_RESILIENCE_WARN = '1';
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { RedisStore: FreshRedisStore } = await import('../src/stores/redis-store.js');
+    const store = new FreshRedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+      client: mockRedisClient(),
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    await store.shutdown();
+  });
+
+  it('only fires the warning once even when called multiple times', async () => {
+    process.env.PM2_HOME = '/root/.pm2';
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { RedisStore: FreshRedisStore } = await import('../src/stores/redis-store.js');
+    const store = new FreshRedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+      client: mockRedisClient(),
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
+    warnIfRedisStoreWithoutInsurance(store);
+    warnIfRedisStoreWithoutInsurance(store);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    await store.shutdown();
+  });
+
+  it('does not warn when isMultiInstance is false', async () => {
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { RedisStore: FreshRedisStore } = await import('../src/stores/redis-store.js');
+    const store = new FreshRedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+      client: mockRedisClient(),
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    await store.shutdown();
+  });
+
+  it('does not warn when the store is a MemoryStore', async () => {
+    process.env.PM2_HOME = '/root/.pm2';
+    const { warnIfRedisStoreWithoutInsurance } = await import('../src/utils/environment.js');
+    const { MemoryStore: FreshMemoryStore } = await import('../src/stores/memory-store.js');
+    const store = new FreshMemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+
+    warnIfRedisStoreWithoutInsurance(store);
 
     expect(warnSpy).not.toHaveBeenCalled();
     await store.shutdown();

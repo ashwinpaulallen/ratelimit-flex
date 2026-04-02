@@ -10,7 +10,7 @@ import {
 } from '../strategies/rate-limit-engine.js';
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
-import { warnIfMemoryStoreInCluster } from '../utils/environment.js';
+import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'fastify' {
@@ -88,6 +88,7 @@ function decrementStores(resolved: RateLimitOptions, key: string, req: unknown):
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
   const resolved = mergeRateLimiterOptions(options);
   warnIfMemoryStoreInCluster(resolved.store);
+  warnIfRedisStoreWithoutInsurance(resolved.store);
   const metricsManager = new MetricsManager(resolved.metrics);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
@@ -118,6 +119,10 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     try {
       const key = keyGen(request);
       const result = await engine.consumeWithKey(key, request);
+
+      if (result.storeUnavailable === true) {
+        reply.header('X-RateLimit-Store', 'fallback');
+      }
 
       if (resolved.headers !== false) {
         for (const [name, value] of Object.entries(result.headers)) {
@@ -180,7 +185,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
 /**
  * Fastify plugin (`fastify-plugin`): rate limiting via `onRequest` / `onResponse` hooks.
  *
- * @description Same semantics as {@link expressRateLimiter} (including `metrics`, snapshots, Prometheus / OTel when configured). Import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
+ * @description Same semantics as {@link expressRateLimiter} (including `metrics`, snapshots, Prometheus / OTel when configured, and **`X-RateLimit-Store: fallback`** when {@link RateLimitResult.storeUnavailable} is true). Import from `ratelimit-flex/fastify` to avoid pulling Fastify into Express-only bundles.
  * @param options - Partial {@link RateLimitOptions} (merged with defaults inside the plugin).
  * @throws Errors from `keyGenerator`, `consumeWithKey`, or `onLimitReached` are passed to the Fastify error pipeline (`reply.send(err)`), matching Express `next(err)`.
  * @example
