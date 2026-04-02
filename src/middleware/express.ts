@@ -4,7 +4,6 @@ import {
   formatRateLimitHeaders,
   type HeaderInput,
   resolveHeaderConfig,
-  resolveWindowMsForHeaders,
 } from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
 import {
@@ -16,7 +15,7 @@ import {
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-import { getLimit, jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
+import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -126,16 +125,14 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
         res.setHeader('X-RateLimit-Store', 'fallback');
       }
 
-      const headerCfg = resolveHeaderConfig(resolved, req);
+      const headerCfg = resolveHeaderConfig(resolved, req, result.bindingSlotIndex);
       if (headerCfg.format) {
-        const resolvedMax = getLimit(resolved, req);
-        const resolvedWindowMs = resolveWindowMsForHeaders(resolved);
         const headerInput: HeaderInput = {
-          limit: resolvedMax,
+          limit: headerCfg.resolvedLimit,
           remaining: result.remaining,
           resetTime: result.resetTime,
           isBlocked: result.isBlocked,
-          windowMs: resolvedWindowMs,
+          windowMs: headerCfg.resolvedWindowMs,
           identifier: headerCfg.identifier,
         };
         const { headers, legacyHeaders } = formatRateLimitHeaders(

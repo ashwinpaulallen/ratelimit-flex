@@ -12,5 +12,9 @@ export {
   type HeaderInput,
   type HeaderOutput,
 } from './formatHeaders.js';
-export { resolveHeaderConfig, resolveWindowMsForHeaders } from './resolveConfig.js';
+export {
+  resolveHeaderConfig,
+  resolveWindowMsForHeaders,
+  type ResolvedHeaderConfig,
+} from './resolveConfig.js';
 export type { StandardHeadersDraft } from '../types/index.js';

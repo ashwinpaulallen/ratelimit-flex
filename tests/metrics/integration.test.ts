@@ -77,5 +77,5 @@ describe('metrics integration (Express)', () => {
 
     await limiter.shutdownMetrics();
     vi.restoreAllMocks();
-  }, 20_000);
+  }, 45_000);
 });

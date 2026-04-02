@@ -4,19 +4,42 @@ import { RateLimitStrategy } from '../types/index.js';
 import { defaultRateLimitIdentifier, type HeaderFormat } from './formatHeaders.js';
 
 /**
+ * Output of {@link resolveHeaderConfig}: profile, identifier, and the same resolved limit / window used for {@link formatRateLimitHeaders} (avoids duplicate {@link getLimit} / {@link resolveWindowMsForHeaders} calls in middleware).
+ *
+ * @since 1.4.0
+ */
+export interface ResolvedHeaderConfig {
+  format: HeaderFormat | false;
+  includeLegacy: boolean;
+  identifier: string;
+  /** Same value as {@link getLimit} with the same `bindingSlotIndex`. */
+  resolvedLimit: number;
+  /** Same value as {@link resolveWindowMsForHeaders} with the same `bindingSlotIndex`. */
+  resolvedWindowMs: number;
+}
+
+/**
  * Window length for {@link formatRateLimitHeaders} / policy strings (token bucket uses `interval`).
  *
  * @remarks
- * **Grouped windows** (`limits` / `groupedWindowStores`): returns the **shortest** `windowMs` among slots. **`getLimit`** uses the **minimum** `maxRequests` across slots. Policy headers (`w=`, default {@link defaultRateLimitIdentifier}, draft `RateLimit-Policy`) therefore describe a **single-window-style** quota, not the full multi-window rule (e.g. 100/min + 1000/hour may show `w=60` with a limit from the tightest cap). That is a deliberate approximation; set **`identifier`** explicitly if clients need a clearer policy name.
+ * **Grouped windows** (`limits` / `groupedWindowStores`): when **`bindingSlotIndex`** is set and points at an existing slot, returns that slot’s `windowMs` (aligned with {@link getLimit} for the same index). When **`bindingSlotIndex`** is unavailable or out of range, returns the **shortest** `windowMs` among slots and **`getLimit`** uses the **minimum** `maxRequests` across slots — policy headers (`w=`, default {@link defaultRateLimitIdentifier}, draft `RateLimit-Policy`) then describe a **single-window-style** quota, not the full multi-window rule (e.g. 100/min + 1000/hour may show `w=60` with a limit from the tightest cap). That approximation applies only without a binding slot; set **`identifier`** explicitly if clients need a clearer policy name when unbound.
+ * @param bindingSlotIndex - Optional index from the consume result’s `bindingSlotIndex` (grouped windows).
  * @since 1.4.0
  */
-export function resolveWindowMsForHeaders(opts: RateLimitOptions): number {
+export function resolveWindowMsForHeaders(opts: RateLimitOptions, bindingSlotIndex?: number): number {
   if (opts.strategy === RateLimitStrategy.TOKEN_BUCKET) {
     return opts.interval ?? 60_000;
   }
   const w = opts as WindowRateLimitOptions;
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
-    return Math.min(...w.groupedWindowStores.map((g) => g.windowMs));
+    const grouped = w.groupedWindowStores;
+    if (bindingSlotIndex !== undefined) {
+      const slot = grouped[bindingSlotIndex];
+      if (slot !== undefined) {
+        return slot.windowMs;
+      }
+    }
+    return Math.min(...grouped.map((g) => g.windowMs));
   }
   return w.windowMs ?? 60_000;
 }
@@ -27,16 +50,14 @@ export function resolveWindowMsForHeaders(opts: RateLimitOptions): number {
  * @description Pass **`req`** when {@link RateLimitOptionsBase.maxRequests} is a function so the default identifier uses the resolved limit. Omit **`req`** only when the limit does not depend on the request (same identifier for all requests).
  * @param options - Merged {@link RateLimitOptions} (or partial; cast internally for {@link getLimit}).
  * @param req - Framework request for dynamic caps / identifiers.
+ * @param bindingSlotIndex - Optional index from consume result (grouped windows); forwarded to {@link resolveWindowMsForHeaders} and {@link getLimit} for policy / identifier alignment.
  * @since 1.4.0
  */
 export function resolveHeaderConfig(
   options: Partial<RateLimitOptions>,
   req?: unknown,
-): {
-  format: HeaderFormat | false;
-  includeLegacy: boolean;
-  identifier: string;
-} {
+  bindingSlotIndex?: number,
+): ResolvedHeaderConfig {
   const o = options as RateLimitOptions;
   let format: HeaderFormat | false;
   let includeLegacy: boolean;
@@ -60,9 +81,9 @@ export function resolveHeaderConfig(
     includeLegacy = true;
   }
 
-  const resolvedWindowMs = resolveWindowMsForHeaders(o);
-  const resolvedMax = getLimit(o, req);
-  const identifier = o.identifier ?? defaultRateLimitIdentifier(resolvedMax, resolvedWindowMs);
+  const resolvedWindowMs = resolveWindowMsForHeaders(o, bindingSlotIndex);
+  const resolvedLimit = getLimit(o, req, bindingSlotIndex);
+  const identifier = o.identifier ?? defaultRateLimitIdentifier(resolvedLimit, resolvedWindowMs);
 
-  return { format, includeLegacy, identifier };
+  return { format, includeLegacy, identifier, resolvedLimit, resolvedWindowMs };
 }

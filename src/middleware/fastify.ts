@@ -5,7 +5,6 @@ import {
   formatRateLimitHeaders,
   type HeaderInput,
   resolveHeaderConfig,
-  resolveWindowMsForHeaders,
 } from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
 import {
@@ -17,7 +16,7 @@ import {
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-import { getLimit, jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
+import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -136,16 +135,14 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
         reply.header('X-RateLimit-Store', 'fallback');
       }
 
-      const headerCfg = resolveHeaderConfig(resolved, request);
+      const headerCfg = resolveHeaderConfig(resolved, request, result.bindingSlotIndex);
       if (headerCfg.format) {
-        const resolvedMax = getLimit(resolved, request);
-        const resolvedWindowMs = resolveWindowMsForHeaders(resolved);
         const headerInput: HeaderInput = {
-          limit: resolvedMax,
+          limit: headerCfg.resolvedLimit,
           remaining: result.remaining,
           resetTime: result.resetTime,
           isBlocked: result.isBlocked,
-          windowMs: resolvedWindowMs,
+          windowMs: headerCfg.resolvedWindowMs,
           identifier: headerCfg.identifier,
         };
         const { headers, legacyHeaders } = formatRateLimitHeaders(

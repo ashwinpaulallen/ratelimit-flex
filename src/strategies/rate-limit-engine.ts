@@ -6,6 +6,7 @@ import {
   sanitizeWindowMs,
 } from '../utils/clamp.js';
 import type {
+  RateLimitConsumeResult,
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitOptions,
@@ -19,29 +20,7 @@ import { validateRateLimitHeaderOptions } from '../middleware/validate-header-op
 import type { MetricsCounters } from '../metrics/counters.js';
 import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
-/**
- * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
- *
- * @description Extends {@link RateLimitResult} with block metadata; **`headers`** is always **`{}`** (middleware sets HTTP headers via **`formatRateLimitHeaders`**).
- * @see {@link RateLimitEngine}
- * @since 1.0.0
- */
-export interface RateLimitConsumeResult extends RateLimitResult {
-  /**
-   * @description Always **`{}`**. `expressRateLimiter` / `fastifyRateLimiter` set response headers via **`formatRateLimitHeaders`**; the engine does not allocate header maps on consume.
-   */
-  headers: Record<string, string>;
-  /**
-   * @description When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked.
-   * @default undefined
-   */
-  draftWouldBlock?: boolean;
-  /**
-   * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
-   * @default undefined when allowed
-   */
-  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
-}
+export type { RateLimitConsumeResult };
 
 /**
  * Input for {@link createRateLimiter} (engine factory): `store` is optional.
@@ -289,6 +268,7 @@ export class RateLimitEngine {
     const draft = this.options.draft === true;
     let result: RateLimitResult;
     let blockedAtIndex: number | undefined;
+    let bindingSlotIndex: number | undefined;
     const incOpts = resolveIncrementOpts(this.options, req);
     const decOpts = matchingDecrementOptions(incOpts);
 
@@ -296,6 +276,7 @@ export class RateLimitEngine {
       const g = await this.consumeGroupedWindows(key, grouped, draft, m, incOpts);
       result = g.result;
       blockedAtIndex = g.blockedAtIndex;
+      bindingSlotIndex = g.bindingSlotIndex;
     } else {
       const ts = m ? performance.now() : 0;
       result = await this.options.store.increment(key, incOpts);
@@ -327,6 +308,7 @@ export class RateLimitEngine {
         isBlocked: false,
         headers: {},
         draftWouldBlock: true,
+        ...(bindingSlotIndex !== undefined ? { bindingSlotIndex } : {}),
       };
       if (m) this.recordMetricsAfterConsume(m, key, t0, draftOut);
       return draftOut;
@@ -348,6 +330,7 @@ export class RateLimitEngine {
           ? 'service_unavailable'
           : 'rate_limit'
         : undefined,
+      ...(bindingSlotIndex !== undefined ? { bindingSlotIndex } : {}),
     };
     if (m) this.recordMetricsAfterConsume(m, key, t0, consumeResult);
     return consumeResult;
@@ -464,7 +447,7 @@ export class RateLimitEngine {
     draft: boolean,
     metrics: MetricsCounters | undefined,
     incOpts: RateLimitIncrementOptions | undefined,
-  ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
+  ): Promise<{ result: RateLimitResult; blockedAtIndex?: number; bindingSlotIndex?: number }> {
     const decOpts = matchingDecrementOptions(incOpts);
     const done: RateLimitResult[] = [];
     for (let i = 0; i < grouped.length; i++) {
@@ -486,10 +469,59 @@ export class RateLimitEngine {
             });
           }
         }
-        return { result: this.mergeGroupedResults(done), blockedAtIndex: i };
+        return {
+          result: this.mergeGroupedResults(done),
+          blockedAtIndex: i,
+          bindingSlotIndex: this.computeBindingSlotIndex(done),
+        };
       }
     }
-    return { result: this.mergeGroupedResults(done) };
+    return {
+      result: this.mergeGroupedResults(done),
+      bindingSlotIndex: this.computeBindingSlotIndex(done),
+    };
+  }
+
+  /**
+   * Which {@link WindowRateLimitOptions.groupedWindowStores} slot is the binding constraint for this consume:
+   * a blocking slot (if several, the one with the latest {@link RateLimitResult.resetTime}), else the slot with the lowest remaining quota.
+   *
+   * @remarks
+   * When not blocked, “lowest remaining” is **absolute** remaining count, not remaining as a fraction of each slot’s limit. That matches common setups (e.g. tight minute + loose hour); pathological mixes where a larger limit has fewer absolute tokens left could pick a different “most constrained” slot under a percentage-based rule.
+   */
+  private computeBindingSlotIndex(done: RateLimitResult[]): number | undefined {
+    if (done.length === 0) {
+      return undefined;
+    }
+    const blocked: number[] = [];
+    for (let i = 0; i < done.length; i++) {
+      if (done[i]!.isBlocked) {
+        blocked.push(i);
+      }
+    }
+    if (blocked.length > 0) {
+      let best = blocked[0]!;
+      let bestT = done[best]!.resetTime.getTime();
+      for (let k = 1; k < blocked.length; k++) {
+        const idx = blocked[k]!;
+        const t = done[idx]!.resetTime.getTime();
+        if (t > bestT || (t === bestT && idx < best)) {
+          best = idx;
+          bestT = t;
+        }
+      }
+      return best;
+    }
+    let minRem = done[0]!.remaining;
+    let minIdx = 0;
+    for (let i = 1; i < done.length; i++) {
+      const rem = done[i]!.remaining;
+      if (rem < minRem || (rem === minRem && i < minIdx)) {
+        minRem = rem;
+        minIdx = i;
+      }
+    }
+    return minIdx;
   }
 
   private mergeGroupedResults(results: RateLimitResult[]): RateLimitResult {

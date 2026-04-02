@@ -59,6 +59,35 @@ export interface RateLimitResult {
 }
 
 /**
+ * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
+ *
+ * @description Extends {@link RateLimitResult} with block metadata; **`headers`** is always **`{}`** (middleware sets HTTP headers via **`formatRateLimitHeaders`**).
+ * @see `RateLimitEngine` in `../strategies/rate-limit-engine.js`
+ * @since 1.0.0
+ */
+export interface RateLimitConsumeResult extends RateLimitResult {
+  /**
+   * @description Always **`{}`**. `expressRateLimiter` / `fastifyRateLimiter` set response headers via **`formatRateLimitHeaders`**; the engine does not allocate header maps on consume.
+   */
+  headers: Record<string, string>;
+  /**
+   * @description When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked.
+   * @default undefined
+   */
+  draftWouldBlock?: boolean;
+  /**
+   * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
+   * @default undefined when allowed
+   */
+  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
+  /**
+   * @description Index into {@link WindowRateLimitOptions.groupedWindowStores} for the **binding constraint**: the slot that caused a block, or the slot with the lowest remaining quota when no block occurred.
+   * @default undefined when not using grouped windows or when not yet computed by the engine
+   */
+  bindingSlotIndex?: number;
+}
+
+/**
  * Optional per-call overrides for {@link RateLimitStore.increment}.
  *
  * @description **`maxRequests`** applies to sliding/fixed window only (dynamic cap when `maxRequests` is a function). **`cost`** applies to all strategies (sliding, fixed, token bucket) for weighted requests.

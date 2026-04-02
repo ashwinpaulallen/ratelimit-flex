@@ -141,6 +141,7 @@ export {
   type HeaderFormat,
   type HeaderInput,
   type HeaderOutput,
+  type ResolvedHeaderConfig,
   type StandardHeadersDraft,
 } from './headers/index.js';
 
