@@ -17,7 +17,7 @@ import type { RateLimitOptions } from './types/index.js';
  *
  * @since 1.0.0
  */
-export const VERSION = '1.3.2';
+export const VERSION = '1.4.0';
 
 /**
  * Express middleware factory — same implementation as {@link expressRateLimiter} in `./middleware/express.js`.
@@ -124,6 +124,32 @@ export {
  */
 export * from './types/index.js';
 export { RateLimitStrategy } from './types/index.js';
+
+/**
+ * Pure rate-limit HTTP header formatting (no framework deps). Also re-exports {@link StandardHeadersDraft} for typing `standardHeaders`.
+ *
+ * @see {@link formatRateLimitHeaders} — build headers for custom middleware
+ * @see {@link resolveHeaderConfig} — resolve profile + default identifier from options
+ * @since 1.4.0
+ */
+export {
+  defaultRateLimitIdentifier,
+  formatRateLimitHeaders,
+  resolveHeaderConfig,
+  resolveWindowMsForHeaders,
+  sanitizeIdentifierFor8941,
+  type HeaderFormat,
+  type HeaderInput,
+  type HeaderOutput,
+  type StandardHeadersDraft,
+} from './headers/index.js';
+
+/**
+ * Migration helpers (e.g. from `express-rate-limit`).
+ *
+ * @since 1.4.0
+ */
+export { fromExpressRateLimitOptions, type ExpressRateLimitLikeOptions } from './compat/expressRateLimitCompat.js';
 
 /**
  * Opinionated {@link RateLimitOptions} builders for common deployments.

@@ -7,9 +7,13 @@ import {
 } from '../src/types/index.js';
 import type {
   CircuitBreakerOptions,
+  HeaderFormat,
+  HeaderInput,
+  HeaderOutput,
   InsuranceLimiterOptions,
   RedisResilienceOptions,
   ResilienceHooks,
+  StandardHeadersDraft,
 } from '../src/index.js';
 import {
   CircuitBreaker,
@@ -21,8 +25,11 @@ import {
   createRateLimitEngine,
   createStore,
   defaultKeyGenerator,
+  defaultRateLimitIdentifier,
   detectEnvironment,
+  formatRateLimitHeaders,
   matchingDecrementOptions,
+  resolveHeaderConfig,
   resolveIncrementOpts,
   expressRateLimiter,
   fixedWindowDefaults,
@@ -42,6 +49,7 @@ import {
 import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
 import { fastifyRateLimiter } from '../src/fastify.js';
+import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 
 describe('package exports', () => {
   it('exports VERSION string', () => {
@@ -138,6 +146,34 @@ describe('package exports', () => {
     expect(cfg.enabled).toBe(false);
     const snap = null as MetricsSnapshot | null;
     expect(snap).toBeNull();
+  });
+
+  it('exports header APIs and types for custom middleware', async () => {
+    expect(typeof formatRateLimitHeaders).toBe('function');
+    expect(typeof resolveHeaderConfig).toBe('function');
+    expect(typeof defaultRateLimitIdentifier).toBe('function');
+    const draft: StandardHeadersDraft = 'draft-6';
+    const fmt: HeaderFormat = 'legacy';
+    const input: HeaderInput = {
+      limit: 10,
+      remaining: 5,
+      resetTime: new Date(),
+      isBlocked: false,
+      windowMs: 60_000,
+      identifier: '10-per-60',
+    };
+    const out = formatRateLimitHeaders(input, fmt, false);
+    expect(out.headers['X-RateLimit-Limit']).toBe('10');
+    const merged = mergeRateLimiterOptions({ maxRequests: 10, windowMs: 60_000 });
+    try {
+      const cfg = resolveHeaderConfig(merged);
+      expect(cfg.format).toBe('legacy');
+    } finally {
+      await merged.store.shutdown();
+    }
+    const _hdr: HeaderOutput = out;
+    void draft;
+    void _hdr;
   });
 
   it('RedisErrorMode is a usable string union at compile time', () => {

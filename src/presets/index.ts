@@ -168,6 +168,8 @@ export function resilientRedisPreset(
     strategy: RateLimitStrategy.SLIDING_WINDOW,
     windowMs: 60_000,
     maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
     ...extractStrategyFromRedisOptions(redisOptions),
     ...rateLimitOverrides,
   };
@@ -266,6 +268,8 @@ export function singleInstancePreset(
     strategy: RateLimitStrategy.SLIDING_WINDOW,
     windowMs: 60_000,
     maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: true,
     ...options,
   };
 }
@@ -297,6 +301,8 @@ export function multiInstancePreset(
     strategy: RateLimitStrategy.SLIDING_WINDOW,
     windowMs: 60_000,
     maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
     ...options,
   };
 
@@ -344,6 +350,9 @@ export function apiGatewayPreset(
     interval: 60_000,
     bucketSize: 60,
     keyGenerator: apiKeyHeaderKeyGenerator,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    identifier: 'api-gateway',
     ...options,
   };
 
@@ -395,6 +404,8 @@ export function authEndpointPreset(
     windowMs: 60_000,
     maxRequests: 5,
     keyGenerator: defaultKeyGenerator,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
     ...options,
   };
 
@@ -437,6 +448,8 @@ export function publicApiPreset(
     strategy: RateLimitStrategy.SLIDING_WINDOW,
     windowMs: 60_000,
     maxRequests: 60,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
     message: {
       error: 'Rate limit exceeded',
       retryAfter: '<seconds>',

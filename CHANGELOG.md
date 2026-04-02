@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.0] - 2026-04-03
+
+### Added
+
+- Standard IETF RateLimit headers: **`standardHeaders`** option supporting **`'draft-6'`**, **`'draft-7'`**, and **`'draft-8'`** formats
+- **`identifier`** option for naming quota policies in draft-7/8 headers
+- **`legacyHeaders`** option to control **`X-RateLimit-*`** header output independently
+- **`formatRateLimitHeaders()`** exported for custom middleware authors
+- **`fromExpressRateLimitOptions()`** migration helper
+- Presets now default to standard header formats
+
+### Changed
+
+- Existing **`headers: true`** behavior is completely unchanged (backward compatible)
+
 ## [1.3.2] - 2026-04-02
 
 ### Added

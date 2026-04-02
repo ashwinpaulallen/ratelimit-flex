@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { defaultRateLimitIdentifier, formatRateLimitHeaders } from '../src/headers/formatHeaders.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
 import {
   RateLimitEngine,
@@ -148,15 +149,16 @@ describe('RateLimitEngine / strategies', () => {
     await store.shutdown();
   });
 
-  it('calculates headers including Retry-After when blocked', async () => {
+  it('engine consume returns empty headers; formatRateLimitHeaders yields legacy map including Retry-After when blocked', async () => {
+    const windowMs = 60_000;
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,
-      windowMs: 60_000,
+      windowMs,
       maxRequests: 1,
     });
     const engine = createEngineRateLimiter({
       strategy: RateLimitStrategy.SLIDING_WINDOW,
-      windowMs: 60_000,
+      windowMs,
       maxRequests: 1,
       store,
     });
@@ -164,11 +166,39 @@ describe('RateLimitEngine / strategies', () => {
     const r1 = await engine.consume('hdr');
     const r2 = await engine.consume('hdr');
 
-    expect(r1.headers['X-RateLimit-Limit']).toBe('1');
-    expect(r1.headers['X-RateLimit-Remaining']).toBe('0');
-    expect(r1.headers['X-RateLimit-Reset']).toBeTruthy();
+    expect(r1.headers).toEqual({});
+    expect(r2.headers).toEqual({});
     expect(r2.isBlocked).toBe(true);
-    expect(r2.headers['Retry-After']).toBeTruthy();
+
+    const id = defaultRateLimitIdentifier(1, windowMs);
+    const h1 = formatRateLimitHeaders(
+      {
+        limit: 1,
+        remaining: r1.remaining,
+        resetTime: r1.resetTime,
+        isBlocked: r1.isBlocked,
+        windowMs,
+        identifier: id,
+      },
+      'legacy',
+      false,
+    );
+    expect(h1.headers['X-RateLimit-Limit']).toBe('1');
+    expect(h1.headers['X-RateLimit-Remaining']).toBe('0');
+    expect(h1.headers['X-RateLimit-Reset']).toBeTruthy();
+    const h2 = formatRateLimitHeaders(
+      {
+        limit: 1,
+        remaining: r2.remaining,
+        resetTime: r2.resetTime,
+        isBlocked: r2.isBlocked,
+        windowMs,
+        identifier: id,
+      },
+      'legacy',
+      false,
+    );
+    expect(h2.headers['Retry-After']).toBeTruthy();
     await store.shutdown();
   });
 

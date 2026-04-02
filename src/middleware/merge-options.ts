@@ -13,6 +13,7 @@ import type {
   WindowRateLimitOptions,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { validateRateLimitHeaderOptions } from './validate-header-options.js';
 
 export const baseDefaults = {
   headers: true,
@@ -41,6 +42,7 @@ export function getLimit(opts: RateLimitOptions, req?: unknown): number {
  * Merge partial options with strategy defaults and ensure a {@link MemoryStore} when `store` is omitted.
  */
 export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
+  validateRateLimitHeaderOptions(options);
   const strategy = options.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
 
   if (strategy === RateLimitStrategy.TOKEN_BUCKET) {

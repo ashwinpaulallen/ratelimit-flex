@@ -1,5 +1,11 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
+import {
+  formatRateLimitHeaders,
+  type HeaderInput,
+  resolveHeaderConfig,
+  resolveWindowMsForHeaders,
+} from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
 import {
   RateLimitEngine,
@@ -10,7 +16,7 @@ import {
 import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
+import { getLimit, jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -22,7 +28,7 @@ declare module 'express-serve-static-core' {
   }
 }
 
-function applyHeaders(res: Response, headers: Record<string, string>): void {
+function applyHeaderMap(res: Response, headers: Record<string, string>): void {
   for (const [name, value] of Object.entries(headers)) {
     res.setHeader(name, value);
   }
@@ -120,8 +126,27 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
         res.setHeader('X-RateLimit-Store', 'fallback');
       }
 
-      if (resolved.headers !== false) {
-        applyHeaders(res, result.headers);
+      const headerCfg = resolveHeaderConfig(resolved, req);
+      if (headerCfg.format) {
+        const resolvedMax = getLimit(resolved, req);
+        const resolvedWindowMs = resolveWindowMsForHeaders(resolved);
+        const headerInput: HeaderInput = {
+          limit: resolvedMax,
+          remaining: result.remaining,
+          resetTime: result.resetTime,
+          isBlocked: result.isBlocked,
+          windowMs: resolvedWindowMs,
+          identifier: headerCfg.identifier,
+        };
+        const { headers, legacyHeaders } = formatRateLimitHeaders(
+          headerInput,
+          headerCfg.format,
+          headerCfg.includeLegacy,
+        );
+        applyHeaderMap(res, headers);
+        if (legacyHeaders) {
+          applyHeaderMap(res, legacyHeaders);
+        }
       }
 
       if (result.isBlocked) {

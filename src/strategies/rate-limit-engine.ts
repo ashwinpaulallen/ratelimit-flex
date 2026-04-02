@@ -15,19 +15,20 @@ import type {
   WindowRateLimitOptions,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { validateRateLimitHeaderOptions } from '../middleware/validate-header-options.js';
 import type { MetricsCounters } from '../metrics/counters.js';
 import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
 /**
  * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
  *
- * @description Extends {@link RateLimitResult} with standard rate-limit headers and block metadata.
+ * @description Extends {@link RateLimitResult} with block metadata; **`headers`** is always **`{}`** (middleware sets HTTP headers via **`formatRateLimitHeaders`**).
  * @see {@link RateLimitEngine}
  * @since 1.0.0
  */
 export interface RateLimitConsumeResult extends RateLimitResult {
   /**
-   * @description `X-RateLimit-*` and optional `Retry-After` when headers are enabled.
+   * @description Always **`{}`**. `expressRateLimiter` / `fastifyRateLimiter` set response headers via **`formatRateLimitHeaders`**; the engine does not allocate header maps on consume.
    */
   headers: Record<string, string>;
   /**
@@ -182,6 +183,7 @@ export function matchingDecrementOptions(inc?: RateLimitIncrementOptions): RateL
  * @since 1.0.0
  */
 export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEngine {
+  validateRateLimitHeaderOptions(options as Partial<RateLimitOptions>);
   const resolved = resolveOptions(options);
   const counters = createMetricsCountersIfEnabled(resolved.metrics);
   return new RateLimitEngine(resolved, counters);
@@ -237,7 +239,7 @@ export class RateLimitEngine {
    *
    * @description Uses {@link RateLimitOptionsBase.keyGenerator} or {@link defaultKeyGenerator} to derive the storage key.
    * @param req - Framework request or arbitrary value passed to `keyGenerator`.
-   * @returns {@link RateLimitConsumeResult} with headers and block metadata.
+   * @returns {@link RateLimitConsumeResult} with **`headers: {}`** and block metadata (HTTP headers are set by middleware via **`formatRateLimitHeaders`**).
    * @since 1.0.0
    */
   async consume(req: unknown): Promise<RateLimitConsumeResult> {
@@ -318,22 +320,12 @@ export class RateLimitEngine {
       if (this.options.onDraftViolation) {
         await Promise.resolve(this.options.onDraftViolation(req, result));
       }
-      const limit = this.getLimit(req);
-      const headers = this.composeHeaders(
-        {
-          totalHits: result.totalHits,
-          remaining: result.remaining,
-          resetTime: result.resetTime,
-          isBlocked: false,
-        },
-        limit,
-      );
       const draftOut: RateLimitConsumeResult = {
         totalHits: result.totalHits,
         remaining: result.remaining,
         resetTime: result.resetTime,
         isBlocked: false,
-        headers,
+        headers: {},
         draftWouldBlock: true,
       };
       if (m) this.recordMetricsAfterConsume(m, key, t0, draftOut);
@@ -344,16 +336,13 @@ export class RateLimitEngine {
       this.recordViolation(key, req);
     }
 
-    const limit = this.getLimit(req);
-    const headers = this.composeHeaders(result, limit);
-
     if (result.isBlocked && !result.storeUnavailable && this.options.onLimitReached) {
       await Promise.resolve(this.options.onLimitReached(req, result));
     }
 
     const consumeResult: RateLimitConsumeResult = {
       ...result,
-      headers,
+      headers: {},
       blockReason: result.isBlocked
         ? result.storeUnavailable
           ? 'service_unavailable'
@@ -558,7 +547,7 @@ export class RateLimitEngine {
     };
     return {
       ...base,
-      headers: this.composeHeaders(base, limit),
+      headers: {},
       blockReason: reason,
     };
   }
@@ -585,30 +574,7 @@ export class RateLimitEngine {
     };
     return {
       ...base,
-      headers: this.composeHeaders(base, limit),
+      headers: {},
     };
-  }
-
-  private composeHeaders(result: RateLimitResult, limit: number): Record<string, string> {
-    if (this.options.headers === false) {
-      return {};
-    }
-
-    const resetSec = Math.ceil(result.resetTime.getTime() / 1000);
-    const headers: Record<string, string> = {
-      'X-RateLimit-Limit': String(limit),
-      'X-RateLimit-Remaining': String(Math.max(0, result.remaining)),
-      'X-RateLimit-Reset': String(resetSec),
-    };
-
-    if (result.isBlocked) {
-      const retryAfterSec = Math.max(
-        1,
-        Math.ceil((result.resetTime.getTime() - Date.now()) / 1000),
-      );
-      headers['Retry-After'] = String(retryAfterSec);
-    }
-
-    return headers;
   }
 }

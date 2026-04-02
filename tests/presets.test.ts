@@ -100,6 +100,8 @@ describe('presets — unit', () => {
       expect(merged.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(merged.windowMs).toBe(60_000);
       expect(merged.maxRequests).toBe(100);
+      expect(merged.standardHeaders).toBe('draft-6');
+      expect(merged.legacyHeaders).toBe(true);
     });
 
     it('defaults: sliding window, 100 req / 60s window', () => {
@@ -107,11 +109,21 @@ describe('presets — unit', () => {
       expect(p.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(p.windowMs).toBe(60_000);
       expect(p.maxRequests).toBe(100);
+      expect(p.standardHeaders).toBe('draft-6');
+      expect(p.legacyHeaders).toBe(true);
     });
 
     it('user override: maxRequests 50', () => {
       const merged = mergeRateLimiterOptions(singleInstancePreset({ maxRequests: 50 }));
       expect(merged.maxRequests).toBe(50);
+    });
+
+    it('user can override standardHeaders', () => {
+      const merged = mergeRateLimiterOptions(
+        singleInstancePreset({ standardHeaders: 'legacy', legacyHeaders: false }),
+      );
+      expect(merged.standardHeaders).toBe('legacy');
+      expect(merged.legacyHeaders).toBe(false);
     });
   });
 
@@ -124,6 +136,8 @@ describe('presets — unit', () => {
       expect(merged.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(merged.windowMs).toBe(60_000);
       expect(merged.maxRequests).toBe(100);
+      expect(merged.standardHeaders).toBe('draft-6');
+      expect(merged.legacyHeaders).toBe(false);
     });
 
     it('defaults: sliding window, 100 req / 60s', () => {
@@ -131,6 +145,8 @@ describe('presets — unit', () => {
       expect(m.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(m.windowMs).toBe(60_000);
       expect(m.maxRequests).toBe(100);
+      expect(m.standardHeaders).toBe('draft-6');
+      expect(m.legacyHeaders).toBe(false);
     });
 
     it('user override: maxRequests 50', () => {
@@ -178,6 +194,9 @@ describe('presets — unit', () => {
       expect(merged.tokensPerInterval).toBe(30);
       expect(merged.interval).toBe(60_000);
       expect(merged.bucketSize).toBe(60);
+      expect(merged.standardHeaders).toBe('draft-8');
+      expect(merged.legacyHeaders).toBe(false);
+      expect(merged.identifier).toBe('api-gateway');
     });
 
     it('defaults: token bucket 30/min, burst 60', () => {
@@ -186,6 +205,9 @@ describe('presets — unit', () => {
       expect(p.tokensPerInterval).toBe(30);
       expect(p.interval).toBe(60_000);
       expect(p.bucketSize).toBe(60);
+      expect(p.standardHeaders).toBe('draft-8');
+      expect(p.legacyHeaders).toBe(false);
+      expect(p.identifier).toBe('api-gateway');
     });
 
     it('user override: tokensPerInterval 50', () => {
@@ -193,6 +215,17 @@ describe('presets — unit', () => {
         apiGatewayPreset({ client: mockRedisClient() }, { tokensPerInterval: 50 }),
       );
       expect(merged.tokensPerInterval).toBe(50);
+    });
+
+    it('user can override identifier and standardHeaders', () => {
+      const merged = mergeRateLimiterOptions(
+        apiGatewayPreset(
+          { client: mockRedisClient() },
+          { identifier: 'my-gateway', standardHeaders: 'draft-6' },
+        ),
+      );
+      expect(merged.identifier).toBe('my-gateway');
+      expect(merged.standardHeaders).toBe('draft-6');
     });
 
     it('RedisStore uses fail-closed by default (increment blocks when Redis fails)', async () => {
@@ -220,6 +253,8 @@ describe('presets — unit', () => {
       expect(merged.strategy).toBe(RateLimitStrategy.FIXED_WINDOW);
       expect(merged.windowMs).toBe(60_000);
       expect(merged.maxRequests).toBe(5);
+      expect(merged.standardHeaders).toBe('draft-6');
+      expect(merged.legacyHeaders).toBe(false);
     });
 
     it('defaults: fixed window, 5 req / min', () => {
@@ -227,6 +262,8 @@ describe('presets — unit', () => {
       expect(p.strategy).toBe(RateLimitStrategy.FIXED_WINDOW);
       expect(p.windowMs).toBe(60_000);
       expect(p.maxRequests).toBe(5);
+      expect(p.standardHeaders).toBe('draft-6');
+      expect(p.legacyHeaders).toBe(false);
     });
 
     it('user override: maxRequests 50', () => {
@@ -261,6 +298,8 @@ describe('presets — unit', () => {
       expect(merged.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(merged.windowMs).toBe(60_000);
       expect(merged.maxRequests).toBe(60);
+      expect(merged.standardHeaders).toBe('draft-7');
+      expect(merged.legacyHeaders).toBe(false);
     });
 
     it('defaults: sliding window, 60 req / min, structured message', () => {
@@ -268,6 +307,8 @@ describe('presets — unit', () => {
       expect(p.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(p.windowMs).toBe(60_000);
       expect(p.maxRequests).toBe(60);
+      expect(p.standardHeaders).toBe('draft-7');
+      expect(p.legacyHeaders).toBe(false);
       expect(p.message).toEqual({
         error: 'Rate limit exceeded',
         retryAfter: '<seconds>',
@@ -283,12 +324,17 @@ describe('presets — unit', () => {
   describe('resilientRedisPreset', () => {
     it('merges to valid RateLimitOptions with RedisStore and insurance MemoryStore (defaults)', () => {
       const client = mockRedisClient();
-      const merged = mergeRateLimiterOptions(resilientRedisPreset({ client }));
+      const partial = resilientRedisPreset({ client });
+      expect(partial.standardHeaders).toBe('draft-6');
+      expect(partial.legacyHeaders).toBe(false);
+      const merged = mergeRateLimiterOptions(partial);
       assertResolvedOptions(merged);
       expect(merged.store).toBeInstanceOf(RedisStore);
       expect(merged.strategy).toBe(RateLimitStrategy.SLIDING_WINDOW);
       expect(merged.windowMs).toBe(60_000);
       expect(merged.maxRequests).toBe(100);
+      expect(merged.standardHeaders).toBe('draft-6');
+      expect(merged.legacyHeaders).toBe(false);
       const ins = insuranceStoreFromRedis(merged.store as RedisStore);
       expect(memoryMaxRequests(ins)).toBe(100);
     });
