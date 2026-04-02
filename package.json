@@ -1,6 +1,6 @@
 {
   "name": "ratelimit-flex",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Flexible rate limiting for Node.js (Express, Fastify, sliding window, token bucket)",
   "license": "MIT",
   "keywords": [
