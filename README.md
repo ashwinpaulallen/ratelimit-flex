@@ -6,7 +6,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 ![Tests](https://img.shields.io/badge/tests-vitest%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
-![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)
+![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
 - **Three strategies:** sliding window, token bucket, fixed window
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean)
