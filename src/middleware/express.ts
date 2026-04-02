@@ -1,5 +1,10 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
+import {
+  formatRateLimitHeaders,
+  type HeaderInput,
+  resolveHeaderConfig,
+} from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
 import {
   RateLimitEngine,
@@ -22,7 +27,7 @@ declare module 'express-serve-static-core' {
   }
 }
 
-function applyHeaders(res: Response, headers: Record<string, string>): void {
+function applyHeaderMap(res: Response, headers: Record<string, string>): void {
   for (const [name, value] of Object.entries(headers)) {
     res.setHeader(name, value);
   }
@@ -120,8 +125,25 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
         res.setHeader('X-RateLimit-Store', 'fallback');
       }
 
-      if (resolved.headers !== false) {
-        applyHeaders(res, result.headers);
+      const headerCfg = resolveHeaderConfig(resolved, req, result.bindingSlotIndex);
+      if (headerCfg.format) {
+        const headerInput: HeaderInput = {
+          limit: headerCfg.resolvedLimit,
+          remaining: result.remaining,
+          resetTime: result.resetTime,
+          isBlocked: result.isBlocked,
+          windowMs: headerCfg.resolvedWindowMs,
+          identifier: headerCfg.identifier,
+        };
+        const { headers, legacyHeaders } = formatRateLimitHeaders(
+          headerInput,
+          headerCfg.format,
+          headerCfg.includeLegacy,
+        );
+        applyHeaderMap(res, headers);
+        if (legacyHeaders) {
+          applyHeaderMap(res, legacyHeaders);
+        }
       }
 
       if (result.isBlocked) {

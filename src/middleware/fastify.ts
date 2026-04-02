@@ -1,6 +1,11 @@
 import type { RequestHandler } from 'express';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
+import {
+  formatRateLimitHeaders,
+  type HeaderInput,
+  resolveHeaderConfig,
+} from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
 import {
   RateLimitEngine,
@@ -68,6 +73,12 @@ declare module 'fastify' {
   }
 }
 
+function applyHeaderMap(reply: FastifyReply, headers: Record<string, string>): void {
+  for (const [name, value] of Object.entries(headers)) {
+    reply.header(name, value);
+  }
+}
+
 function decrementStores(resolved: RateLimitOptions, key: string, req: unknown): void {
   const incOpts = resolveIncrementOpts(resolved, req);
   const decOpts = matchingDecrementOptions(incOpts);
@@ -124,9 +135,24 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
         reply.header('X-RateLimit-Store', 'fallback');
       }
 
-      if (resolved.headers !== false) {
-        for (const [name, value] of Object.entries(result.headers)) {
-          reply.header(name, value);
+      const headerCfg = resolveHeaderConfig(resolved, request, result.bindingSlotIndex);
+      if (headerCfg.format) {
+        const headerInput: HeaderInput = {
+          limit: headerCfg.resolvedLimit,
+          remaining: result.remaining,
+          resetTime: result.resetTime,
+          isBlocked: result.isBlocked,
+          windowMs: headerCfg.resolvedWindowMs,
+          identifier: headerCfg.identifier,
+        };
+        const { headers, legacyHeaders } = formatRateLimitHeaders(
+          headerInput,
+          headerCfg.format,
+          headerCfg.includeLegacy,
+        );
+        applyHeaderMap(reply, headers);
+        if (legacyHeaders) {
+          applyHeaderMap(reply, legacyHeaders);
         }
       }
 

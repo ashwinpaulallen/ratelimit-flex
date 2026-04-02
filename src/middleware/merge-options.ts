@@ -13,6 +13,7 @@ import type {
   WindowRateLimitOptions,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { validateRateLimitHeaderOptions } from './validate-header-options.js';
 
 export const baseDefaults = {
   headers: true,
@@ -22,13 +23,26 @@ export const baseDefaults = {
   skipSuccessfulRequests: false,
 } as const;
 
-export function getLimit(opts: RateLimitOptions, req?: unknown): number {
+/**
+ * Resolves the effective limit for headers and `req.rateLimit` / `request.rateLimit`.
+ *
+ * @remarks
+ * **Grouped windows:** when **`bindingSlotIndex`** selects an existing slot, returns that slot’s `maxRequests`. Otherwise uses the **minimum** `maxRequests` across slots (same approximation as {@link resolveWindowMsForHeaders} when unbound).
+ */
+export function getLimit(opts: RateLimitOptions, req?: unknown, bindingSlotIndex?: number): number {
   if (opts.strategy === RateLimitStrategy.TOKEN_BUCKET) {
     return opts.bucketSize;
   }
   const w = opts as WindowRateLimitOptions;
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
-    return Math.min(...w.groupedWindowStores.map((g) => g.maxRequests));
+    const grouped = w.groupedWindowStores;
+    if (bindingSlotIndex !== undefined) {
+      const slot = grouped[bindingSlotIndex];
+      if (slot !== undefined) {
+        return slot.maxRequests;
+      }
+    }
+    return Math.min(...grouped.map((g) => g.maxRequests));
   }
   const mr = w.maxRequests ?? 100;
   if (typeof mr === 'function') {
@@ -41,6 +55,7 @@ export function getLimit(opts: RateLimitOptions, req?: unknown): number {
  * Merge partial options with strategy defaults and ensure a {@link MemoryStore} when `store` is omitted.
  */
 export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
+  validateRateLimitHeaderOptions(options);
   const strategy = options.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
 
   if (strategy === RateLimitStrategy.TOKEN_BUCKET) {
@@ -105,11 +120,11 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
 
 export function toRateLimitInfo(
   opts: RateLimitOptions,
-  result: RateLimitResult,
+  result: RateLimitResult & { bindingSlotIndex?: number },
   req?: unknown,
 ): RateLimitInfo {
   return {
-    limit: getLimit(opts, req),
+    limit: getLimit(opts, req, result.bindingSlotIndex),
     current: result.totalHits,
     remaining: result.remaining,
     resetTime: result.resetTime,

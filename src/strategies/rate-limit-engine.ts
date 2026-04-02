@@ -6,6 +6,7 @@ import {
   sanitizeWindowMs,
 } from '../utils/clamp.js';
 import type {
+  RateLimitConsumeResult,
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
   RateLimitOptions,
@@ -15,32 +16,11 @@ import type {
   WindowRateLimitOptions,
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { validateRateLimitHeaderOptions } from '../middleware/validate-header-options.js';
 import type { MetricsCounters } from '../metrics/counters.js';
 import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
-/**
- * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
- *
- * @description Extends {@link RateLimitResult} with standard rate-limit headers and block metadata.
- * @see {@link RateLimitEngine}
- * @since 1.0.0
- */
-export interface RateLimitConsumeResult extends RateLimitResult {
-  /**
-   * @description `X-RateLimit-*` and optional `Retry-After` when headers are enabled.
-   */
-  headers: Record<string, string>;
-  /**
-   * @description When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked.
-   * @default undefined
-   */
-  draftWouldBlock?: boolean;
-  /**
-   * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
-   * @default undefined when allowed
-   */
-  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
-}
+export type { RateLimitConsumeResult };
 
 /**
  * Input for {@link createRateLimiter} (engine factory): `store` is optional.
@@ -182,6 +162,7 @@ export function matchingDecrementOptions(inc?: RateLimitIncrementOptions): RateL
  * @since 1.0.0
  */
 export function createRateLimiter(options: RateLimiterConfigInput): RateLimitEngine {
+  validateRateLimitHeaderOptions(options as Partial<RateLimitOptions>);
   const resolved = resolveOptions(options);
   const counters = createMetricsCountersIfEnabled(resolved.metrics);
   return new RateLimitEngine(resolved, counters);
@@ -237,7 +218,7 @@ export class RateLimitEngine {
    *
    * @description Uses {@link RateLimitOptionsBase.keyGenerator} or {@link defaultKeyGenerator} to derive the storage key.
    * @param req - Framework request or arbitrary value passed to `keyGenerator`.
-   * @returns {@link RateLimitConsumeResult} with headers and block metadata.
+   * @returns {@link RateLimitConsumeResult} with **`headers: {}`** and block metadata (HTTP headers are set by middleware via **`formatRateLimitHeaders`**).
    * @since 1.0.0
    */
   async consume(req: unknown): Promise<RateLimitConsumeResult> {
@@ -287,6 +268,7 @@ export class RateLimitEngine {
     const draft = this.options.draft === true;
     let result: RateLimitResult;
     let blockedAtIndex: number | undefined;
+    let bindingSlotIndex: number | undefined;
     const incOpts = resolveIncrementOpts(this.options, req);
     const decOpts = matchingDecrementOptions(incOpts);
 
@@ -294,6 +276,7 @@ export class RateLimitEngine {
       const g = await this.consumeGroupedWindows(key, grouped, draft, m, incOpts);
       result = g.result;
       blockedAtIndex = g.blockedAtIndex;
+      bindingSlotIndex = g.bindingSlotIndex;
     } else {
       const ts = m ? performance.now() : 0;
       result = await this.options.store.increment(key, incOpts);
@@ -318,23 +301,14 @@ export class RateLimitEngine {
       if (this.options.onDraftViolation) {
         await Promise.resolve(this.options.onDraftViolation(req, result));
       }
-      const limit = this.getLimit(req);
-      const headers = this.composeHeaders(
-        {
-          totalHits: result.totalHits,
-          remaining: result.remaining,
-          resetTime: result.resetTime,
-          isBlocked: false,
-        },
-        limit,
-      );
       const draftOut: RateLimitConsumeResult = {
         totalHits: result.totalHits,
         remaining: result.remaining,
         resetTime: result.resetTime,
         isBlocked: false,
-        headers,
+        headers: {},
         draftWouldBlock: true,
+        ...(bindingSlotIndex !== undefined ? { bindingSlotIndex } : {}),
       };
       if (m) this.recordMetricsAfterConsume(m, key, t0, draftOut);
       return draftOut;
@@ -344,21 +318,19 @@ export class RateLimitEngine {
       this.recordViolation(key, req);
     }
 
-    const limit = this.getLimit(req);
-    const headers = this.composeHeaders(result, limit);
-
     if (result.isBlocked && !result.storeUnavailable && this.options.onLimitReached) {
       await Promise.resolve(this.options.onLimitReached(req, result));
     }
 
     const consumeResult: RateLimitConsumeResult = {
       ...result,
-      headers,
+      headers: {},
       blockReason: result.isBlocked
         ? result.storeUnavailable
           ? 'service_unavailable'
           : 'rate_limit'
         : undefined,
+      ...(bindingSlotIndex !== undefined ? { bindingSlotIndex } : {}),
     };
     if (m) this.recordMetricsAfterConsume(m, key, t0, consumeResult);
     return consumeResult;
@@ -475,7 +447,7 @@ export class RateLimitEngine {
     draft: boolean,
     metrics: MetricsCounters | undefined,
     incOpts: RateLimitIncrementOptions | undefined,
-  ): Promise<{ result: RateLimitResult; blockedAtIndex?: number }> {
+  ): Promise<{ result: RateLimitResult; blockedAtIndex?: number; bindingSlotIndex?: number }> {
     const decOpts = matchingDecrementOptions(incOpts);
     const done: RateLimitResult[] = [];
     for (let i = 0; i < grouped.length; i++) {
@@ -497,10 +469,59 @@ export class RateLimitEngine {
             });
           }
         }
-        return { result: this.mergeGroupedResults(done), blockedAtIndex: i };
+        return {
+          result: this.mergeGroupedResults(done),
+          blockedAtIndex: i,
+          bindingSlotIndex: this.computeBindingSlotIndex(done),
+        };
       }
     }
-    return { result: this.mergeGroupedResults(done) };
+    return {
+      result: this.mergeGroupedResults(done),
+      bindingSlotIndex: this.computeBindingSlotIndex(done),
+    };
+  }
+
+  /**
+   * Which {@link WindowRateLimitOptions.groupedWindowStores} slot is the binding constraint for this consume:
+   * a blocking slot (if several, the one with the latest {@link RateLimitResult.resetTime}), else the slot with the lowest remaining quota.
+   *
+   * @remarks
+   * When not blocked, “lowest remaining” is **absolute** remaining count, not remaining as a fraction of each slot’s limit. That matches common setups (e.g. tight minute + loose hour); pathological mixes where a larger limit has fewer absolute tokens left could pick a different “most constrained” slot under a percentage-based rule.
+   */
+  private computeBindingSlotIndex(done: RateLimitResult[]): number | undefined {
+    if (done.length === 0) {
+      return undefined;
+    }
+    const blocked: number[] = [];
+    for (let i = 0; i < done.length; i++) {
+      if (done[i]!.isBlocked) {
+        blocked.push(i);
+      }
+    }
+    if (blocked.length > 0) {
+      let best = blocked[0]!;
+      let bestT = done[best]!.resetTime.getTime();
+      for (let k = 1; k < blocked.length; k++) {
+        const idx = blocked[k]!;
+        const t = done[idx]!.resetTime.getTime();
+        if (t > bestT || (t === bestT && idx < best)) {
+          best = idx;
+          bestT = t;
+        }
+      }
+      return best;
+    }
+    let minRem = done[0]!.remaining;
+    let minIdx = 0;
+    for (let i = 1; i < done.length; i++) {
+      const rem = done[i]!.remaining;
+      if (rem < minRem || (rem === minRem && i < minIdx)) {
+        minRem = rem;
+        minIdx = i;
+      }
+    }
+    return minIdx;
   }
 
   private mergeGroupedResults(results: RateLimitResult[]): RateLimitResult {
@@ -558,7 +579,7 @@ export class RateLimitEngine {
     };
     return {
       ...base,
-      headers: this.composeHeaders(base, limit),
+      headers: {},
       blockReason: reason,
     };
   }
@@ -585,30 +606,7 @@ export class RateLimitEngine {
     };
     return {
       ...base,
-      headers: this.composeHeaders(base, limit),
+      headers: {},
     };
-  }
-
-  private composeHeaders(result: RateLimitResult, limit: number): Record<string, string> {
-    if (this.options.headers === false) {
-      return {};
-    }
-
-    const resetSec = Math.ceil(result.resetTime.getTime() / 1000);
-    const headers: Record<string, string> = {
-      'X-RateLimit-Limit': String(limit),
-      'X-RateLimit-Remaining': String(Math.max(0, result.remaining)),
-      'X-RateLimit-Reset': String(resetSec),
-    };
-
-    if (result.isBlocked) {
-      const retryAfterSec = Math.max(
-        1,
-        Math.ceil((result.resetTime.getTime() - Date.now()) / 1000),
-      );
-      headers['Retry-After'] = String(retryAfterSec);
-    }
-
-    return headers;
   }
 }

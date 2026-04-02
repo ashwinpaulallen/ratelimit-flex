@@ -59,6 +59,35 @@ export interface RateLimitResult {
 }
 
 /**
+ * Result of {@link RateLimitEngine.consume} / {@link RateLimitEngine.consumeWithKey}.
+ *
+ * @description Extends {@link RateLimitResult} with block metadata; **`headers`** is always **`{}`** (middleware sets HTTP headers via **`formatRateLimitHeaders`**).
+ * @see `RateLimitEngine` in `../strategies/rate-limit-engine.js`
+ * @since 1.0.0
+ */
+export interface RateLimitConsumeResult extends RateLimitResult {
+  /**
+   * @description Always **`{}`**. `expressRateLimiter` / `fastifyRateLimiter` set response headers via **`formatRateLimitHeaders`**; the engine does not allocate header maps on consume.
+   */
+  headers: Record<string, string>;
+  /**
+   * @description When {@link WindowRateLimitOptions.draft} is true and the request would have been blocked.
+   * @default undefined
+   */
+  draftWouldBlock?: boolean;
+  /**
+   * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
+   * @default undefined when allowed
+   */
+  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
+  /**
+   * @description Index into {@link WindowRateLimitOptions.groupedWindowStores} for the **binding constraint**: the slot that caused a block, or the slot with the lowest remaining quota when no block occurred.
+   * @default undefined when not using grouped windows or when not yet computed by the engine
+   */
+  bindingSlotIndex?: number;
+}
+
+/**
  * Optional per-call overrides for {@link RateLimitStore.increment}.
  *
  * @description **`maxRequests`** applies to sliding/fixed window only (dynamic cap when `maxRequests` is a function). **`cost`** applies to all strategies (sliding, fixed, token bucket) for weighted requests.
@@ -185,6 +214,14 @@ export interface RateLimitInfo {
 }
 
 /**
+ * String literal union for {@link RateLimitOptionsBase.standardHeaders} (excluding booleans **`true`** / **`false`**, which are typed separately on the option).
+ *
+ * @description Same string values as **`HeaderFormat`** used by {@link formatRateLimitHeaders}. Use with `standardHeaders: 'draft-6'` etc., or rely on {@link RateLimitOptionsBase.headers} / defaults for legacy `X-RateLimit-*` behavior.
+ * @since 1.4.0
+ */
+export type StandardHeadersDraft = 'legacy' | 'draft-6' | 'draft-7' | 'draft-8';
+
+/**
  * Options shared by all strategies (plus a required {@link RateLimitOptionsBase.store} on concrete configs).
  *
  * @description Base shape extended by {@link WindowRateLimitOptions} and {@link TokenBucketRateLimitOptions}.
@@ -216,10 +253,44 @@ export interface RateLimitOptionsBase {
   skipSuccessfulRequests?: boolean;
 
   /**
-   * @description When true, attach `X-RateLimit-*` and `Retry-After` headers on allowed responses.
+   * @description When true, attach `X-RateLimit-*` and `Retry-After` headers on allowed responses (legacy behavior).
    * @default true
+   * @see {@link RateLimitOptionsBase.standardHeaders} — when set, takes precedence over this flag for choosing the header profile.
    */
   headers?: boolean;
+
+  /**
+   * @description Controls which rate-limit response headers Express/Fastify attach (via {@link formatRateLimitHeaders}). Must be **`true`**, **`false`**, or one of {@link StandardHeadersDraft}; invalid strings throw at options merge / engine creation.
+   *
+   * **Profiles (example values for limit `100`, window 60s, remaining `42`, seconds-until-reset `30`):**
+   *
+   * | Value | Typical response headers |
+   * | --- | --- |
+   * | **`'legacy'`** or **`true`** | `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 42`, `X-RateLimit-Reset: <epoch seconds>`; plus `Retry-After: <seconds>` when blocked |
+   * | **`'draft-6'`** | `RateLimit-Limit: 100`, `RateLimit-Remaining: 42`, `RateLimit-Reset: 30` (seconds until reset), `RateLimit-Policy: 100;w=60`; `Retry-After` when blocked |
+   * | **`'draft-7'`** | `RateLimit: limit=100, remaining=42, reset=30`, `RateLimit-Policy: 100;w=60`; `Retry-After` when blocked |
+   * | **`'draft-8'`** | `RateLimit-Policy: "100-per-60";q=100;w=60`, `RateLimit: "100-per-60";r=42;t=30` (or custom {@link RateLimitOptionsBase.identifier}); `Retry-After` when blocked |
+   * | **`false`** | No rate-limit headers |
+   *
+   * **Precedence:** when both {@link RateLimitOptionsBase.headers} and `standardHeaders` are set, `standardHeaders` wins. When both are omitted, middleware defaults to legacy `X-RateLimit-*` headers (same as `headers: true` / `standardHeaders: 'legacy'`).
+   * @default undefined
+   * @since 1.4.0
+   */
+  standardHeaders?: StandardHeadersDraft | boolean;
+
+  /**
+   * @description Policy name for draft-8 (and policy strings where applicable). Must be a **string** if set. Non-ASCII characters are replaced when emitting RFC 8941–safe names (a **console warning** is logged once per process when non-ASCII is detected). Defaults to `"{limit}-per-{windowSeconds}"` from the resolved limit and window (e.g. `"100-per-60"`). Ignored for legacy and draft-6.
+   * @default undefined
+   * @since 1.4.0
+   */
+  identifier?: string;
+
+  /**
+   * @description When **`true`** and `standardHeaders` is a **draft** profile (`'draft-6'` \| `'draft-7'` \| `'draft-8'`), also emit legacy `X-RateLimit-*` (and `Retry-After` when blocked) alongside the draft headers. When `standardHeaders` is **`'legacy'`** or **`true`**, legacy headers are always the primary set; this flag mainly affects draft profiles. Defaults are resolved in {@link resolveHeaderConfig}.
+   * @default undefined
+   * @since 1.4.0
+   */
+  legacyHeaders?: boolean;
 
   /**
    * @description HTTP status when blocked by **rate limit** (not blocklist).

@@ -793,7 +793,10 @@ Options are merged with strategy defaults. Omit **`store`** to get an auto-creat
 | `interval` | `number` | `60000` | Refill interval (token bucket) |
 | `bucketSize` | `number` | `100` | Max tokens / burst (token bucket) |
 | `keyGenerator` | `(req) => string` | IP / socket fallback | Storage key |
-| `headers` | `boolean` | `true` | `X-RateLimit-*`, `Retry-After` |
+| `headers` | `boolean` | `true` | Legacy `X-RateLimit-*` when **`standardHeaders`** is omitted; see [Standard headers](#standard-headers) |
+| `standardHeaders` | `boolean` \| `'legacy'` \| `'draft-6'` \| `'draft-7'` \| `'draft-8'` | (see defaults) | Which response header profile to send ([Standard headers](#standard-headers)) |
+| `identifier` | `string` | `{limit}-per-{windowSeconds}` | Policy name for draft-8 / draft-7 policy strings |
+| `legacyHeaders` | `boolean` | (profile-dependent) | Also emit `X-RateLimit-*` alongside draft profiles |
 | `statusCode` | `number` | `429` | Status when rate-limited |
 | `message` | `string` \| `object` | `"Too many requests"` | Response body (`{ error: message }`) |
 | `skip` | `(req) => boolean` | — | Skip limiting |
@@ -827,6 +830,49 @@ Options are merged with strategy defaults. Omit **`store`** to get an auto-creat
 | `keyPrefix` | `string` | `"rlf:"` | Key prefix |
 | `onRedisError` | `'fail-open'` \| `'fail-closed'` | `fail-open` | Behavior when Redis fails during increment |
 | `onWarn` | `(msg, err?) => void` | `console.warn` | Custom logging |
+
+## Standard headers
+
+Express and Fastify attach rate-limit response headers via **`standardHeaders`**, **`headers`**, **`identifier`**, and **`legacyHeaders`**. The **`formatRateLimitHeaders()`** helper is also exported for custom middleware. See the IETF draft: **[RateLimit header fields for HTTP](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)**.
+
+### Quick comparison
+
+| Option | Headers sent | Format |
+|--------|-------------|--------|
+| `standardHeaders: 'legacy'` or `headers: true` (and `standardHeaders` omitted) | `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` | Legacy (epoch timestamp) |
+| `standardHeaders: 'draft-6'` | `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `RateLimit-Policy` | IETF draft-6 (seconds) |
+| `standardHeaders: 'draft-7'` | `RateLimit` (combined), `RateLimit-Policy` | IETF draft-7 (structured fields) |
+| `standardHeaders: 'draft-8'` | `RateLimit` (named policy), `RateLimit-Policy` | IETF draft-8 (latest) |
+| `standardHeaders: false` | None | — |
+
+On **429** (and other blocked responses where headers are enabled), **`Retry-After`** is included in seconds until reset — for legacy and draft profiles.
+
+**Note:** If the store’s **`resetTime`** is already in the past when headers are formatted (clock skew, slow handling), the seconds-until-reset value is **0**, so you may see **`Retry-After: 0`**. RFC 7231 defines that as “retry immediately” (valid); some clients treat **`0`** as no backoff and may retry aggressively — not a spec violation, but worth knowing for operators.
+
+**Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters.
+
+### Example
+
+```ts
+import expressRateLimiter from 'ratelimit-flex';
+
+// Recommended for new APIs
+app.use(expressRateLimiter({
+  maxRequests: 100,
+  windowMs: 60_000,
+  standardHeaders: 'draft-8',
+  identifier: 'api-v1',
+}));
+
+// Response headers:
+// RateLimit-Policy: "api-v1";q=100;w=60
+// RateLimit: "api-v1";r=95;t=45
+// (Retry-After: 45  ← only on 429)
+```
+
+### Migration from express-rate-limit
+
+The **`standardHeaders`** string values (`'draft-6'`, `'draft-7'`, `'draft-8'`) are intentionally aligned with **express-rate-limit**’s option names so you can migrate without renaming profiles. **`fromExpressRateLimitOptions()`** (exported from the main package) maps **`max` → `maxRequests`** and header flags. See [From `express-rate-limit`](#from-express-rate-limit).
 
 ## Advanced features
 
