@@ -1256,23 +1256,7 @@ expressRateLimiter({
 });
 ```
 
-For a **Redis** store, use **`RedisStore`**, **`multiInstancePreset`**, or **`resilientRedisPreset`** (insurance + circuit breaker), not the old `store: new RedisStore(...)` from third-party wrappers—wire **`url`** or **`client`** per this README.
-
-### From `rate-limiter-flexible`
-
-`rate-limiter-flexible`'s **`insuranceLimiter`** option maps directly to ratelimit-flex's **`resilience.insuranceLimiter`**. The **`resilientRedisPreset`** provides equivalent functionality in one line.
-
-`rate-limiter-flexible` often uses **points + duration (seconds)**. Convert duration to **`windowMs`** (multiply seconds × 1000) and set **`maxRequests`** ≈ points for a rough sliding-window equivalent.
-
-```ts
-// rate-limiter-flexible (conceptual)
-// new RateLimiterMemory({ points: 10, duration: 60 })
-
-// ratelimit-flex (sliding window, same order of magnitude)
-expressRateLimiter({ maxRequests: 10, windowMs: 60_000 });
-```
-
-For **Redis**, replace `RateLimiterRedis` with **`RedisStore`** + **`expressRateLimiter({ store })`**. Use **token bucket** if you relied on burst-style configs.
+For a **Redis** store, use **`RedisStore`**, **`multiInstancePreset`**, or **`resilientRedisPreset`** (insurance + circuit breaker)—wire **`url`** or **`client`** per this README.
 
 ## Contributing
 
