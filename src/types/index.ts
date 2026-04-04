@@ -120,6 +120,13 @@ export interface RateLimitDecrementOptions {
    * @default 1
    */
   cost?: number;
+  /**
+   * @description **Sliding window only:** remove the **newest** counted units (LIFO) instead of the oldest (FIFO).
+   * Used by {@link RateLimiterQueue} to undo a rejected increment probe (or a race where the queue head moved)
+   * without evicting earlier legitimate hits.
+   * @since 1.4.3
+   */
+  removeNewest?: boolean;
 }
 
 /**
@@ -154,7 +161,8 @@ export interface RateLimitStore {
 
   /**
    * @description Undo quota when middleware “skip failed/successful” options apply after the response, or when draft/grouped rollback runs.
-   * Sliding-window stores remove the **oldest** entries first (**FIFO**), **`cost`** times when the prior increment used a {@link RateLimitIncrementOptions.cost} above `1`.
+   * Sliding-window stores remove the **oldest** entries first (**FIFO**) by default; set **`removeNewest`** to undo the **newest** units (LIFO) for probe rollbacks (see {@link RateLimitDecrementOptions.removeNewest}).
+   * **`cost`** times when the prior increment used a {@link RateLimitIncrementOptions.cost} above `1`.
    * @param key - Same key passed to {@link RateLimitStore.increment}.
    * @param options - Match the prior increment’s **`cost`** (default `1`). See {@link RateLimitDecrementOptions}.
    * @returns Promise that settles when decrement is complete.

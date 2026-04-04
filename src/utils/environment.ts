@@ -20,6 +20,11 @@ export interface EnvironmentInfo {
    */
   isCluster: boolean;
   /**
+   * @description `true` when Node’s native `cluster` module is active: this process is a worker, or the primary has forked at least one worker.
+   * @default false
+   */
+  isNativeCluster: boolean;
+  /**
    * @description `true` when `KUBERNETES_SERVICE_HOST` is set.
    * @default false
    */
@@ -35,9 +40,9 @@ export interface EnvironmentInfo {
    */
   isMultiInstance: boolean;
   /**
-   * @description Suggested store kind for shared limits: `redis` when {@link EnvironmentInfo.isMultiInstance} is true, else `memory`.
+   * @description Suggested store kind: `memory` when single-instance; `cluster` when {@link EnvironmentInfo.isNativeCluster} and multi-instance (IPC + primary {@link MemoryStore}); `redis` for other multi-instance deployments.
    */
-  recommended: 'memory' | 'redis';
+  recommended: 'memory' | 'redis' | 'cluster';
 }
 
 function dockerenvExists(): boolean {
@@ -49,9 +54,19 @@ function dockerenvExists(): boolean {
 }
 
 /**
+ * Heuristic: this process may be running under PM2 (`PM2_HOME` or `pm_id` is set).
+ *
+ * @description Best-effort only — `PM2_HOME` can be set without PM2 cluster mode. See {@link detectEnvironment}.
+ * @since 1.4.2
+ */
+export function isPm2ManagedProcess(): boolean {
+  return process.env['PM2_HOME'] !== undefined || process.env['pm_id'] !== undefined;
+}
+
+/**
  * Inspect the current process environment and return deployment context signals.
  *
- * @description Heuristics only: e.g. `PM2_HOME` may be set without cluster mode; Docker may be a single replica.
+ * @description Heuristics only: e.g. `PM2_HOME` / `pm_id` may be set without PM2 cluster mode; Docker may be a single replica.
  * @returns {@link EnvironmentInfo}.
  * @example
  * ```ts
@@ -59,29 +74,44 @@ function dockerenvExists(): boolean {
  * if (env.recommended === 'redis') {
  *   console.log('Consider RedisStore for shared rate limits.');
  * }
+ * if (env.recommended === 'cluster') {
+ *   console.log('Consider ClusterStore with ClusterStorePrimary on the primary process.');
+ * }
  * ```
  * @since 1.2.0
  */
 export function detectEnvironment(): EnvironmentInfo {
+  const isNativeCluster =
+    cluster.isWorker === true ||
+    (cluster.isPrimary === true &&
+      cluster.workers != null &&
+      Object.keys(cluster.workers).length > 0);
+
   const isCluster =
     cluster.isWorker === true ||
     (cluster.isPrimary === true &&
       cluster.workers != null &&
       Object.keys(cluster.workers).length > 1) ||
-    process.env['PM2_HOME'] !== undefined;
+    isPm2ManagedProcess();
 
   const isKubernetes = process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
 
   const isDocker = dockerenvExists() || process.env['DOCKER'] !== undefined;
 
-  const isMultiInstance = isCluster || isKubernetes || isDocker;
+  const isMultiInstance = isCluster || isKubernetes || isDocker || isNativeCluster;
+
+  let recommended: 'memory' | 'redis' | 'cluster' = 'memory';
+  if (isMultiInstance) {
+    recommended = isNativeCluster ? 'cluster' : 'redis';
+  }
 
   return {
     isCluster,
+    isNativeCluster,
     isKubernetes,
     isDocker,
     isMultiInstance,
-    recommended: isMultiInstance ? 'redis' : 'memory',
+    recommended,
   };
 }
 
@@ -120,12 +150,19 @@ export function warnIfMemoryStoreInCluster(store: RateLimitStore): void {
   }
 
   hasWarned = true;
-  console.warn(
-    '[ratelimit-flex] WARNING: MemoryStore detected in a multi-instance environment.\n' +
-      '  Rate limits will be tracked per-instance, not globally.\n' +
-      '  Consider using RedisStore for shared rate limiting.\n' +
-      '  See: https://github.com/ashwinpaulallen/ratelimit-flex#deployment-guide',
-  );
+  if (env.isNativeCluster) {
+    console.warn(
+      'ratelimit-flex: MemoryStore detected in cluster mode. Consider ClusterStore (no Redis needed) or RedisStore for shared limits.\n' +
+        '  See: https://github.com/ashwinpaulallen/ratelimit-flex#deployment-guide',
+    );
+  } else {
+    console.warn(
+      '[ratelimit-flex] WARNING: MemoryStore detected in a multi-instance environment.\n' +
+        '  Rate limits will be tracked per-instance, not globally.\n' +
+        '  Consider using RedisStore for shared rate limiting.\n' +
+        '  See: https://github.com/ashwinpaulallen/ratelimit-flex#deployment-guide',
+    );
+  }
 }
 
 /**

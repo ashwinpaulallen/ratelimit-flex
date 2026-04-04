@@ -193,7 +193,11 @@ export class MemoryStore implements RateLimitStore {
     const cost = sanitizeIncrementCost(options?.cost, 1);
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW:
-        this.decrementSliding(key, cost);
+        if (options?.removeNewest === true) {
+          this.decrementSlidingFromEnd(key, cost);
+        } else {
+          this.decrementSliding(key, cost);
+        }
         break;
       case RateLimitStrategy.FIXED_WINDOW:
         this.decrementFixed(key, cost);
@@ -341,6 +345,23 @@ export class MemoryStore implements RateLimitStore {
     let n = Math.min(cost, ts.length);
     while (n-- > 0) {
       ts.shift();
+    }
+    if (ts.length === 0) {
+      this.sliding.delete(key);
+    } else {
+      this.sliding.set(key, ts);
+    }
+  }
+
+  /** Removes the **`cost`** newest hits (LIFO) — used to undo a failed increment probe without evicting older usage. */
+  private decrementSlidingFromEnd(key: string, cost = 1): void {
+    const ts = this.sliding.get(key);
+    if (!ts || ts.length === 0) {
+      return;
+    }
+    let n = Math.min(cost, ts.length);
+    while (n-- > 0) {
+      ts.pop();
     }
     if (ts.length === 0) {
       this.sliding.delete(key);

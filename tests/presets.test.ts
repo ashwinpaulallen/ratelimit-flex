@@ -351,6 +351,7 @@ describe('presets — unit', () => {
     it('uses detectEnvironment when estimatedWorkers is omitted (Kubernetes → 4 workers)', () => {
       const spy = vi.spyOn(environment, 'detectEnvironment').mockReturnValue({
         isCluster: false,
+        isNativeCluster: false,
         isKubernetes: true,
         isDocker: false,
         isMultiInstance: true,

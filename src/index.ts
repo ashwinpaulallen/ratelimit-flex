@@ -3,7 +3,8 @@
  *
  * @description
  * - Default export: {@link expressRateLimiter}
- * - Fastify: import `fastifyRateLimiter` from `ratelimit-flex/fastify`
+ * - Queued limits: {@link expressQueuedRateLimiter}, {@link createRateLimiterQueue}, {@link RateLimiterQueue}
+ * - Fastify: import `fastifyRateLimiter` / `fastifyQueuedRateLimiter` from `ratelimit-flex/fastify`
  * - Types: re-exported from `./types/index.js`
  * - Resilience: {@link CircuitBreaker}, {@link RedisResilienceOptions}, {@link resilientRedisPreset}, related types
  * @packageDocumentation
@@ -94,7 +95,11 @@ export {
  * @see {@link detectEnvironment}
  * @since 1.2.0
  */
-export { detectEnvironment, type EnvironmentInfo } from './utils/environment.js';
+export {
+  detectEnvironment,
+  isPm2ManagedProcess,
+  type EnvironmentInfo,
+} from './utils/environment.js';
 
 /**
  * Merged default option objects per strategy (`slidingWindowDefaults`, `fixedWindowDefaults`, `tokenBucketDefaults`).
@@ -116,6 +121,32 @@ export {
   type RedisResilienceOptions,
   type ResilienceHooks,
 } from './resilience/index.js';
+
+/**
+ * Standalone {@link RateLimiterQueue} factory for non-HTTP workloads (outbound APIs, jobs, crawlers).
+ *
+ * @see {@link createRateLimiterQueue}
+ * @since 1.4.2
+ */
+export {
+  createRateLimiterQueue,
+  type CreateRateLimiterQueueOptions,
+} from './queue/createRateLimiterQueue.js';
+export {
+  RateLimiterQueue,
+  RateLimiterQueueError,
+  type RateLimiterQueueErrorCode,
+  type RateLimiterQueueOptions,
+  type RateLimiterQueueResult,
+} from './queue/RateLimiterQueue.js';
+
+/**
+ * Express middleware that **queues** over-limit requests instead of responding with 429 immediately.
+ *
+ * @see {@link expressQueuedRateLimiter}
+ * @since 1.5.0
+ */
+export { expressQueuedRateLimiter } from './middleware/expressQueuedRateLimiter.js';
 
 /**
  * All shared TypeScript types and {@link RateLimitStrategy}.
@@ -161,12 +192,30 @@ export {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
+  clusterPreset,
   multiInstancePreset,
   publicApiPreset,
+  queuedClusterPreset,
   resilientRedisPreset,
   singleInstancePreset,
   type ResilientRedisPresetRedisOptions,
 } from './presets/index.js';
+
+/**
+ * Node.js native `cluster`: {@link ClusterStore} (workers), {@link ClusterStorePrimary} (primary), IPC protocol types.
+ * Pair with {@link clusterPreset} for Express/Fastify options.
+ *
+ * @see {@link clusterPreset}
+ * @since 1.4.2
+ */
+export { ClusterStore, type ClusterStoreOptions } from './stores/ClusterStore.js';
+export {
+  ClusterStorePrimary,
+  type ClusterPrimaryMessage,
+  type ClusterStoreInitOptions,
+  type ClusterWorkerMessage,
+  isRateLimitFlexMessage,
+} from './cluster/index.js';
 
 /**
  * Returns `{ express }` where `express` is {@link expressRateLimiter} bound to the given options.

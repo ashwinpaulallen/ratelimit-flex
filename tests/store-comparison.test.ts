@@ -11,9 +11,15 @@ import { detectEnvironment } from '../src/utils/environment.js';
 const fsMock = vi.hoisted(() => ({ existsSync: vi.fn(() => false) }));
 
 vi.mock('node:fs', () => ({ default: fsMock }));
-// Keep cluster in the default test state: not a worker, primary with no workers.
+const clusterMock = vi.hoisted(() => ({
+  isWorker: false,
+  isPrimary: true,
+  workers: {} as Record<string, unknown>,
+}));
+
+// Default test state: not a worker, primary with no workers.
 vi.mock('node:cluster', () => ({
-  default: { isWorker: false, isPrimary: true, workers: {} },
+  default: clusterMock,
 }));
 
 // ---------------------------------------------------------------------------
@@ -150,6 +156,9 @@ describe('detectEnvironment', () => {
   beforeEach(() => {
     savedEnv = saveAndClearEnv();
     fsMock.existsSync.mockReturnValue(false);
+    clusterMock.isWorker = false;
+    clusterMock.isPrimary = true;
+    clusterMock.workers = {};
   });
 
   afterEach(() => {
@@ -159,10 +168,30 @@ describe('detectEnvironment', () => {
   it('returns isMultiInstance: false and recommended: "memory" by default', () => {
     const env = detectEnvironment();
     expect(env.isCluster).toBe(false);
+    expect(env.isNativeCluster).toBe(false);
     expect(env.isKubernetes).toBe(false);
     expect(env.isDocker).toBe(false);
     expect(env.isMultiInstance).toBe(false);
     expect(env.recommended).toBe('memory');
+  });
+
+  it('returns isNativeCluster and recommended cluster for a cluster worker', () => {
+    clusterMock.isWorker = true;
+    clusterMock.isPrimary = false;
+    const env = detectEnvironment();
+    expect(env.isNativeCluster).toBe(true);
+    expect(env.isMultiInstance).toBe(true);
+    expect(env.recommended).toBe('cluster');
+  });
+
+  it('returns isNativeCluster when primary has at least one worker', () => {
+    clusterMock.isWorker = false;
+    clusterMock.isPrimary = true;
+    clusterMock.workers = { '1': {} as unknown };
+    const env = detectEnvironment();
+    expect(env.isNativeCluster).toBe(true);
+    expect(env.isMultiInstance).toBe(true);
+    expect(env.recommended).toBe('cluster');
   });
 
   it('returns isKubernetes: true when KUBERNETES_SERVICE_HOST is set', () => {
@@ -209,6 +238,9 @@ describe('warnIfMemoryStoreInCluster', () => {
   beforeEach(() => {
     savedEnv = saveAndClearEnv();
     fsMock.existsSync.mockReturnValue(false);
+    clusterMock.isWorker = false;
+    clusterMock.isPrimary = true;
+    clusterMock.workers = {};
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     // Each test gets a fresh module so `hasWarned` resets to false.
     vi.resetModules();
@@ -233,6 +265,25 @@ describe('warnIfMemoryStoreInCluster', () => {
 
     expect(warnSpy).toHaveBeenCalledOnce();
     expect(warnSpy.mock.calls[0]?.[0]).toContain('[ratelimit-flex] WARNING: MemoryStore');
+    await store.shutdown();
+  });
+
+  it('mentions ClusterStore in native cluster environments', async () => {
+    clusterMock.isWorker = true;
+    clusterMock.isPrimary = false;
+    const { warnIfMemoryStoreInCluster } = await import('../src/utils/environment.js');
+    const { MemoryStore: FreshMemoryStore } = await import('../src/stores/memory-store.js');
+    const store = new FreshMemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+
+    warnIfMemoryStoreInCluster(store);
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('ClusterStore');
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('RedisStore');
     await store.shutdown();
   });
 
@@ -316,6 +367,9 @@ describe('warnIfRedisStoreWithoutInsurance', () => {
   beforeEach(() => {
     savedEnv = saveAndClearEnv();
     fsMock.existsSync.mockReturnValue(false);
+    clusterMock.isWorker = false;
+    clusterMock.isPrimary = true;
+    clusterMock.workers = {};
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.resetModules();
   });

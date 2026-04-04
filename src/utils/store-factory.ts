@@ -1,3 +1,4 @@
+import { ClusterStore } from '../stores/ClusterStore.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { RedisStore, type RedisLikeClient, type RedisErrorMode } from '../stores/redis-store.js';
 import { RateLimitStrategy, type RateLimitStore } from '../types/index.js';
@@ -53,6 +54,7 @@ export type RedisStoreConnectionOptions =
  * - `memory` + window strategy: optional `windowMs` / `maxRequests`.
  * - `memory` + token bucket: required `tokensPerInterval`, `interval`, `bucketSize`.
  * - `redis` + window or bucket: requires `redis` connection options.
+ * - `cluster`: {@link ClusterStore} in a **cluster worker** (requires `keyPrefix` + strategy config).
  * @see {@link RedisStoreConnectionOptions}
  * @since 1.2.0
  */
@@ -122,6 +124,38 @@ export type CreateStoreOptions =
       bucketSize: number;
       /** @description Connection and Redis options. */
       redis: RedisStoreConnectionOptions;
+    }
+  | {
+      /** @description {@link ClusterStore} — IPC to primary (worker process only). */
+      type: 'cluster';
+      /**
+       * @description Unique namespace for this limiter on the primary (see {@link ClusterStore}).
+       */
+      keyPrefix: string;
+      /** @description Sliding or fixed window. */
+      strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+      /**
+       * @description Window length in milliseconds.
+       * @default 60000
+       */
+      windowMs?: number;
+      /**
+       * @description Max requests per window.
+       * @default 100
+       */
+      maxRequests?: number;
+      /** @description IPC reply timeout (see {@link ClusterStore}). */
+      timeoutMs?: number;
+    }
+  | {
+      /** @description {@link ClusterStore} — token bucket in the primary. */
+      type: 'cluster';
+      keyPrefix: string;
+      strategy: RateLimitStrategy.TOKEN_BUCKET;
+      tokensPerInterval: number;
+      interval: number;
+      bucketSize: number;
+      timeoutMs?: number;
     };
 
 function assertRedisConnection(redis: RedisStoreConnectionOptions): void {
@@ -150,13 +184,52 @@ function assertRedisConnection(redis: RedisStoreConnectionOptions): void {
  *   redis: { url: 'redis://localhost:6379' },
  * });
  * ```
+ * @example Cluster worker only — shared counters via primary IPC:
+ * ```ts
+ * const store = createStore({
+ *   type: 'cluster',
+ *   keyPrefix: 'my-limiter',
+ *   strategy: RateLimitStrategy.SLIDING_WINDOW,
+ *   windowMs: 60_000,
+ *   maxRequests: 100,
+ * });
+ * ```
  * @throws {Error} When Redis options include both `client` and `url`, or neither; or when `type` is invalid at runtime.
  * @see {@link MemoryStore}
  * @see {@link RedisStore}
+ * @see {@link ClusterStore}
  * @since 1.2.0
  */
 export function createStore(options: CreateStoreOptions): RateLimitStore {
   const { type } = options;
+  if (type === 'cluster') {
+    if (options.keyPrefix === undefined || options.keyPrefix === '') {
+      throw new Error('createStore: cluster type requires a non-empty keyPrefix');
+    }
+    if (options.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+      if (!options.tokensPerInterval || !options.interval || !options.bucketSize) {
+        throw new Error(
+          'createStore: TOKEN_BUCKET strategy requires tokensPerInterval, interval, and bucketSize',
+        );
+      }
+      return new ClusterStore({
+        keyPrefix: options.keyPrefix,
+        strategy: RateLimitStrategy.TOKEN_BUCKET,
+        tokensPerInterval: options.tokensPerInterval,
+        interval: options.interval,
+        bucketSize: options.bucketSize,
+        timeoutMs: options.timeoutMs,
+      });
+    }
+    return new ClusterStore({
+      keyPrefix: options.keyPrefix,
+      strategy: options.strategy,
+      windowMs: options.windowMs ?? 60_000,
+      maxRequests: options.maxRequests ?? 100,
+      timeoutMs: options.timeoutMs,
+    });
+  }
+
   if (type === 'memory') {
     if (options.strategy === RateLimitStrategy.TOKEN_BUCKET) {
       return new MemoryStore({

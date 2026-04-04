@@ -1,6 +1,8 @@
 import cluster from 'node:cluster';
 import type { CircuitBreakerOptions } from '../resilience/CircuitBreaker.js';
 import type { ResilienceHooks } from '../resilience/types.js';
+import type { QueuedRateLimiterOptions } from '../middleware/expressQueuedRateLimiter.js';
+import { ClusterStore } from '../stores/ClusterStore.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
@@ -271,6 +273,178 @@ export function singleInstancePreset(
     standardHeaders: 'draft-6',
     legacyHeaders: true,
     ...options,
+  };
+}
+
+/**
+ * Node.js **cluster** preset: {@link ClusterStore} on workers (IPC to primary) + defaults aligned with {@link multiInstancePreset} headers.
+ *
+ * @description Call {@link ClusterStorePrimary.init} once in the **primary** process before workers serve traffic. Each worker builds a {@link ClusterStore} with a unique `keyPrefix` per limiter.
+ * @param options - Window or token-bucket overrides plus `keyPrefix` (default `rlf-cluster`) and optional `timeoutMs` for primary IPC replies.
+ * @returns Partial {@link RateLimitOptions} with a {@link ClusterStore}.
+ * @example
+ * ```ts
+ * // primary (once):
+ * ClusterStorePrimary.init();
+ * // worker:
+ * app.use(expressRateLimiter(clusterPreset({ maxRequests: 100 })));
+ * ```
+ * @see {@link ClusterStore}
+ * @see {@link ClusterStorePrimary}
+ */
+export function clusterPreset(
+  options?: Partial<RateLimitOptions> & { keyPrefix?: string; timeoutMs?: number },
+): Partial<RateLimitOptions> {
+  const { keyPrefix = 'rlf-cluster', timeoutMs, ...rest } = options ?? {};
+  const strategyHint = (rest as { strategy?: RateLimitStrategy }).strategy;
+
+  if (strategyHint === RateLimitStrategy.TOKEN_BUCKET) {
+    const tb = rest as Partial<TokenBucketRateLimitOptions>;
+    const merged: Partial<TokenBucketRateLimitOptions> = {
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: 30,
+      interval: 60_000,
+      bucketSize: 60,
+      standardHeaders: 'draft-6',
+      legacyHeaders: false,
+      ...tb,
+    };
+    const store = new ClusterStore({
+      keyPrefix,
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: merged.tokensPerInterval ?? 30,
+      interval: merged.interval ?? 60_000,
+      bucketSize: merged.bucketSize ?? 60,
+      timeoutMs,
+    });
+    return { ...merged, store };
+  }
+
+  const win = rest as Partial<WindowRateLimitOptions>;
+  const merged: Partial<WindowRateLimitOptions> = {
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    windowMs: 60_000,
+    maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
+    ...win,
+  };
+
+  const windowStrategy =
+    merged.strategy === RateLimitStrategy.FIXED_WINDOW
+      ? RateLimitStrategy.FIXED_WINDOW
+      : RateLimitStrategy.SLIDING_WINDOW;
+
+  const store = new ClusterStore({
+    keyPrefix,
+    strategy: windowStrategy,
+    windowMs: merged.windowMs ?? 60_000,
+    maxRequests: typeof merged.maxRequests === 'number' ? merged.maxRequests : 100,
+    timeoutMs,
+  });
+
+  return { ...merged, store };
+}
+
+/**
+ * Strip fields that only apply to {@link expressQueuedRateLimiter} / {@link fastifyQueuedRateLimiter} before merging into {@link clusterPreset}.
+ */
+function stripQueuedOnlyFields(
+  o?: Partial<QueuedRateLimiterOptions> & { keyPrefix?: string; timeoutMs?: number },
+): Partial<RateLimitOptions> {
+  if (!o) {
+    return {};
+  }
+  // Extract queue-only fields and return the rest for clusterPreset
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { maxQueueSize, maxQueueTimeMs, keyGenerator, statusCode, message, incrementCost, store, keyPrefix, timeoutMs, ...rateLike } = o;
+  return rateLike;
+}
+
+/**
+ * One-liner for **shared counters across cluster workers** (IPC to primary) **plus queueing** instead of immediate 429.
+ *
+ * @description Combines {@link clusterPreset} (a {@link ClusterStore}) with queue bounds suitable for {@link expressQueuedRateLimiter} / {@link fastifyQueuedRateLimiter}. Pass `keyPrefix` to namespace the store on the primary (default `rlf-cluster-queued`); the internal queue key prefix defaults to `rlf-queued`.
+ * @param options - Window or token-bucket overrides, optional `keyPrefix` / `timeoutMs` for {@link ClusterStore}, plus queued limits (`maxQueueSize`, `maxQueueTimeMs`, etc.).
+ * @returns {@link QueuedRateLimiterOptions} ready to pass to {@link expressQueuedRateLimiter} or {@link fastifyQueuedRateLimiter}.
+ * @example
+ * ```ts
+ * app.use(
+ *   '/api',
+ *   expressQueuedRateLimiter(
+ *     queuedClusterPreset({ maxRequests: 100, maxQueueSize: 200, keyPrefix: 'my-app-limiter' }),
+ *   ),
+ * );
+ * ```
+ * @see {@link clusterPreset}
+ * @see {@link expressQueuedRateLimiter}
+ * @since 1.5.0
+ */
+export function queuedClusterPreset(
+  options?: Partial<QueuedRateLimiterOptions> & { keyPrefix?: string; timeoutMs?: number },
+): QueuedRateLimiterOptions {
+  if (options?.store !== undefined) {
+    throw new Error('queuedClusterPreset: omit `store`; a ClusterStore is created automatically');
+  }
+
+  const clusterKeyPrefix = options?.keyPrefix ?? 'rlf-cluster-queued';
+  const timeoutMs = options?.timeoutMs;
+
+  const c = clusterPreset({
+    ...stripQueuedOnlyFields(options),
+    keyPrefix: clusterKeyPrefix,
+    timeoutMs,
+  });
+
+  const store = c.store;
+  if (!store) {
+    throw new Error('queuedClusterPreset: internal error, expected ClusterStore');
+  }
+
+  const maxQueueSize = options?.maxQueueSize ?? 100;
+  const maxQueueTimeMs = options?.maxQueueTimeMs ?? 30_000;
+  const keyGenerator = options?.keyGenerator;
+  const statusCode = options?.statusCode;
+  const message = options?.message;
+  const incrementCost = options?.incrementCost;
+  const standardHeaders = options?.standardHeaders ?? true;
+  const legacyHeaders = options?.legacyHeaders ?? false;
+
+  if (c.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+    const tb = c as Partial<TokenBucketRateLimitOptions>;
+    return {
+      // Queue uses windowMs for drain timing; map token bucket's interval
+      windowMs: tb.interval ?? 60_000,
+      maxRequests: tb.bucketSize ?? 60,
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      store,
+      maxQueueSize,
+      maxQueueTimeMs,
+      keyPrefix: 'rlf-queued',
+      keyGenerator,
+      statusCode,
+      message,
+      incrementCost,
+      standardHeaders,
+      legacyHeaders,
+    };
+  }
+
+  const w = c as Partial<WindowRateLimitOptions>;
+  return {
+    windowMs: w.windowMs ?? 60_000,
+    maxRequests: typeof w.maxRequests === 'number' ? w.maxRequests : 100,
+    strategy: w.strategy ?? RateLimitStrategy.SLIDING_WINDOW,
+    store,
+    maxQueueSize,
+    maxQueueTimeMs,
+    keyPrefix: 'rlf-queued',
+    keyGenerator,
+    statusCode,
+    message,
+    incrementCost,
+    standardHeaders,
+    legacyHeaders,
   };
 }
 
