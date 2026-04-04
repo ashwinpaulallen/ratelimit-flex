@@ -18,7 +18,8 @@ import type {
 } from '../types/index.js';
 
 const CHANNEL = 'rate_limiter_flex' as const;
-const INIT_TIMEOUT_MS = 30;
+/** Timeout for primary to acknowledge worker init (local IPC is fast, but allow buffer for startup) */
+const INIT_TIMEOUT_MS = 100;
 
 export interface ClusterStoreOptions {
   /** Must be unique per limiter instance across the cluster */

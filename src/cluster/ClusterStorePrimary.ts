@@ -65,7 +65,11 @@ export class ClusterStorePrimary {
 
   private listening = false;
 
-  /** Serializes primary-side handling so concurrent worker IPC cannot race {@link MemoryStore}. */
+  /**
+   * Serializes primary-side handling so concurrent worker IPC cannot race {@link MemoryStore}.
+   * Queue grows unbounded if workers send faster than primary processes, but local IPC + in-memory
+   * stores are fast enough that backpressure is unlikely in practice.
+   */
   private dispatchSerial: Promise<void> = Promise.resolve();
 
   private readonly messageListener = (worker: Worker, msg: unknown): void => {
@@ -321,6 +325,8 @@ export class ClusterStorePrimary {
       cluster.off('message', this.messageListener);
       this.listening = false;
     }
+    // Note: does not await dispatchSerial — in-flight handlers will fail gracefully when stores are cleared.
+    // Awaiting would require tearDown to be async, complicating the destroy() API.
     for (const store of this.stores.values()) {
       void store.shutdown();
     }
