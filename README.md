@@ -10,12 +10,13 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 
 - **Three strategies:** sliding window, token bucket, fixed window
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean)
-- **Stores:** `MemoryStore` (in-process) and `RedisStore` (shared, Lua-backed)
+- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed), and `ClusterStore` (Node.js native cluster IPC)
+- **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance ([Redis failure handling](#redis-failure-handling), [Redis resilience](#redis-resilience))
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
-- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
+- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 
 ## Installation
 
@@ -68,6 +69,98 @@ const app = Fastify();
 await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
 app.get('/health', async () => ({ ok: true }));
 ```
+
+## Request queuing
+
+**Typical use case:** Outbound API throttling (one queue per external API, single key for all requests).
+
+**Head-of-line blocking:** The queue is a single FIFO array. If you use multiple different keys with the same queue, a blocked request for key "A" will cause requests for key "B" to wait, even if "B" has capacity. For independent keys, create one queue per key instead (see examples below).
+
+```typescript
+// Outbound API rate limiting (non-HTTP)
+import { createRateLimiterQueue } from 'ratelimit-flex';
+
+const githubQueue = createRateLimiterQueue({
+  maxRequests: 30,
+  windowMs: 60_000,
+  maxQueueSize: 200,
+});
+
+// In your code — waits instead of rejecting
+await githubQueue.removeTokens('github-api');
+const response = await fetch('https://api.github.com/repos/...');
+```
+
+```typescript
+// HTTP middleware — queue instead of 429 (Express)
+import { expressQueuedRateLimiter } from 'ratelimit-flex';
+
+app.use('/slow-endpoint', expressQueuedRateLimiter({
+  maxRequests: 5,
+  windowMs: 10_000,
+  maxQueueSize: 50,
+  maxQueueTimeMs: 30_000,
+}));
+// Requests over 5/10s are held and released when quota opens up
+```
+
+```typescript
+// HTTP middleware — queue instead of 429 (Fastify)
+import { fastifyQueuedRateLimiter } from 'ratelimit-flex/fastify';
+
+await app.register(fastifyQueuedRateLimiter, {
+  maxRequests: 5,
+  windowMs: 10_000,
+  maxQueueSize: 50,
+  maxQueueTimeMs: 30_000,
+});
+// Requests over 5/10s are held and released when quota opens up
+// Fastify plugin automatically calls queue.shutdown() on server close
+```
+
+**Multiple independent keys:** Create one queue per key to avoid head-of-line blocking:
+
+```typescript
+// ❌ Bad: single queue with multiple keys causes head-of-line blocking
+const sharedQueue = createRateLimiterQueue({ maxRequests: 10, windowMs: 1000 });
+await sharedQueue.removeTokens('user:alice'); // Blocks...
+await sharedQueue.removeTokens('user:bob');   // ...waits even if bob has capacity
+
+// ✅ Good: separate queue per key
+const queues = new Map<string, RateLimiterQueue>();
+function getQueue(userId: string) {
+  if (!queues.has(userId)) {
+    queues.set(userId, createRateLimiterQueue({ maxRequests: 10, windowMs: 1000 }));
+  }
+  return queues.get(userId)!;
+}
+await getQueue('alice').removeTokens('user:alice'); // Independent
+await getQueue('bob').removeTokens('user:bob');     // Independent
+```
+
+**Graceful shutdown:**
+
+```typescript
+// Express: manually call shutdown on SIGTERM
+const limiter = expressQueuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
+app.use(limiter);
+
+process.on('SIGTERM', async () => {
+  limiter.queue.shutdown(); // Rejects all pending requests and closes the store
+  await server.close();
+});
+```
+
+```typescript
+// Fastify: automatic shutdown via onClose hook
+await app.register(fastifyQueuedRateLimiter, {
+  maxRequests: 10,
+  windowMs: 60_000,
+});
+// Plugin automatically calls queue.shutdown() when server closes
+```
+
+**Store ownership:** The queue takes ownership of the backing store. Calling `queue.shutdown()` will close the store via `store.shutdown()`. If you share a store across multiple queues or components, use `queue.clear()` instead of `queue.shutdown()` to avoid closing the shared store prematurely.
 
 ## Choosing a strategy
 
@@ -318,6 +411,65 @@ app.use(
 ### `resilientRedisPreset(redisOptions, options?)`
 
 **When:** Production **Redis** with **insurance** (in-memory fallback), **circuit breaker**, optional **counter sync** on recovery, and per-worker limit scaling. See [Redis resilience](#redis-resilience) for behavior, examples, and comparison with fail-open / fail-closed.
+
+### `clusterPreset(options?)`
+
+**When:** Node.js native `cluster` module (not PM2), single server with multiple CPU cores, no Redis.
+
+- `ClusterStore`, sliding window, **100 req / min**
+- Requires `ClusterStorePrimary.init()` on the primary process
+
+```ts
+// primary.ts
+import cluster from 'node:cluster';
+import { ClusterStorePrimary } from 'ratelimit-flex/cluster';
+
+if (cluster.isPrimary) {
+  ClusterStorePrimary.init();
+  for (let i = 0; i < 4; i++) cluster.fork();
+} else {
+  await import('./app.js');
+}
+```
+
+```ts
+// app.ts (worker)
+import { expressRateLimiter, clusterPreset } from 'ratelimit-flex';
+
+app.use(expressRateLimiter(clusterPreset({ maxRequests: 100, windowMs: 60_000 })));
+```
+
+### `queuedClusterPreset(options?)`
+
+**When:** Node.js native `cluster` + **request queuing** (queue over-limit requests instead of rejecting them).
+
+- `ClusterStore` + `expressQueuedRateLimiter` / `fastifyQueuedRateLimiter`
+- Sliding window, **100 req / min**, **queue size 100**, **30s max wait**
+- Requires `ClusterStorePrimary.init()` on the primary process
+
+```ts
+// primary.ts
+import cluster from 'node:cluster';
+import { ClusterStorePrimary } from 'ratelimit-flex/cluster';
+
+if (cluster.isPrimary) {
+  ClusterStorePrimary.init();
+  for (let i = 0; i < 4; i++) cluster.fork();
+} else {
+  await import('./app.js');
+}
+```
+
+```ts
+// app.ts (worker)
+import { expressQueuedRateLimiter, queuedClusterPreset } from 'ratelimit-flex';
+
+app.use('/api', expressQueuedRateLimiter(queuedClusterPreset({
+  maxRequests: 50,
+  windowMs: 60_000,
+  maxQueueSize: 200,
+})));
+```
 
 ### `apiGatewayPreset(redisOptions, options?)`
 

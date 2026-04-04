@@ -2,12 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
-
-## [1.5.0] - 2026-04-04
+## [2.0.0] - TBD
 
 ### Added
 
+- Main package (`ratelimit-flex`) exports **`expressQueuedRateLimiter`** (Express middleware that queues over-limit traffic), alongside **`createRateLimiterQueue`**, **`RateLimiterQueue`**, **`RateLimiterQueueError`**, and types **`RateLimiterQueueOptions`** and **`RateLimiterQueueResult`**.
+- README **Request queuing** section with outbound API (`createRateLimiterQueue`) and Express middleware examples.
+- **`queuedClusterPreset()`** — combines **`ClusterStore`** (shared counters via cluster IPC) with options for **`expressQueuedRateLimiter`** / **`fastifyQueuedRateLimiter`** (queue instead of immediate 429).
+- **`createStore({ type: 'cluster', ... })`** — factory support for **`ClusterStore`** (worker-only; requires `keyPrefix` and strategy config).
 - **ClusterStore** — Node.js native `cluster` IPC-based rate limiting without Redis. Workers send increment/decrement/reset operations to the primary process via typed IPC messages; the primary maintains a shared `MemoryStore` per `keyPrefix`.
 - **ClusterStorePrimary** — singleton on the primary process that listens for worker IPC and manages shared `MemoryStore` instances.
 - **`clusterPreset()`** — preset for `ClusterStore` with sensible defaults (sliding window, 100 req/min).
@@ -15,9 +17,22 @@ All notable changes to this project are documented in this file.
 - Public exports for **`ClusterStore`**, **`ClusterStoreOptions`**, cluster IPC protocol types (**`ClusterWorkerMessage`**, **`ClusterPrimaryMessage`**, **`ClusterStoreInitOptions`**, **`isRateLimitFlexMessage`**).
 - Subpath import **`ratelimit-flex/cluster`** re-exports the IPC protocol and **`ClusterStorePrimary`** (see `src/cluster/index.ts`).
 - **PM2 detection** — `ClusterStore` constructor throws a clear error when PM2 env vars are detected, explaining that PM2 uses its own IPC (not Node's `cluster` protocol) and suggesting `RedisStore` instead.
+- **Graceful shutdown documentation** — JSDoc example for `expressQueuedRateLimiter` showing how to call `handler.queue.shutdown()` on `SIGTERM`.
+- **Store ownership documentation** — `RateLimiterQueue` constructor, `shutdown()`, `clear()`, and `QueuedRateLimiterOptions.store` now document that `shutdown()` closes the backing store. If sharing a store across multiple queues or components, use `clear()` instead of `shutdown()` to avoid closing the shared store prematurely. Added test coverage for shared store scenarios.
+- **Head-of-line blocking documentation** — `RateLimiterQueue`, `RateLimiterQueueOptions`, `createRateLimiterQueue`, `expressQueuedRateLimiter`, and `fastifyQueuedRateLimiter` now document that the queue is a single FIFO array. When a request for key "A" is blocked, subsequent requests for key "B" also wait, even if "B" has capacity. This is intentional for the outbound API throttler use case (typically one key per queue), but users should create one queue per key for independent processing. Added comprehensive examples and test coverage demonstrating the behavior and solutions.
+- **Runtime validation** — `createStore` with `type: 'cluster'` and `TOKEN_BUCKET` now validates required fields (`tokensPerInterval`, `interval`, `bucketSize`) at runtime for JavaScript consumers.
+- **CI-aware integration tests** — queue timing assertions use more lenient thresholds when `process.env.CI` is set to prevent flakiness on slow CI machines.
+
+### Changed
+
+- **`RateLimiterQueueError` now includes `code` field** — Error instances have a typed `code` property (`'queue_full'` | `'queue_timeout'` | `'queue_shutdown'` | `'queue_cleared'` | `'cost_exceeds_limit'`) for robust error handling. The `retryAfterSeconds` helper in Express/Fastify queued middleware now checks `err.code === 'queue_timeout'` instead of fragile string matching on `err.message`.
+- **Refactored shared middleware utilities** — `resolveCost` and `retryAfterSeconds` are now exported from `src/queue/queue-middleware-utils.ts` to eliminate code duplication between Express and Fastify adapters.
 
 ### Fixed
 
+- **`RateLimiterQueue` TOKEN_BUCKET stale-head bug** — `undoIncrementAfterFailedOrStaleHead` now checks `isBlocked` status instead of only `kind`. Previously, when a TOKEN_BUCKET increment returned `isBlocked: true` and the queue entry timed out (stale-head), the undo path would incorrectly call `decrement`, inflating the bucket by adding tokens that were never consumed. The fix passes `result.isBlocked` to the undo method and guards both `'blocked'` and `'stale-head'` cases when `isBlocked && TOKEN_BUCKET`.
+- **Fragile error message matching in `retryAfterSeconds`** — Express and Fastify queued middleware now use `err.code` instead of `err.message.includes('timeout')` to determine `Retry-After` header value, preventing silent breakage if error messages change.
+- **`RateLimiterQueue` timeout-removes-head drain delay** — When a queued entry times out while `drain()` is sleeping on `drainTimer`, the timeout handler now clears the drain timer and resets the `processing` flag if the timed-out entry was the head of the queue. This allows the next entry to be processed immediately when the window resets, instead of waiting for the full remaining `drainTimer` duration (which could be up to `windowMs` for long windows). Added test coverage demonstrating the performance improvement.
 - **`ClusterStorePrimary`**: process worker IPC messages **serially** on the primary so concurrent increments cannot race the in-memory store (unbounded queue, but local IPC + in-memory stores are fast).
 - **`ClusterStorePrimary`**: `init` for an existing `keyPrefix` is **idempotent** (additional workers attach to the same `MemoryStore` instead of replacing it and resetting counters).
 - **`ClusterStorePrimary`**: `tearDown` no longer resets the dispatch queue while IPC handlers may still be running (avoids "Store not initialized" races during shutdown).

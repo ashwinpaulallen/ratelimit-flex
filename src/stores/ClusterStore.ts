@@ -305,7 +305,7 @@ export class ClusterStore implements RateLimitStore {
         id,
         keyPrefix: this.keyPrefix,
         key,
-        options: options?.cost !== undefined ? { cost: options.cost } : undefined,
+        options: options ? { cost: options.cost, removeNewest: options.removeNewest } : undefined,
       });
     });
   }

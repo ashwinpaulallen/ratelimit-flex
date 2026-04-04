@@ -14,7 +14,7 @@ export type ClusterWorkerMessage =
       id: string;
       keyPrefix: string;
       key: string;
-      options?: { cost?: number };
+      options?: { cost?: number; removeNewest?: boolean };
     }
   | {
       channel: 'rate_limiter_flex';

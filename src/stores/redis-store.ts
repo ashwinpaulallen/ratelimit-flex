@@ -192,12 +192,17 @@ local reset_at = oldest_score + window_ms
 return { count, blocked, reset_at }
 `;
 
-/** Pop oldest by score (FIFO); ARGV[1]=cost — ZPOPMIN that many times. */
+/** Pop entries: ARGV[1]=cost, ARGV[2]='1' for newest (ZPOPMAX) else oldest (ZPOPMIN). */
 const LUA_SLIDING_DECR = `
 local n = tonumber(ARGV[1]) or 1
 if n < 1 then n = 1 end
+local newest = ARGV[2] == '1'
 for i = 1, n do
-  redis.call('ZPOPMIN', KEYS[1])
+  if newest then
+    redis.call('ZPOPMAX', KEYS[1])
+  else
+    redis.call('ZPOPMIN', KEYS[1])
+  end
 end
 return 1
 `;
@@ -1008,7 +1013,10 @@ export class RedisStore implements RateLimitStore {
       switch (this.strategy) {
         case RateLimitStrategy.SLIDING_WINDOW: {
           const rk = this.redisKey('sw', key);
-          const out = await this.evalScript(LUA_SLIDING_DECR, [rk], [cost]);
+          const out = await this.evalScript(LUA_SLIDING_DECR, [rk], [
+            String(cost),
+            options?.removeNewest === true ? '1' : '0',
+          ]);
           if (out === null) {
             this.warn('Redis decrement: EVAL returned no result');
             if (this.redisErrorMode === 'fail-closed') {

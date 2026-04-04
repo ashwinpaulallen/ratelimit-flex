@@ -1,6 +1,7 @@
 import cluster from 'node:cluster';
 import type { CircuitBreakerOptions } from '../resilience/CircuitBreaker.js';
 import type { ResilienceHooks } from '../resilience/types.js';
+import type { QueuedRateLimiterOptions } from '../middleware/expressQueuedRateLimiter.js';
 import { ClusterStore } from '../stores/ClusterStore.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
@@ -343,6 +344,108 @@ export function clusterPreset(
   });
 
   return { ...merged, store };
+}
+
+/**
+ * Strip fields that only apply to {@link expressQueuedRateLimiter} / {@link fastifyQueuedRateLimiter} before merging into {@link clusterPreset}.
+ */
+function stripQueuedOnlyFields(
+  o?: Partial<QueuedRateLimiterOptions> & { keyPrefix?: string; timeoutMs?: number },
+): Partial<RateLimitOptions> {
+  if (!o) {
+    return {};
+  }
+  // Extract queue-only fields and return the rest for clusterPreset
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { maxQueueSize, maxQueueTimeMs, keyGenerator, statusCode, message, incrementCost, store, keyPrefix, timeoutMs, ...rateLike } = o;
+  return rateLike;
+}
+
+/**
+ * One-liner for **shared counters across cluster workers** (IPC to primary) **plus queueing** instead of immediate 429.
+ *
+ * @description Combines {@link clusterPreset} (a {@link ClusterStore}) with queue bounds suitable for {@link expressQueuedRateLimiter} / {@link fastifyQueuedRateLimiter}. Pass `keyPrefix` to namespace the store on the primary (default `rlf-cluster-queued`); the internal queue key prefix defaults to `rlf-queued`.
+ * @param options - Window or token-bucket overrides, optional `keyPrefix` / `timeoutMs` for {@link ClusterStore}, plus queued limits (`maxQueueSize`, `maxQueueTimeMs`, etc.).
+ * @returns {@link QueuedRateLimiterOptions} ready to pass to {@link expressQueuedRateLimiter} or {@link fastifyQueuedRateLimiter}.
+ * @example
+ * ```ts
+ * app.use(
+ *   '/api',
+ *   expressQueuedRateLimiter(
+ *     queuedClusterPreset({ maxRequests: 100, maxQueueSize: 200, keyPrefix: 'my-app-limiter' }),
+ *   ),
+ * );
+ * ```
+ * @see {@link clusterPreset}
+ * @see {@link expressQueuedRateLimiter}
+ * @since 1.5.0
+ */
+export function queuedClusterPreset(
+  options?: Partial<QueuedRateLimiterOptions> & { keyPrefix?: string; timeoutMs?: number },
+): QueuedRateLimiterOptions {
+  if (options?.store !== undefined) {
+    throw new Error('queuedClusterPreset: omit `store`; a ClusterStore is created automatically');
+  }
+
+  const clusterKeyPrefix = options?.keyPrefix ?? 'rlf-cluster-queued';
+  const timeoutMs = options?.timeoutMs;
+
+  const c = clusterPreset({
+    ...stripQueuedOnlyFields(options),
+    keyPrefix: clusterKeyPrefix,
+    timeoutMs,
+  });
+
+  const store = c.store;
+  if (!store) {
+    throw new Error('queuedClusterPreset: internal error, expected ClusterStore');
+  }
+
+  const maxQueueSize = options?.maxQueueSize ?? 100;
+  const maxQueueTimeMs = options?.maxQueueTimeMs ?? 30_000;
+  const keyGenerator = options?.keyGenerator;
+  const statusCode = options?.statusCode;
+  const message = options?.message;
+  const incrementCost = options?.incrementCost;
+  const standardHeaders = options?.standardHeaders ?? true;
+  const legacyHeaders = options?.legacyHeaders ?? false;
+
+  if (c.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+    const tb = c as Partial<TokenBucketRateLimitOptions>;
+    return {
+      // Queue uses windowMs for drain timing; map token bucket's interval
+      windowMs: tb.interval ?? 60_000,
+      maxRequests: tb.bucketSize ?? 60,
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      store,
+      maxQueueSize,
+      maxQueueTimeMs,
+      keyPrefix: 'rlf-queued',
+      keyGenerator,
+      statusCode,
+      message,
+      incrementCost,
+      standardHeaders,
+      legacyHeaders,
+    };
+  }
+
+  const w = c as Partial<WindowRateLimitOptions>;
+  return {
+    windowMs: w.windowMs ?? 60_000,
+    maxRequests: typeof w.maxRequests === 'number' ? w.maxRequests : 100,
+    strategy: w.strategy ?? RateLimitStrategy.SLIDING_WINDOW,
+    store,
+    maxQueueSize,
+    maxQueueTimeMs,
+    keyPrefix: 'rlf-queued',
+    keyGenerator,
+    statusCode,
+    message,
+    incrementCost,
+    standardHeaders,
+    legacyHeaders,
+  };
 }
 
 /**

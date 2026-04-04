@@ -28,7 +28,9 @@ import {
   ClusterStore,
   ClusterStorePrimary,
   createRateLimiter,
+  createRateLimiterQueue,
   createRateLimitEngine,
+  expressQueuedRateLimiter,
   createStore,
   defaultKeyGenerator,
   defaultRateLimitIdentifier,
@@ -45,9 +47,12 @@ import {
   MetricsManager,
   multiInstancePreset,
   publicApiPreset,
+  queuedClusterPreset,
   RedisStore,
   resilientRedisPreset,
   RateLimitEngine,
+  RateLimiterQueue,
+  RateLimiterQueueError,
   singleInstancePreset,
   slidingWindowDefaults,
   tokenBucketDefaults,
@@ -55,7 +60,7 @@ import {
 } from '../src/index.js';
 import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
-import { fastifyRateLimiter } from '../src/fastify.js';
+import { fastifyQueuedRateLimiter, fastifyRateLimiter } from '../src/fastify.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -79,6 +84,23 @@ describe('package exports', () => {
   it('exports createRateLimiter wrapper', () => {
     const out = createRateLimiter({ maxRequests: 1, windowMs: 1000 });
     expect(typeof out.express).toBe('function');
+  });
+
+  it('exports createRateLimiterQueue for non-HTTP use', () => {
+    expect(typeof createRateLimiterQueue).toBe('function');
+    const q = createRateLimiterQueue({ maxRequests: 1, windowMs: 60_000 });
+    expect(typeof q.removeTokens).toBe('function');
+    q.shutdown();
+  });
+
+  it('exports expressQueuedRateLimiter and RateLimiterQueue surface', () => {
+    expect(typeof expressQueuedRateLimiter).toBe('function');
+    expect(typeof RateLimiterQueue).toBe('function');
+    expect(typeof RateLimiterQueueError).toBe('function');
+    
+    // Verify error code type is exported (compile-time check via usage)
+    const err = new RateLimiterQueueError('test', 'queue_full');
+    expect(err.code).toBe('queue_full');
   });
 
   it('exports engine and key generator', () => {
@@ -147,6 +169,7 @@ describe('package exports', () => {
     expect(typeof publicApiPreset).toBe('function');
     expect(typeof resilientRedisPreset).toBe('function');
     expect(typeof clusterPreset).toBe('function');
+    expect(typeof queuedClusterPreset).toBe('function');
     expect(typeof apiKeyHeaderKeyGenerator).toBe('function');
   });
 
@@ -169,6 +192,7 @@ describe('package exports', () => {
 
   it('exports Fastify plugin from subpath entry', () => {
     expect(typeof fastifyRateLimiter).toBe('function');
+    expect(typeof fastifyQueuedRateLimiter).toBe('function');
   });
 
   it('exports MetricsManager and metrics types', () => {
