@@ -94,7 +94,11 @@ export {
  * @see {@link detectEnvironment}
  * @since 1.2.0
  */
-export { detectEnvironment, type EnvironmentInfo } from './utils/environment.js';
+export {
+  detectEnvironment,
+  isPm2ManagedProcess,
+  type EnvironmentInfo,
+} from './utils/environment.js';
 
 /**
  * Merged default option objects per strategy (`slidingWindowDefaults`, `fixedWindowDefaults`, `tokenBucketDefaults`).
@@ -161,12 +165,29 @@ export {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
+  clusterPreset,
   multiInstancePreset,
   publicApiPreset,
   resilientRedisPreset,
   singleInstancePreset,
   type ResilientRedisPresetRedisOptions,
 } from './presets/index.js';
+
+/**
+ * Node.js native `cluster`: {@link ClusterStore} (workers), {@link ClusterStorePrimary} (primary), IPC protocol types.
+ * Pair with {@link clusterPreset} for Express/Fastify options.
+ *
+ * @see {@link clusterPreset}
+ * @since 1.4.2
+ */
+export { ClusterStore, type ClusterStoreOptions } from './stores/ClusterStore.js';
+export {
+  ClusterStorePrimary,
+  type ClusterPrimaryMessage,
+  type ClusterStoreInitOptions,
+  type ClusterWorkerMessage,
+  isRateLimitFlexMessage,
+} from './cluster/index.js';
 
 /**
  * Returns `{ express }` where `express` is {@link expressRateLimiter} bound to the given options.

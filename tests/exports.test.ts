@@ -24,6 +24,9 @@ import {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
+  clusterPreset,
+  ClusterStore,
+  ClusterStorePrimary,
   createRateLimiter,
   createRateLimitEngine,
   createStore,
@@ -48,6 +51,7 @@ import {
   singleInstancePreset,
   slidingWindowDefaults,
   tokenBucketDefaults,
+  isRateLimitFlexMessage,
 } from '../src/index.js';
 import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
@@ -121,10 +125,11 @@ describe('package exports', () => {
     const env = detectEnvironment();
     expect(env).toMatchObject({
       isCluster: expect.any(Boolean),
+      isNativeCluster: expect.any(Boolean),
       isKubernetes: expect.any(Boolean),
       isDocker: expect.any(Boolean),
       isMultiInstance: expect.any(Boolean),
-      recommended: expect.stringMatching(/^(memory|redis)$/),
+      recommended: expect.stringMatching(/^(memory|redis|cluster)$/),
     });
   });
 
@@ -141,7 +146,25 @@ describe('package exports', () => {
     expect(typeof authEndpointPreset).toBe('function');
     expect(typeof publicApiPreset).toBe('function');
     expect(typeof resilientRedisPreset).toBe('function');
+    expect(typeof clusterPreset).toBe('function');
     expect(typeof apiKeyHeaderKeyGenerator).toBe('function');
+  });
+
+  it('exports ClusterStorePrimary', () => {
+    expect(ClusterStorePrimary).toBeDefined();
+    expect(typeof ClusterStorePrimary.init).toBe('function');
+  });
+
+  it('exports ClusterStore and cluster IPC helpers', () => {
+    expect(ClusterStore).toBeDefined();
+    expect(typeof isRateLimitFlexMessage).toBe('function');
+    expect(
+      isRateLimitFlexMessage({
+        channel: 'rate_limiter_flex',
+        type: 'init_ack',
+        keyPrefix: 'p',
+      }),
+    ).toBe(true);
   });
 
   it('exports Fastify plugin from subpath entry', () => {

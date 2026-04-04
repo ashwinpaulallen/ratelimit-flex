@@ -1,6 +1,7 @@
 import cluster from 'node:cluster';
 import type { CircuitBreakerOptions } from '../resilience/CircuitBreaker.js';
 import type { ResilienceHooks } from '../resilience/types.js';
+import { ClusterStore } from '../stores/ClusterStore.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
@@ -272,6 +273,76 @@ export function singleInstancePreset(
     legacyHeaders: true,
     ...options,
   };
+}
+
+/**
+ * Node.js **cluster** preset: {@link ClusterStore} on workers (IPC to primary) + defaults aligned with {@link multiInstancePreset} headers.
+ *
+ * @description Call {@link ClusterStorePrimary.init} once in the **primary** process before workers serve traffic. Each worker builds a {@link ClusterStore} with a unique `keyPrefix` per limiter.
+ * @param options - Window or token-bucket overrides plus `keyPrefix` (default `rlf-cluster`) and optional `timeoutMs` for primary IPC replies.
+ * @returns Partial {@link RateLimitOptions} with a {@link ClusterStore}.
+ * @example
+ * ```ts
+ * // primary (once):
+ * ClusterStorePrimary.init();
+ * // worker:
+ * app.use(expressRateLimiter(clusterPreset({ maxRequests: 100 })));
+ * ```
+ * @see {@link ClusterStore}
+ * @see {@link ClusterStorePrimary}
+ */
+export function clusterPreset(
+  options?: Partial<RateLimitOptions> & { keyPrefix?: string; timeoutMs?: number },
+): Partial<RateLimitOptions> {
+  const { keyPrefix = 'rlf-cluster', timeoutMs, ...rest } = options ?? {};
+  const strategyHint = (rest as { strategy?: RateLimitStrategy }).strategy;
+
+  if (strategyHint === RateLimitStrategy.TOKEN_BUCKET) {
+    const tb = rest as Partial<TokenBucketRateLimitOptions>;
+    const merged: Partial<TokenBucketRateLimitOptions> = {
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: 30,
+      interval: 60_000,
+      bucketSize: 60,
+      standardHeaders: 'draft-6',
+      legacyHeaders: false,
+      ...tb,
+    };
+    const store = new ClusterStore({
+      keyPrefix,
+      strategy: RateLimitStrategy.TOKEN_BUCKET,
+      tokensPerInterval: merged.tokensPerInterval ?? 30,
+      interval: merged.interval ?? 60_000,
+      bucketSize: merged.bucketSize ?? 60,
+      timeoutMs,
+    });
+    return { ...merged, store };
+  }
+
+  const win = rest as Partial<WindowRateLimitOptions>;
+  const merged: Partial<WindowRateLimitOptions> = {
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    windowMs: 60_000,
+    maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
+    ...win,
+  };
+
+  const windowStrategy =
+    merged.strategy === RateLimitStrategy.FIXED_WINDOW
+      ? RateLimitStrategy.FIXED_WINDOW
+      : RateLimitStrategy.SLIDING_WINDOW;
+
+  const store = new ClusterStore({
+    keyPrefix,
+    strategy: windowStrategy,
+    windowMs: merged.windowMs ?? 60_000,
+    maxRequests: typeof merged.maxRequests === 'number' ? merged.maxRequests : 100,
+    timeoutMs,
+  });
+
+  return { ...merged, store };
 }
 
 /**

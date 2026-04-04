@@ -180,6 +180,36 @@ app.use(expressRateLimiter({ store, windowMs: 60_000, maxRequests: 100 }));
 
 If you omit `store`, the middleware creates a `MemoryStore` from `windowMs` / `maxRequests` (or token-bucket fields).
 
+### When to use ClusterStore
+
+Use **ClusterStore** when:
+
+- Node.js native **`cluster`** module (not PM2)
+- No Redis available or desired
+- Single server with multiple CPU cores
+
+```ts
+// primary.ts (ESM — top-level await)
+import cluster from 'node:cluster';
+import { ClusterStorePrimary } from 'ratelimit-flex';
+
+if (cluster.isPrimary) {
+  ClusterStorePrimary.init();
+  for (let i = 0; i < 4; i++) cluster.fork();
+} else {
+  await import('./app.js');
+}
+```
+
+```ts
+// app.ts (worker)
+import express from 'express';
+import { expressRateLimiter, clusterPreset } from 'ratelimit-flex';
+
+const app = express();
+app.use(expressRateLimiter(clusterPreset({ maxRequests: 100, windowMs: 60_000 })));
+```
+
 ### When to use RedisStore
 
 Use **RedisStore** when:
@@ -212,11 +242,14 @@ Prefer passing a **shared Redis URL or client** from every instance. Use a **dis
 | Setup | Store | What’s shared | What’s per-process |
 |-------|--------|----------------|---------------------|
 | Single process | `MemoryStore` | Everything (one process) | N/A |
+| Node.js native `cluster` (same host, forked workers) | `ClusterStore` + `ClusterStorePrimary` | Rate limit counters (on primary) | Allowlist, blocklist, penalty |
 | PM2 cluster (same host) | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
 | Multiple servers + LB | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
 | Kubernetes pods | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
 | Microservices (one global limit) | `RedisStore` (same namespace/prefix) | Rate limit counters | Allowlist, blocklist, penalty |
 | Microservices (per-service limits) | `RedisStore` (different prefix/DB) | Per-service counters | Allowlist, blocklist, penalty |
+
+**PM2 vs Node `cluster`:** **`ClusterStore`** (Node’s native `cluster` IPC with **`ClusterStorePrimary`** on the primary) is **not** for PM2 cluster mode. PM2 runs independent worker processes and uses its own IPC to the daemon, not a Node `cluster` primary/worker tree. For PM2, use **`RedisStore`** (or another shared store). At startup, **`ClusterStore`** detects PM2 (`PM2_HOME` or `pm_id`) and throws a clear error if the process is not a Node cluster worker.
 
 **Sticky sessions:** If your load balancer uses sticky sessions, `MemoryStore` can appear to work, but it is fragile—deploys and restarts reset counters per instance. **`RedisStore` survives restarts** and stays consistent across nodes.
 
