@@ -7,12 +7,11 @@ export type { RateLimitIncrementOptions };
  *
  * - 'all': Increment ALL layers. Block if ANY layer blocks.
  *    Use case: "10/sec AND 100/min AND 1000/hour" — multiple windows.
- *    Replaces: rate-limiter-flexible's RateLimiterUnion + ratelimit-flex's existing `limits` array.
+ *    Same idea as the `limits` array option: several windows that must all allow.
  *
  * - 'overflow': Try primary layer first. If primary blocks, try the overflow layer
  *    (burst pool). Primary counts are kept when blocked; only block if BOTH are exhausted.
  *    Use case: "5/sec steady + 20 extra burst tokens over 60s."
- *    Replaces: rate-limiter-flexible's BurstyRateLimiter.
  *
  * - 'first-available': Try layers in order. Return the first layer that ALLOWS.
  *    Only block if ALL layers block.

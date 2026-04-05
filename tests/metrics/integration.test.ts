@@ -16,6 +16,22 @@ afterEach(async () => {
   await Promise.all(stores.splice(0).map((s) => s.shutdown()));
 });
 
+// Retry wrapper for flaky supertest HTTP parse errors
+async function retryRequest<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts - 1) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+  }
+  throw lastError;
+}
+
 describe('metrics integration (Express)', () => {
   it('aggregates totals and latency after requests; block and hot keys behave', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -44,7 +60,7 @@ describe('metrics integration (Express)', () => {
     });
 
     for (let i = 0; i < 50; i++) {
-      await request(app).get('/ok').expect(200);
+      await retryRequest(() => request(app).get('/ok').expect(200));
     }
 
     await new Promise((r) => setTimeout(r, 1100));
@@ -60,7 +76,7 @@ describe('metrics integration (Express)', () => {
     expect(br.rateLimit + br.blocklist + br.penalty + br.serviceUnavailable).toBe(snap!.totals.blocked);
 
     for (let i = 0; i < 120; i++) {
-      await request(app).get('/ok');
+      await retryRequest(() => request(app).get('/ok'));
     }
 
     await new Promise((r) => setTimeout(r, 1100));

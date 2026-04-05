@@ -9,3 +9,10 @@
 export { fastifyRateLimiter } from './middleware/fastify.js';
 export { fastifyQueuedRateLimiter } from './middleware/fastifyQueuedRateLimiter.js';
 export type { QueuedRateLimiterOptions } from './middleware/expressQueuedRateLimiter.js';
+
+/**
+ * Fastify plugin: same KeyManager admin routes as `createAdminRouter` from the main package entry.
+ *
+ * @since 2.2.0
+ */
+export { createFastifyAdminPlugin, type FastifyAdminPluginOptions } from './key-manager/admin-fastify.js';

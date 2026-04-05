@@ -83,6 +83,8 @@ export interface MetricsSnapshot {
     readonly blocklist: number;
     /** Blocked by penalty box. */
     readonly penalty: number;
+    /** Blocked by {@link RateLimitOptionsBase.keyManager} before store increment. */
+    readonly keyManager: number;
     /** Blocked because the store was unavailable (fail-closed). */
     readonly serviceUnavailable: number;
   };

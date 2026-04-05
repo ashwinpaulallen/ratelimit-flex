@@ -159,6 +159,7 @@ const DEFAULT_PREFIX = 'rlf:';
  * Members are generated with crypto randomness in TS so concurrent calls cannot collide (unlike Math.random + suffix).
  */
 const LUA_SLIDING_INCR = `
+--rlf:si
 local zkey = KEYS[1]
 local now = tonumber(ARGV[1])
 local window_ms = tonumber(ARGV[2])
@@ -209,6 +210,7 @@ return 1
 
 /** Fixed window: atomic INCRBY + PEXPIRE on first hit. KEYS[1]=counter, ARGV: windowMs, maxRequests, now, cost */
 const LUA_FIXED_INCR = `
+--rlf:fi
 local k = KEYS[1]
 local window_ms = tonumber(ARGV[1])
 local max_requests = tonumber(ARGV[2])
@@ -244,6 +246,7 @@ return v
 
 /** Token bucket: HSET tokens + last_refill. KEYS[1]=hash, ARGV: now, tpi, interval_ms, bucket_size, cost */
 const LUA_BUCKET_INCR = `
+--rlf:bi
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local tokens_per_interval = tonumber(ARGV[2])
@@ -309,8 +312,130 @@ const LUA_DEL = `
 return redis.call('DEL', unpack(KEYS))
 `;
 
+/** Sliding window: read-only ZCOUNT in window + oldest score (no ZREM). KEYS[1]=zset. ARGV: now, windowMs, maxRequests */
+const LUA_SLIDING_GET = `
+--rlf:sg
+local zkey = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_ms = tonumber(ARGV[2])
+local max_requests = tonumber(ARGV[3])
+local min_open = '(' .. tostring(now - window_ms)
+local count = tonumber(redis.call('ZCOUNT', zkey, min_open, '+inf')) or 0
+if count == 0 then
+  return nil
+end
+local blocked = 0
+if count > max_requests then blocked = 1 end
+local oldest_score = now
+local r = redis.call('ZRANGE', zkey, 0, 0, 'WITHSCORES')
+if r[2] ~= nil then
+  oldest_score = tonumber(r[2])
+end
+local reset_at = oldest_score + window_ms
+return { count, blocked, reset_at }
+`;
+
+/**
+ * Sliding window: replace key state. KEYS[1]=zset. ARGV: now, windowMs, maxRequests, totalHits, expireArgMs,
+ * member1..memberN (N = totalHits). If expireArgMs < 0, PEXPIRE(window_ms); else PEXPIREAT(expireArgMs).
+ */
+const LUA_SLIDING_SET = `
+--rlf:ss
+local zkey = KEYS[1]
+local now = tonumber(ARGV[1])
+local window_ms = tonumber(ARGV[2])
+local max_requests = tonumber(ARGV[3])
+local total_hits = tonumber(ARGV[4])
+if total_hits < 0 then total_hits = 0 end
+local expire_arg = tonumber(ARGV[5])
+redis.call('DEL', zkey)
+for i = 1, total_hits do
+  local m = ARGV[5 + i]
+  if m == nil then
+    return redis.error_reply('ratelimit-flex: sliding set missing member for slot ' .. i)
+  end
+  redis.call('ZADD', zkey, now, m)
+end
+if total_hits > 0 then
+  if expire_arg < 0 then
+    redis.call('PEXPIRE', zkey, window_ms)
+  else
+    redis.call('PEXPIREAT', zkey, expire_arg)
+  end
+end
+local count = tonumber(redis.call('ZCARD', zkey)) or 0
+if count == 0 then
+  return { 0, 0, now + window_ms }
+end
+local blocked = 0
+if count > max_requests then blocked = 1 end
+local oldest_score = now
+local r = redis.call('ZRANGE', zkey, 0, 0, 'WITHSCORES')
+if r[2] ~= nil then
+  oldest_score = tonumber(r[2])
+end
+local reset_at = oldest_score + window_ms
+return { count, blocked, reset_at }
+`;
+
+/** Fixed window: read-only GET + PTTL. KEYS[1]=counter. ARGV: windowMs, maxRequests, now */
+const LUA_FIXED_GET = `
+--rlf:fg
+local k = KEYS[1]
+local window_ms = tonumber(ARGV[1])
+local max_requests = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local s = redis.call('GET', k)
+if s == false then
+  return nil
+end
+local current = tonumber(s)
+local pttl = tonumber(redis.call('PTTL', k))
+if pttl < 0 then pttl = window_ms end
+local reset_at = now + pttl
+local blocked = 0
+if current > max_requests then blocked = 1 end
+return { current, blocked, reset_at }
+`;
+
+/** Token bucket: read-only refill + snapshot. KEYS[1]=hash. ARGV: now, tpi, interval_ms, bucket_size */
+const LUA_BUCKET_GET = `
+--rlf:bg
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local tokens_per_interval = tonumber(ARGV[2])
+local interval_ms = tonumber(ARGV[3])
+local bucket_size = tonumber(ARGV[4])
+
+local tokens_s = redis.call('HGET', key, 'tokens')
+local last_s = redis.call('HGET', key, 'last_refill')
+if tokens_s == false or last_s == false then
+  return nil
+end
+
+local tokens = tonumber(tokens_s)
+local last_refill = tonumber(last_s)
+
+local elapsed = now - last_refill
+local intervals = math.floor(elapsed / interval_ms)
+if intervals > 0 then
+  tokens = math.min(bucket_size, tokens + intervals * tokens_per_interval)
+  last_refill = last_refill + intervals * interval_ms
+end
+
+local remaining = tokens
+local total_hits = bucket_size - remaining
+local blocked = 0
+if remaining == 0 and total_hits >= bucket_size then
+  blocked = 1
+end
+local next_tick = last_refill + interval_ms
+return { remaining, total_hits, blocked, next_tick }
+`;
+
 /** Sync token-bucket hash after insurance recovery. KEYS[1]=hash, ARGV: tokens, last_refill, interval_ms */
 const LUA_BUCKET_SYNC = `
+--rlf:bs
 local key = KEYS[1]
 local tokens = tonumber(ARGV[1])
 local last_refill = tonumber(ARGV[2])
@@ -1089,6 +1214,309 @@ export class RedisStore implements RateLimitStore {
       if (this.redisErrorMode === 'fail-closed') {
         throw err;
       }
+    }
+  }
+
+  /**
+   * @inheritdoc
+   * @description Read-only quota snapshot; does not mutate Redis keys (sliding window does not prune expired ZSET members).
+   */
+  async get(key: string): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null> {
+    if (this.shouldRouteQuotaViaInsurance()) {
+      return this.insuranceStore!.get!(key);
+    }
+    try {
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          return await this.getSlidingRedis(key);
+        case RateLimitStrategy.FIXED_WINDOW:
+          return await this.getFixedRedis(key);
+        case RateLimitStrategy.TOKEN_BUCKET:
+          return await this.getBucketRedis(key);
+        default: {
+          const _: never = this.strategy;
+          return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
+        }
+      }
+    } catch (err) {
+      this.warn('Redis get failed', err);
+      return null;
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  async set(
+    key: string,
+    totalHits: number,
+    expiresAt?: Date,
+  ): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  }> {
+    if (this.shouldRouteQuotaViaInsurance()) {
+      return this.insuranceStore!.set!(key, totalHits, expiresAt);
+    }
+    try {
+      let r: RateLimitResult | null = null;
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          r = await this.setSlidingRedis(key, totalHits, expiresAt);
+          break;
+        case RateLimitStrategy.FIXED_WINDOW:
+          r = await this.setFixedRedis(key, totalHits, expiresAt);
+          break;
+        case RateLimitStrategy.TOKEN_BUCKET:
+          r = await this.setBucketRedis(key, totalHits);
+          break;
+        default: {
+          const _: never = this.strategy;
+          return Promise.reject(new Error(`Unsupported strategy: ${String(_)}`));
+        }
+      }
+      if (r === null) {
+        return this.redisIncrementFailure();
+      }
+      return r;
+    } catch (err) {
+      this.warn('Redis set failed', err);
+      return this.redisIncrementFailure();
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  async delete(key: string): Promise<boolean> {
+    if (this.shouldRouteQuotaViaInsurance()) {
+      const d = this.insuranceStore!.delete;
+      return d !== undefined ? d.call(this.insuranceStore, key) : false;
+    }
+    try {
+      let rk = '';
+      switch (this.strategy) {
+        case RateLimitStrategy.SLIDING_WINDOW:
+          rk = this.redisKey('sw', key);
+          break;
+        case RateLimitStrategy.FIXED_WINDOW:
+          rk = this.redisKey('fw', key);
+          break;
+        case RateLimitStrategy.TOKEN_BUCKET:
+          rk = this.redisKey('tb', key);
+          break;
+        default:
+          return false;
+      }
+      return await this.deleteOneRedisKey(rk);
+    } catch (err) {
+      this.warn('Redis delete failed', err);
+      if (this.redisErrorMode === 'fail-closed') {
+        throw err;
+      }
+      return false;
+    }
+  }
+
+  private async getSlidingRedis(key: string): Promise<RateLimitResult | null> {
+    const maxReq = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const now = Date.now();
+    const rk = this.redisKey('sw', key);
+    const raw = await this.evalScript(LUA_SLIDING_GET, [rk], [now, this.windowMs, maxReq]);
+    if (raw === null || raw === false) {
+      return null;
+    }
+    if (!Array.isArray(raw) || raw.length < 3) {
+      return null;
+    }
+    const count = Number(raw[0]);
+    const blocked = Number(raw[1]) === 1;
+    const resetMs = Number(raw[2]);
+    if (Number.isNaN(count) || Number.isNaN(resetMs)) {
+      return null;
+    }
+    if (count === 0) {
+      return null;
+    }
+    const remaining = blocked ? 0 : Math.max(0, maxReq - count);
+    return {
+      totalHits: count,
+      remaining,
+      resetTime: new Date(resetMs),
+      isBlocked: blocked,
+    };
+  }
+
+  private async getFixedRedis(key: string): Promise<RateLimitResult | null> {
+    const maxReq = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const now = Date.now();
+    const rk = this.redisKey('fw', key);
+    const raw = await this.evalScript(LUA_FIXED_GET, [rk], [this.windowMs, maxReq, now]);
+    if (raw === null || raw === false) {
+      return null;
+    }
+    if (!Array.isArray(raw) || raw.length < 3) {
+      return null;
+    }
+    const current = Number(raw[0]);
+    const blocked = Number(raw[1]) === 1;
+    const resetMs = Number(raw[2]);
+    if (Number.isNaN(current) || Number.isNaN(resetMs)) {
+      return null;
+    }
+    const remaining = blocked ? 0 : Math.max(0, maxReq - current);
+    return {
+      totalHits: current,
+      remaining,
+      resetTime: new Date(resetMs),
+      isBlocked: blocked,
+    };
+  }
+
+  private async getBucketRedis(key: string): Promise<RateLimitResult | null> {
+    const now = Date.now();
+    const rk = this.redisKey('tb', key);
+    const raw = await this.evalScript(LUA_BUCKET_GET, [rk], [
+      now,
+      this.tokensPerInterval,
+      this.refillIntervalMs,
+      this.bucketSize,
+    ]);
+    if (raw === null || raw === false) {
+      return null;
+    }
+    if (!Array.isArray(raw) || raw.length < 4) {
+      return null;
+    }
+    const remaining = Number(raw[0]);
+    const totalHits = Number(raw[1]);
+    const blocked = Number(raw[2]) === 1;
+    const nextMs = Number(raw[3]);
+    if (Number.isNaN(remaining) || Number.isNaN(totalHits) || Number.isNaN(nextMs)) {
+      return null;
+    }
+    return {
+      totalHits,
+      remaining,
+      resetTime: new Date(nextMs),
+      isBlocked: blocked,
+    };
+  }
+
+  private async setSlidingRedis(
+    key: string,
+    totalHits: number,
+    expiresAt?: Date,
+  ): Promise<RateLimitResult | null> {
+    const maxReq = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const now = Date.now();
+    const n = Math.max(0, Math.floor(totalHits));
+    const rk = this.redisKey('sw', key);
+    const expireArg = expiresAt !== undefined ? expiresAt.getTime() : -1;
+    const members = Array.from({ length: n }, () => randomBytes(16).toString('hex'));
+    const raw = await this.evalScript(LUA_SLIDING_SET, [rk], [
+      now,
+      this.windowMs,
+      maxReq,
+      n,
+      expireArg,
+      ...members,
+    ]);
+    if (raw === null || !Array.isArray(raw) || raw.length < 3) {
+      return null;
+    }
+    const count = Number(raw[0]);
+    const blocked = Number(raw[1]) === 1;
+    const resetMs = Number(raw[2]);
+    if (Number.isNaN(count) || Number.isNaN(resetMs)) {
+      return null;
+    }
+    const remaining = blocked ? 0 : Math.max(0, maxReq - count);
+    return {
+      totalHits: count,
+      remaining,
+      resetTime: new Date(resetMs),
+      isBlocked: blocked,
+    };
+  }
+
+  private async setFixedRedis(
+    key: string,
+    totalHits: number,
+    expiresAt?: Date,
+  ): Promise<RateLimitResult | null> {
+    const r = await this.getClient();
+    if (r === null) {
+      return null;
+    }
+    const n = Math.max(0, Math.floor(totalHits));
+    const rk = this.redisKey('fw', key);
+    try {
+      if (expiresAt !== undefined) {
+        await r.set(rk, String(n), 'PXAT', String(expiresAt.getTime()));
+      } else {
+        await r.set(rk, String(n), 'PX', String(this.windowMs));
+      }
+    } catch (err) {
+      this.warn('Redis SET (fixed set) failed', err);
+      return null;
+    }
+    return this.getFixedRedis(key);
+  }
+
+  private async setBucketRedis(key: string, totalHits: number): Promise<RateLimitResult | null> {
+    const cap = this.bucketSize;
+    const th = Math.max(0, totalHits);
+    const isBlocked = th >= cap;
+    const tokens = isBlocked ? 0 : Math.max(0, cap - th);
+    const lastRefill = Date.now();
+    const rk = this.redisKey('tb', key);
+    const raw = await this.evalScript(LUA_BUCKET_SYNC, [rk], [
+      tokens,
+      lastRefill,
+      this.refillIntervalMs,
+    ]);
+    if (raw === null) {
+      return null;
+    }
+    const totalHitsOut = isBlocked ? cap : th;
+    return {
+      totalHits: totalHitsOut,
+      remaining: tokens,
+      resetTime: new Date(lastRefill + this.refillIntervalMs),
+      isBlocked,
+    };
+  }
+
+  private async deleteOneRedisKey(rk: string): Promise<boolean> {
+    try {
+      const r = await this.getClient();
+      if (r === null) {
+        this.warn('Redis client unavailable (DEL)');
+        if (this.redisErrorMode === 'fail-closed') {
+          throw new Error('Redis client unavailable');
+        }
+        return false;
+      }
+      if (r.del) {
+        const out = await r.del(rk);
+        return Number(out) >= 1;
+      }
+      const out = await r.eval('return redis.call("DEL", KEYS[1])', 1, rk);
+      return Number(out) === 1;
+    } catch (err) {
+      this.warn('Redis DEL failed', err);
+      if (this.redisErrorMode === 'fail-closed') {
+        throw err;
+      }
+      return false;
     }
   }
 

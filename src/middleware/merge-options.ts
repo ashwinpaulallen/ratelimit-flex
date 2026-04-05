@@ -1,5 +1,6 @@
 import type { ComposedStore } from '../composition/ComposedStore.js';
 import { compose } from '../composition/compose.js';
+import { KeyManager } from '../key-manager/KeyManager.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 import {
@@ -11,6 +12,7 @@ import type {
   RateLimitInfo,
   RateLimitOptions,
   RateLimitResult,
+  TokenBucketRateLimitOptions,
   WindowLimitSpec,
   WindowRateLimitOptions,
 } from '../types/index.js';
@@ -82,8 +84,71 @@ export function getLimit(opts: RateLimitOptions, req?: unknown, bindingSlotIndex
 /**
  * Merge partial options with strategy defaults and ensure a {@link MemoryStore} when `store` is omitted.
  */
+function attachKeyManagerFromPenaltyBox(merged: RateLimitOptions): RateLimitOptions {
+  if (!merged.penaltyBox || merged.keyManager !== undefined) {
+    return merged;
+  }
+  const windowMs =
+    merged.strategy === RateLimitStrategy.TOKEN_BUCKET
+      ? (merged as TokenBucketRateLimitOptions).interval
+      : sanitizeWindowMs((merged as WindowRateLimitOptions).windowMs, 60_000);
+  const km = new KeyManager({
+    store: merged.store,
+    maxRequests: getLimit(merged),
+    windowMs,
+    penaltyBlockThreshold: merged.penaltyBox.violationsThreshold,
+    penaltyBlockDurationMs: merged.penaltyBox.penaltyDurationMs,
+  });
+  return { ...merged, keyManager: km };
+}
+
+/**
+ * JSON body when {@link RateLimitOptionsBase.keyManager} blocks a request before the store increment.
+ *
+ * @since 2.2.0
+ */
+export function keyManagerBlockedJson(resolved: RateLimitOptions, key: string): object {
+  const km = resolved.keyManager!;
+  const msg = resolved.message ?? 'Too many requests';
+  const base = typeof msg === 'string' ? { error: msg } : { ...(msg as object) };
+  const info = km.getBlockInfo(key);
+  return {
+    ...base,
+    blocked: true,
+    reason: info?.reason.type ?? 'manual',
+    expiresAt: info?.expiresAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * `Retry-After` value in seconds when the manual block has a finite {@link KeyManager} expiry.
+ *
+ * @since 2.2.0
+ */
+export function keyManagerRetryAfterSeconds(resolved: RateLimitOptions, key: string): number | undefined {
+  const km = resolved.keyManager;
+  if (!km) {
+    return undefined;
+  }
+  const info = km.getBlockInfo(key);
+  const exp = info?.expiresAt;
+  if (exp === undefined || exp === null) {
+    return undefined;
+  }
+  return Math.max(0, Math.ceil((exp.getTime() - Date.now()) / 1000));
+}
+
+/**
+ * @throws {Error} When both `penaltyBox` and `keyManager` are provided (mutually exclusive).
+ * @throws {Error} When both `limits` array and `store` are provided (mutually exclusive).
+ */
 export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
   validateRateLimitHeaderOptions(options);
+  if (options.penaltyBox !== undefined && options.keyManager !== undefined) {
+    throw new Error(
+      "Cannot use both 'penaltyBox' and 'keyManager' — use keyManager with penaltyBlockThreshold instead.",
+    );
+  }
   const limitsOpt = (options as WindowRateLimitOptions).limits;
   if (limitsOpt && limitsOpt.length > 0 && options.store !== undefined) {
     throw new Error('ratelimit-flex: `limits` and `store` are mutually exclusive');
@@ -105,7 +170,7 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
         interval: merged.interval,
         bucketSize: merged.bucketSize,
       });
-    return { ...merged, store };
+    return attachKeyManagerFromPenaltyBox({ ...merged, store } as RateLimitOptions);
   }
 
   const windowDefaults =
@@ -134,13 +199,13 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
     );
     const minCap = Math.min(...sanitized.map((s) => s.max));
     const minWin = Math.min(...sanitized.map((s) => s.windowMs));
-    return {
+    return attachKeyManagerFromPenaltyBox({
       ...merged,
       store,
       limits,
       maxRequests: minCap,
       windowMs: minWin,
-    };
+    } as RateLimitOptions);
   }
 
   const maxForStore = typeof merged.maxRequests === 'number' ? merged.maxRequests : 100;
@@ -153,7 +218,7 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
       maxRequests: maxForStore,
     });
 
-  return { ...merged, store };
+  return attachKeyManagerFromPenaltyBox({ ...merged, store } as RateLimitOptions);
 }
 
 export function toRateLimitInfo(

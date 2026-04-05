@@ -25,6 +25,7 @@ function makeSnapshot(overrides?: Partial<import('../../src/types/metrics.js').M
       rateLimit: 2,
       blocklist: 0,
       penalty: 0,
+      keyManager: 0,
       serviceUnavailable: 0,
     },
     latency: { min: 0, max: 1, mean: 0.5, p50: 0.5, p95: 0.9, p99: 1, stdDev: 0.1 },

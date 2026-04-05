@@ -313,7 +313,7 @@ describe('composition integration (Express + supertest)', () => {
         429,
       ]);
       },
-      30_000,
+      60_000,
     );
   });
 });

@@ -13,6 +13,7 @@ import {
   matchingDecrementOptions,
   resolveIncrementOpts,
 } from '../strategies/rate-limit-engine.js';
+import type { KeyManager } from '../key-manager/KeyManager.js';
 import type {
   RateLimitConsumeResult,
   RateLimitInfo,
@@ -21,10 +22,21 @@ import type {
 } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
+import {
+  jsonErrorBody,
+  keyManagerBlockedJson,
+  keyManagerRetryAfterSeconds,
+  mergeRateLimiterOptions,
+  toRateLimitInfo,
+} from './merge-options.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
+    /**
+     * When {@link RateLimitOptionsBase.keyManager} is set, or auto-created from `penaltyBox`.
+     * @since 2.2.0
+     */
+    keyManager?: KeyManager;
     /**
      * When {@link RateLimitOptions.metrics} is enabled: orchestrator for snapshots, history, Prometheus, and `on('metrics')`.
      * @since 1.3.0
@@ -118,6 +130,10 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
 
   let metricsCollectorStarted = false;
 
+  if (resolved.keyManager !== undefined) {
+    fastify.decorate('keyManager', resolved.keyManager);
+  }
+
   if (metricsManager.isEnabled()) {
     fastify.decorate('rateLimitMetrics', metricsManager);
     fastify.decorate('getMetricsSnapshot', () => metricsManager.getSnapshot());
@@ -176,6 +192,15 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
         // cannot collide with storeUnavailable on the same response.
         if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
           await reply.status(503).send(jsonErrorBody('Service temporarily unavailable'));
+          return;
+        }
+        if (result.blockReason === 'key_manager' && resolved.keyManager) {
+          const status = resolved.statusCode ?? 429;
+          const ra = keyManagerRetryAfterSeconds(resolved, key);
+          if (ra !== undefined) {
+            reply.header('Retry-After', String(ra));
+          }
+          await reply.status(status).send(keyManagerBlockedJson(resolved, key));
           return;
         }
         if (onLimitReached && result.blockReason === 'rate_limit') {

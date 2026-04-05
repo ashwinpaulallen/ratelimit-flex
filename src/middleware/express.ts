@@ -12,6 +12,7 @@ import {
   matchingDecrementOptions,
   resolveIncrementOpts,
 } from '../strategies/rate-limit-engine.js';
+import type { KeyManager } from '../key-manager/KeyManager.js';
 import type {
   RateLimitConsumeResult,
   RateLimitInfo,
@@ -20,7 +21,13 @@ import type {
 } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
+import {
+  jsonErrorBody,
+  keyManagerBlockedJson,
+  keyManagerRetryAfterSeconds,
+  mergeRateLimiterOptions,
+  toRateLimitInfo,
+} from './merge-options.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -86,6 +93,11 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
   shutdownMetrics(): Promise<void>;
   /** Present when `metrics.openTelemetry` is enabled with a `meter`. */
   openTelemetryAdapter?: OpenTelemetryAdapter;
+  /**
+   * When {@link RateLimitOptionsBase.keyManager} is set, or auto-created from `penaltyBox`.
+   * @since 2.2.0
+   */
+  keyManager?: KeyManager;
 }
 
 /**
@@ -168,6 +180,15 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
           res.status(503).json(jsonErrorBody('Service temporarily unavailable'));
           return;
         }
+        if (result.blockReason === 'key_manager' && resolved.keyManager) {
+          const status = resolved.statusCode ?? 429;
+          const ra = keyManagerRetryAfterSeconds(resolved, key);
+          if (ra !== undefined) {
+            res.setHeader('Retry-After', String(ra));
+          }
+          res.status(status).json(keyManagerBlockedJson(resolved, key));
+          return;
+        }
         if (onLimitReached && result.blockReason === 'rate_limit') {
           await Promise.resolve(onLimitReached(req, result));
         }
@@ -236,6 +257,7 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
     await metricsManager.shutdown();
   };
   handler.openTelemetryAdapter = metricsManager.getOpenTelemetryAdapter() ?? undefined;
+  handler.keyManager = resolved.keyManager;
 
   return handler;
 }

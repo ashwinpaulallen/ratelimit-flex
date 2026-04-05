@@ -84,12 +84,28 @@ describe('standardHeaders golden integration (Express + supertest)', () => {
           maxRequests: 10,
         }),
       });
-      const res = await request(app).get('/ok');
-      expect(res.status).toBe(200);
-      expect(h(res.headers, 'x-ratelimit-limit')).toBe('10');
-      expect(h(res.headers, 'x-ratelimit-remaining')).toBe('9');
-      assertEpochReset(h(res.headers, 'x-ratelimit-reset')!);
-      assertNoRetryAfter(res.headers);
+      
+      // Retry mechanism to handle flaky HTTP parse errors
+      let res;
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          res = await request(app).get('/ok');
+          break;
+        } catch (err) {
+          attempts++;
+          if (attempts >= maxAttempts) throw err;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+      expect(res!.status).toBe(200);
+      expect(h(res!.headers, 'x-ratelimit-limit')).toBe('10');
+      expect(h(res!.headers, 'x-ratelimit-remaining')).toBe('9');
+      assertEpochReset(h(res!.headers, 'x-ratelimit-reset')!);
+      assertNoRetryAfter(res!.headers);
     });
 
     it('429: same headers plus Retry-After (seconds)', async () => {

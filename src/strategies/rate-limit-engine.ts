@@ -218,6 +218,14 @@ export class RateLimitEngine {
   }
 
   /**
+   * @description When {@link RateLimitOptionsBase.keyManager} is set, same reference as options (for `engine.keyManager.block(...)` etc.).
+   * @since 2.2.0
+   */
+  get keyManager(): import('../key-manager/KeyManager.js').KeyManager | undefined {
+    return this.options.keyManager;
+  }
+
+  /**
    * Applies rate limiting for an incoming request-like value.
    *
    * @description Uses {@link RateLimitOptionsBase.keyGenerator} or {@link defaultKeyGenerator} to derive the storage key.
@@ -260,6 +268,13 @@ export class RateLimitEngine {
     if (this.blockSet?.has(key)) {
       const out = this.buildPolicyBlockResult(req, 'blocklist');
       if (m) this.recordMetricsPolicyBlock(m, key, t0, 'blocklist');
+      return out;
+    }
+
+    const keyManager = this.options.keyManager;
+    if (keyManager !== undefined && keyManager.isBlocked(key)) {
+      const out = this.buildKeyManagerBlockResult(key, req);
+      if (m) this.recordMetricsPolicyBlock(m, key, t0, 'key_manager');
       return out;
     }
 
@@ -485,12 +500,14 @@ export class RateLimitEngine {
     m: MetricsCounters,
     key: string,
     tStart: number,
-    reason: 'blocklist' | 'penalty',
+    reason: 'blocklist' | 'penalty' | 'key_manager',
   ): void {
     m.totalRequests++;
     m.blockedRequests++;
     if (reason === 'blocklist') {
       m.blockedByBlocklist++;
+    } else if (reason === 'key_manager') {
+      m.blockedByKeyManager++;
     } else {
       m.blockedByPenalty++;
     }
@@ -518,6 +535,8 @@ export class RateLimitEngine {
         m.blockedByBlocklist++;
       } else if (br === 'penalty') {
         m.blockedByPenalty++;
+      } else if (br === 'key_manager') {
+        m.blockedByKeyManager++;
       } else if (br === 'service_unavailable') {
         m.blockedByServiceUnavailable++;
       } else if (out.storeUnavailable) {
@@ -647,6 +666,26 @@ export class RateLimitEngine {
       remaining,
       resetTime,
       isBlocked: false,
+    };
+  }
+
+  private buildKeyManagerBlockResult(key: string, req: unknown): RateLimitConsumeResult {
+    const info = this.options.keyManager?.getBlockInfo(key);
+    const limit = this.getLimit(req);
+    const resetTime =
+      info?.expiresAt !== undefined && info.expiresAt !== null
+        ? info.expiresAt
+        : new Date(Date.now() + 60_000);
+    const base: RateLimitResult = {
+      totalHits: limit,
+      remaining: 0,
+      resetTime,
+      isBlocked: true,
+    };
+    return {
+      ...base,
+      headers: {},
+      blockReason: 'key_manager',
     };
   }
 

@@ -104,6 +104,12 @@ export class MemoryStore implements RateLimitStore {
   /** Request timestamps (sliding window only). */
   private readonly sliding = new Map<string, number[]>();
 
+  /**
+   * Optional wall-clock expiry for a sliding key (from {@link MemoryStore.set}); when `Date.now()` passes
+   * this time the key is cleared — mirrors Redis `PEXPIREAT` on sliding sets.
+   */
+  private readonly slidingExpiresAt = new Map<string, number>();
+
   /** Counter + window end (fixed window only). */
   private readonly fixed = new Map<string, FixedEntry>();
 
@@ -231,9 +237,31 @@ export class MemoryStore implements RateLimitStore {
    * @param key - Key to clear from all internal maps.
    */
   async reset(key: string): Promise<void> {
-    this.sliding.delete(key);
-    this.fixed.delete(key);
-    this.buckets.delete(key);
+    this.slidingExpiresAt.delete(key);
+    switch (this.strategy) {
+      case RateLimitStrategy.SLIDING_WINDOW:
+        this.sliding.delete(key);
+        this.fixed.delete(key);
+        this.buckets.delete(key);
+        break;
+      case RateLimitStrategy.FIXED_WINDOW: {
+        const now = Date.now();
+        this.sliding.delete(key);
+        this.buckets.delete(key);
+        this.fixed.set(key, { count: 0, resetTime: now + this.windowMs });
+        break;
+      }
+      case RateLimitStrategy.TOKEN_BUCKET: {
+        this.sliding.delete(key);
+        this.fixed.delete(key);
+        this.buckets.set(key, { tokens: this.bucketSize, lastRefill: Date.now() });
+        break;
+      }
+      default: {
+        const exhaustive: never = this.strategy;
+        throw new Error(`Unsupported strategy: ${String(exhaustive)}`);
+      }
+    }
     return Promise.resolve();
   }
 
@@ -247,13 +275,14 @@ export class MemoryStore implements RateLimitStore {
       this.cleanupTimer = undefined;
     }
     this.sliding.clear();
+    this.slidingExpiresAt.clear();
     this.fixed.clear();
     this.buckets.clear();
     return Promise.resolve();
   }
 
   /**
-   * @description Read-only snapshot: does **not** mutate internal maps. **Sliding window** re-applies the current cutoff (`now - windowMs`) before counting, so stale timestamps are excluded. **Token bucket** uses {@link MemoryStore.refillBucketStateForNow} and {@link MemoryStore.isBucketIdleFullPurgeable} — same logic as increment and purge. **Fixed window** omits expired slices. Returns all keys with **non-expired** quota state.
+   * @description Read-only snapshot: does **not** mutate internal maps (except sliding expiry cleanup). **Sliding window** re-applies the current cutoff (`now - windowMs`) before counting, so stale timestamps are excluded. **Token bucket** uses {@link MemoryStore.refillBucketStateForNow} and {@link MemoryStore.isBucketIdleFullPurgeable} — same logic as increment and purge. **Fixed window** omits expired slices. Returns all keys with **non-expired** quota state.
    * @returns Map of key → `{ totalHits, resetTime }` consistent with {@link RateLimitResult} semantics for each strategy.
    * @since 1.3.2
    */
@@ -264,8 +293,13 @@ export class MemoryStore implements RateLimitStore {
     switch (this.strategy) {
       case RateLimitStrategy.SLIDING_WINDOW: {
         const cutoff = now - this.windowMs;
-        for (const [k, ts] of this.sliding.entries()) {
-          const trimmed = ts.filter((t) => t > cutoff);
+        for (const k of Array.from(this.sliding.keys())) {
+          this.clearSlidingWallExpiryIfExpired(k, now);
+          const cur = this.sliding.get(k);
+          if (!cur) {
+            continue;
+          }
+          const trimmed = cur.filter((t) => t > cutoff);
           if (trimmed.length === 0) {
             continue;
           }
@@ -318,15 +352,214 @@ export class MemoryStore implements RateLimitStore {
    */
   resetAll(): void {
     this.sliding.clear();
+    this.slidingExpiresAt.clear();
     this.fixed.clear();
     this.buckets.clear();
   }
 
+  /**
+   * @inheritdoc
+   * @description Does not trim sliding timestamps or consume tokens — read-only aside from sliding wall-clock expiry cleanup.
+   */
+  async get(key: string): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null> {
+    switch (this.strategy) {
+      case RateLimitStrategy.SLIDING_WINDOW:
+        return Promise.resolve(this.getSlidingReadOnly(key));
+      case RateLimitStrategy.FIXED_WINDOW:
+        return Promise.resolve(this.getFixedReadOnly(key));
+      case RateLimitStrategy.TOKEN_BUCKET:
+        return Promise.resolve(this.getTokenBucketReadOnly(key));
+      default: {
+        const exhaustive: never = this.strategy;
+        return Promise.reject(new Error(`Unsupported strategy: ${String(exhaustive)}`));
+      }
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  async set(
+    key: string,
+    totalHits: number,
+    expiresAt?: Date,
+  ): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  }> {
+    switch (this.strategy) {
+      case RateLimitStrategy.SLIDING_WINDOW:
+        return Promise.resolve(this.setSliding(key, totalHits, expiresAt));
+      case RateLimitStrategy.FIXED_WINDOW:
+        return Promise.resolve(this.setFixed(key, totalHits, expiresAt));
+      case RateLimitStrategy.TOKEN_BUCKET:
+        return Promise.resolve(this.setTokenBucket(key, totalHits, expiresAt));
+      default: {
+        const exhaustive: never = this.strategy;
+        return Promise.reject(new Error(`Unsupported strategy: ${String(exhaustive)}`));
+      }
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  async delete(key: string): Promise<boolean> {
+    let existed = false;
+    if (this.slidingExpiresAt.has(key)) {
+      existed = true;
+    }
+    this.slidingExpiresAt.delete(key);
+    if (this.sliding.delete(key)) {
+      existed = true;
+    }
+    if (this.fixed.delete(key)) {
+      existed = true;
+    }
+    if (this.buckets.delete(key)) {
+      existed = true;
+    }
+    return Promise.resolve(existed);
+  }
+
   // --- Sliding window -----------------------------------------------------
+
+  private clearSlidingWallExpiryIfExpired(key: string, now: number): void {
+    const exp = this.slidingExpiresAt.get(key);
+    if (exp !== undefined && now >= exp) {
+      this.sliding.delete(key);
+      this.slidingExpiresAt.delete(key);
+    }
+  }
+
+  private getSlidingReadOnly(key: string): {
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null {
+    const now = Date.now();
+    this.clearSlidingWallExpiryIfExpired(key, now);
+    const cap = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const cutoff = now - this.windowMs;
+    const prev = this.sliding.get(key);
+    if (prev === undefined) {
+      return null;
+    }
+    const trimmed = prev.filter((ts) => ts > cutoff);
+    if (trimmed.length === 0) {
+      return null;
+    }
+    const totalHits = trimmed.length;
+    const isBlocked = totalHits > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
+    const oldest = trimmed[0]!;
+    const resetTime = new Date(oldest + this.windowMs);
+    return { totalHits, remaining, resetTime, isBlocked };
+  }
+
+  private setSliding(key: string, totalHits: number, expiresAt?: Date): RateLimitResult {
+    const now = Date.now();
+    const cap = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const n = Math.max(0, Math.floor(totalHits));
+    const stamps = Array.from({ length: n }, () => now);
+    this.sliding.set(key, stamps);
+    if (expiresAt !== undefined) {
+      this.slidingExpiresAt.set(key, expiresAt.getTime());
+    } else {
+      this.slidingExpiresAt.delete(key);
+    }
+    const isBlocked = n > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - n);
+    const resetTime = new Date(now + this.windowMs);
+    return { totalHits: n, remaining, resetTime, isBlocked };
+  }
+
+  private getFixedReadOnly(key: string): {
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null {
+    const now = Date.now();
+    const cap = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const entry = this.fixed.get(key);
+    if (!entry || now >= entry.resetTime) {
+      return null;
+    }
+    const totalHits = entry.count;
+    const isBlocked = totalHits > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
+    const resetTime = new Date(entry.resetTime);
+    return { totalHits, remaining, resetTime, isBlocked };
+  }
+
+  private setFixed(key: string, totalHits: number, expiresAt?: Date): RateLimitResult {
+    const now = Date.now();
+    const cap = sanitizeRateLimitCap(this.maxRequests, this.maxRequests);
+    const n = Math.max(0, Math.floor(totalHits));
+    const resetTimeMs = expiresAt?.getTime() ?? now + this.windowMs;
+    this.fixed.set(key, { count: n, resetTime: resetTimeMs });
+    const isBlocked = n > cap;
+    const remaining = isBlocked ? 0 : Math.max(0, cap - n);
+    return { totalHits: n, remaining, resetTime: new Date(resetTimeMs), isBlocked };
+  }
+
+  private getTokenBucketReadOnly(key: string): {
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null {
+    const state = this.buckets.get(key);
+    if (!state) {
+      return null;
+    }
+    const now = Date.now();
+    if (this.isBucketIdleFullPurgeable(state, now)) {
+      return null;
+    }
+    const { tokens, lastRefill } = this.refillBucketStateForNow(state, now);
+    const remaining = tokens;
+    const totalHits = this.bucketSize - remaining;
+    const isBlocked = remaining === 0 && totalHits >= this.bucketSize;
+    return {
+      totalHits,
+      remaining,
+      resetTime: new Date(lastRefill + this.refillIntervalMs),
+      isBlocked,
+    };
+  }
+
+  private setTokenBucket(key: string, totalHits: number, _expiresAt?: Date): RateLimitResult {
+    void _expiresAt;
+    const now = Date.now();
+    const cap = this.bucketSize;
+    const th = Math.max(0, totalHits);
+    const isBlocked = th >= cap;
+    const tokens = isBlocked ? 0 : Math.max(0, cap - th);
+    const totalHitsOut = isBlocked ? cap : th;
+    this.buckets.set(key, { tokens, lastRefill: now });
+    return {
+      totalHits: totalHitsOut,
+      remaining: tokens,
+      resetTime: new Date(now + this.refillIntervalMs),
+      isBlocked,
+    };
+  }
 
   private incrementSliding(key: string, maxOverride?: number, cost = 1): RateLimitResult {
     const cap = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
+    this.clearSlidingWallExpiryIfExpired(key, now);
+    this.slidingExpiresAt.delete(key);
     const cutoff = now - this.windowMs;
 
     const prev = this.sliding.get(key) ?? [];
@@ -351,6 +584,7 @@ export class MemoryStore implements RateLimitStore {
    * skip-failed/skip-successful response handlers so concurrent requests undo the correct slots.
    */
   private decrementSliding(key: string, cost = 1): void {
+    this.slidingExpiresAt.delete(key);
     const ts = this.sliding.get(key);
     if (!ts || ts.length === 0) {
       return;
@@ -368,6 +602,7 @@ export class MemoryStore implements RateLimitStore {
 
   /** Removes the **`cost`** newest hits (LIFO) — used to undo a failed increment probe without evicting older usage. */
   private decrementSlidingFromEnd(key: string, cost = 1): void {
+    this.slidingExpiresAt.delete(key);
     const ts = this.sliding.get(key);
     if (!ts || ts.length === 0) {
       return;
@@ -519,6 +754,12 @@ export class MemoryStore implements RateLimitStore {
   }
 
   private purgeSliding(now: number): void {
+    for (const [k, exp] of this.slidingExpiresAt.entries()) {
+      if (now >= exp) {
+        this.sliding.delete(k);
+        this.slidingExpiresAt.delete(k);
+      }
+    }
     const cutoff = now - this.windowMs;
     for (const [k, ts] of this.sliding.entries()) {
       const filtered = ts.filter((t) => t > cutoff);
