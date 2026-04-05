@@ -171,6 +171,7 @@ export class MetricsCollector extends EventEmitter {
         rateLimit: raw.blockedByRateLimit,
         blocklist: raw.blockedByBlocklist,
         penalty: raw.blockedByPenalty,
+        keyManager: raw.blockedByKeyManager,
         serviceUnavailable: raw.blockedByServiceUnavailable,
       },
       latency: {

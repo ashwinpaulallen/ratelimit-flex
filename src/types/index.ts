@@ -109,7 +109,7 @@ export interface RateLimitConsumeResult extends RateLimitResult {
    * @description Why the request was blocked when {@link RateLimitResult.isBlocked} is true.
    * @default undefined when allowed
    */
-  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable';
+  blockReason?: 'rate_limit' | 'blocklist' | 'penalty' | 'service_unavailable' | 'key_manager';
   /**
    * @description Index into {@link WindowRateLimitOptions.groupedWindowStores} for the **binding constraint**: the slot that caused a block, or the slot with the lowest remaining quota when no block occurred.
    * @default undefined when not using grouped windows or when not yet computed by the engine
@@ -211,6 +211,40 @@ export interface RateLimitStore {
    * @returns Promise that settles when shutdown is complete.
    */
   shutdown(): Promise<void>;
+
+  /**
+   * @description Read the current rate limit state for a key WITHOUT incrementing.
+   * @returns `null` if the key has no recorded hits (never seen or expired).
+   */
+  get?(key: string): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  } | null>;
+
+  /**
+   * @description Set the hit count for a key to a specific value (programmatic block, penalty, reward).
+   * @param key - The rate limit key
+   * @param totalHits - The hit count to set
+   * @param expiresAt - When this value should expire (optional — uses default window if omitted)
+   */
+  set?(
+    key: string,
+    totalHits: number,
+    expiresAt?: Date,
+  ): Promise<{
+    totalHits: number;
+    remaining: number;
+    resetTime: Date;
+    isBlocked: boolean;
+  }>;
+
+  /**
+   * @description Delete all data for a key. Returns true if the key existed, false otherwise.
+   * @remarks Different from {@link RateLimitStore.reset} — delete removes entirely; reset sets usage to zero.
+   */
+  delete?(key: string): Promise<boolean>;
 
   /**
    * @description Optional: snapshot all keys with non-expired quota state (for syncing in-memory counters elsewhere).
@@ -422,6 +456,13 @@ export interface RateLimitOptionsBase {
    * @since 1.3.1
    */
   incrementCost?: number | ((req: unknown) => number);
+
+  /**
+   * @description Programmatic key manager for block / penalty / reward / get / set / delete. Checked in {@link RateLimitEngine} before {@link RateLimitStore.increment}.
+   * @default undefined
+   * @since 2.2.0
+   */
+  keyManager?: import('../key-manager/KeyManager.js').KeyManager;
 }
 
 /**

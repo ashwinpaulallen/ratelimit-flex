@@ -266,6 +266,36 @@ export function createRateLimiter(options: Partial<RateLimitOptions>): {
 }
 
 /**
+ * Key manager, penalty escalation, block stores, and admin HTTP API (Express + Fastify).
+ *
+ * @see {@link KeyManager}
+ * @see {@link createAdminRouter}
+ * @see {@link fastifyAdminPlugin}
+ * @since 2.2.0
+ */
+export {
+  KeyManager,
+  MemoryBlockStore,
+  RedisBlockStore,
+  createAdminRouter,
+  fastifyAdminPlugin,
+  capped,
+  exponentialEscalation,
+  fibonacciEscalation,
+  fixedEscalation,
+  linearEscalation,
+} from './key-manager/index.js';
+export type {
+  AuditEntry,
+  BlockReason,
+  BlockStore,
+  EscalationStrategy,
+  KeyManagerEvents,
+  KeyManagerOptions,
+  KeyState,
+} from './key-manager/index.js';
+
+/**
  * Default export: Express rate limit middleware ({@link expressRateLimiter}).
  *
  * @example

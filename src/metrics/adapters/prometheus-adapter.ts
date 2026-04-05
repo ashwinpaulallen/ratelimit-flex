@@ -184,6 +184,9 @@ export class PrometheusAdapter {
         `${nameReq}{status="blocked",reason="penalty"} ${snap.blockReasons.penalty}`,
       );
       lines.push(
+        `${nameReq}{status="blocked",reason="key_manager"} ${snap.blockReasons.keyManager}`,
+      );
+      lines.push(
         `${nameReq}{status="blocked",reason="service_unavailable"} ${snap.blockReasons.serviceUnavailable}`,
       );
     } else {
@@ -191,6 +194,7 @@ export class PrometheusAdapter {
       lines.push(`${nameReq}{status="blocked",reason="rate_limit"} 0`);
       lines.push(`${nameReq}{status="blocked",reason="blocklist"} 0`);
       lines.push(`${nameReq}{status="blocked",reason="penalty"} 0`);
+      lines.push(`${nameReq}{status="blocked",reason="key_manager"} 0`);
       lines.push(`${nameReq}{status="blocked",reason="service_unavailable"} 0`);
     }
 
@@ -330,6 +334,8 @@ export class PrometheusAdapter {
       if (dBl > 0) this.requestsCounter.inc({ status: 'blocked', reason: 'blocklist' }, dBl);
       const dPn = inc(s.blockReasons.penalty, prev.blockReasons.penalty);
       if (dPn > 0) this.requestsCounter.inc({ status: 'blocked', reason: 'penalty' }, dPn);
+      const dKm = inc(s.blockReasons.keyManager, prev.blockReasons.keyManager);
+      if (dKm > 0) this.requestsCounter.inc({ status: 'blocked', reason: 'key_manager' }, dKm);
       const dSu = inc(s.blockReasons.serviceUnavailable, prev.blockReasons.serviceUnavailable);
       if (dSu > 0) this.requestsCounter.inc({ status: 'blocked', reason: 'service_unavailable' }, dSu);
       const dSk = inc(s.totals.skipped, prev.totals.skipped);
@@ -346,6 +352,9 @@ export class PrometheusAdapter {
       }
       if (s.blockReasons.penalty > 0) {
         this.requestsCounter.inc({ status: 'blocked', reason: 'penalty' }, s.blockReasons.penalty);
+      }
+      if (s.blockReasons.keyManager > 0) {
+        this.requestsCounter.inc({ status: 'blocked', reason: 'key_manager' }, s.blockReasons.keyManager);
       }
       if (s.blockReasons.serviceUnavailable > 0) {
         this.requestsCounter.inc({ status: 'blocked', reason: 'service_unavailable' }, s.blockReasons.serviceUnavailable);

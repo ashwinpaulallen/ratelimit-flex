@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.2.0] - 2026-04-06
+
+### Added
+
+- **`KeyManager` class** — programmatic `block` / `penalty` / `reward` / `get` / `set` / `delete` for rate limit keys
+- **`get()` and `set()` methods on `RateLimitStore`** (optional, implemented on `MemoryStore` and `RedisStore`)
+- **`delete()` method on `RateLimitStore`** (returns `boolean`, distinct from `reset`)
+- **Typed `BlockReason`** — `manual`, `penalty-escalation`, `abuse-pattern`, `custom`
+- **Event system** — `blocked`, `unblocked`, `penalized`, `rewarded`, `deleted`, `set`
+- **Audit log** with filtering (by key, action, time range)
+- **Escalation strategies** — `fixedEscalation`, `linearEscalation`, `exponentialEscalation`, `fibonacciEscalation`, `capped`
+- **`BlockStore` interface** with **`RedisBlockStore`** for cross-process block persistence
+- **Admin REST endpoints** — `createAdminRouter()` (Express) and **`fastifyAdminPlugin`** (Fastify)
+- **Existing `penaltyBox` option** is now powered by `KeyManager` internally (backward compatible)
+
+### Changed
+
+- **`RateLimitStore` interface** extended with optional `get()`, `set()`, `delete()` methods (non-breaking)
+
 ## [2.1.0] - 2026-04-05
 
 ### Added
@@ -14,7 +33,7 @@ All notable changes to this project are documented in this file.
 - **Redis composition presets**: `multiWindowPreset` (multi-window with Redis), `burstablePreset` (burst with Redis), `failoverPreset` (failover chain)
 - **Nested composition support** — `ComposedStore` can be a layer in another `ComposedStore` (e.g., overflow inside all with hourly cap)
 - **Comprehensive tests**: 481 tests covering composition modes, nested compositions, equivalence with `limits` array, integration tests with Express/Fastify
-- **README Limiter composition section** — detailed documentation with composition modes table, examples (multi-window, burst, failover, nested), per-layer observability, Redis presets, comparison with rate-limiter-flexible, and migration guide from `limits` array
+- **README Limiter composition section** — detailed documentation with composition modes table, examples (multi-window, burst, failover, nested), per-layer observability, Redis presets, and migration guide from `limits` array
 
 ### Changed
 

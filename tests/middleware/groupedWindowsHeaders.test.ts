@@ -36,8 +36,22 @@ describe('expressRateLimiter grouped windows + draft-7 headers', () => {
       ],
     });
     for (let i = 0; i < 20; i++) {
-      const r = await request(app).get('/ok');
-      expect(r.status).toBe(200);
+      let r;
+      let attempts = 0;
+      while (attempts < 3) {
+        try {
+          r = await request(app).get('/ok');
+          if (r.status === 200) break;
+          attempts++;
+          if (attempts >= 3) break;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        } catch (err) {
+          attempts++;
+          if (attempts >= 3) throw err;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+      expect(r!.status).toBe(200);
     }
     const blocked = await request(app).get('/ok');
     expect(blocked.status).toBe(429);

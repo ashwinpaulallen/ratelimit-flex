@@ -160,6 +160,8 @@ export class OpenTelemetryAdapter {
       if (dBl > 0) c.add(dBl, { status: 'blocked', reason: 'blocklist' });
       const dPn = inc(s.blockReasons.penalty, prev.blockReasons.penalty);
       if (dPn > 0) c.add(dPn, { status: 'blocked', reason: 'penalty' });
+      const dKm = inc(s.blockReasons.keyManager, prev.blockReasons.keyManager);
+      if (dKm > 0) c.add(dKm, { status: 'blocked', reason: 'key_manager' });
       const dSu = inc(s.blockReasons.serviceUnavailable, prev.blockReasons.serviceUnavailable);
       if (dSu > 0) c.add(dSu, { status: 'blocked', reason: 'service_unavailable' });
       const dSk = inc(s.totals.skipped, prev.totals.skipped);
@@ -176,6 +178,9 @@ export class OpenTelemetryAdapter {
       }
       if (s.blockReasons.penalty > 0) {
         c.add(s.blockReasons.penalty, { status: 'blocked', reason: 'penalty' });
+      }
+      if (s.blockReasons.keyManager > 0) {
+        c.add(s.blockReasons.keyManager, { status: 'blocked', reason: 'key_manager' });
       }
       if (s.blockReasons.serviceUnavailable > 0) {
         c.add(s.blockReasons.serviceUnavailable, { status: 'blocked', reason: 'service_unavailable' });

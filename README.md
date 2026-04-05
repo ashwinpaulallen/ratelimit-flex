@@ -18,6 +18,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore` — see [Limiter composition](#limiter-composition)
+- **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API — see [Programmatic key management](#programmatic-key-management)
 
 ## Installation
 
@@ -70,6 +71,144 @@ const app = Fastify();
 await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
 app.get('/health', async () => ({ ok: true }));
 ```
+
+## Programmatic key management
+
+ratelimit-flex exposes a `KeyManager` for programmatic control of rate limit keys. Block abusive clients, apply penalty/reward points, inspect state, and react to events — all with full TypeScript types, an audit trail, and optional Redis persistence.
+
+### Basic usage
+
+```typescript
+import express from 'express';
+import { KeyManager, MemoryStore, RateLimitStrategy, expressRateLimiter } from 'ratelimit-flex';
+
+const app = express();
+const store = new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 60_000, maxRequests: 100 });
+const keyManager = new KeyManager({ store, maxRequests: 100, windowMs: 60_000 });
+
+const limiter = expressRateLimiter({ store, keyManager });
+app.use(limiter);
+
+// Programmatic control — from an admin route, webhook handler, etc.
+await keyManager.block('abusive-ip', 3600_000, { type: 'manual', message: 'Spam detected' });
+await keyManager.penalty('suspicious-user', 5);
+await keyManager.reward('verified-user', 10);
+const state = await keyManager.get('any-key');
+```
+
+### Escalating penalties
+
+```typescript
+import { KeyManager, exponentialEscalation } from 'ratelimit-flex';
+
+const keyManager = new KeyManager({
+  store,
+  maxRequests: 100,
+  windowMs: 60_000,
+  penaltyBlockThreshold: 3,
+  penaltyEscalation: exponentialEscalation(60_000), // 1min, 2min, 4min, 8min...
+});
+```
+
+### Event-driven alerting
+
+```typescript
+keyManager.on('blocked', ({ key, reason }) => {
+  alerting.send(`Key ${key} blocked: ${reason.type}`);
+});
+```
+
+### Admin endpoints
+
+```typescript
+import { createAdminRouter } from 'ratelimit-flex';
+
+app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
+// GET /admin/ratelimit/keys/:key
+// POST /admin/ratelimit/keys/:key/block
+// etc.
+```
+
+### What `KeyManager` provides
+
+`KeyManager` gives you typed **block reasons** (`manual`, `penalty-escalation`, `abuse-pattern`, `custom`), an **event emitter** (`blocked`, `unblocked`, `penalized`, `rewarded`, and more), an **audit log** with filtering, **escalation strategies** for automatic penalty blocks, optional **admin REST endpoints** (`createAdminRouter`, `fastifyAdminPlugin`), and optional **Redis-backed block persistence** (`RedisBlockStore`) so block state can be shared across processes.
+
+### Redis-backed block persistence
+
+Share block state across processes using `RedisBlockStore`:
+
+```typescript
+import { KeyManager, RedisBlockStore, RedisStore, RateLimitStrategy } from 'ratelimit-flex';
+import Redis from 'ioredis';
+
+// Create a single Redis client instance
+const redis = new Redis(process.env.REDIS_URL!);
+
+// Share the client between RedisStore (for rate limit counters) and RedisBlockStore (for blocks)
+const store = new RedisStore({
+  client: redis,
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+});
+
+const blockStore = new RedisBlockStore(redis, { keyPrefix: 'rlf:blocks:' });
+
+const keyManager = new KeyManager({
+  store,
+  blockStore,
+  maxRequests: 100,
+  windowMs: 60_000,
+  syncIntervalMs: 5000, // Pull remote blocks every 5 seconds
+});
+
+// Blocks are now persisted to Redis and visible across all processes
+await keyManager.block('abusive-ip', 3600_000, { type: 'manual', message: 'Spam' });
+```
+
+**Cross-process consistency:** `KeyManager` syncs blocks from Redis every `syncIntervalMs` (default 5000ms). Call `await keyManager.syncBlocks()` manually for immediate consistency.
+
+### Migrating from `penaltyBox`
+
+The `penaltyBox` option is now powered by `KeyManager` internally. For full control, migrate to `KeyManager`:
+
+**Before (penaltyBox):**
+
+```typescript
+app.use(expressRateLimiter({
+  store,
+  penaltyBox: {
+    violationsThreshold: 3,
+    penaltyDurationMs: 60_000,
+  },
+}));
+```
+
+**After (KeyManager):**
+
+```typescript
+const keyManager = new KeyManager({
+  store,
+  maxRequests: 100,
+  windowMs: 60_000,
+  penaltyBlockThreshold: 3,
+  penaltyBlockDurationMs: 60_000,
+});
+
+app.use(expressRateLimiter({ store, keyManager }));
+
+// Now you have programmatic access:
+await keyManager.block('abusive-ip', 3600_000, { type: 'manual' });
+keyManager.on('blocked', ({ key, reason }) => console.log(`Blocked: ${key}`));
+```
+
+**Benefits of migrating:**
+- Typed block reasons (`manual`, `penalty-escalation`, `abuse-pattern`, `custom`)
+- Event system for real-time alerting
+- Audit log with filtering
+- Escalation strategies (exponential, fibonacci, etc.)
+- Admin HTTP endpoints
+- Redis-backed block persistence
 
 ## Limiter composition
 
@@ -258,15 +397,14 @@ app.use(expressRateLimiter(
 ));
 ```
 
-### Comparison with rate-limiter-flexible
+### Composition highlights
 
-| Feature | rate-limiter-flexible | ratelimit-flex |
-|---------|----------------------|----------------|
-| Multi-window | `RateLimiterUnion` (consume API only) | `compose.all()` (middleware-ready) |
-| Burst | `BurstyRateLimiter` (separate class) | `compose.overflow()` or `compose.withBurst()` |
-| Nesting | Not supported | Full nesting support |
-| Observability | Limited | Per-layer results, `onLayerBlock`, `summarize()`, `extractLayerMetrics()` |
-| Middleware | Manual integration | Direct `RateLimitStore` interface |
+| Capability | In ratelimit-flex |
+|------------|-------------------|
+| Multi-window limits (every window must allow) | `compose.all()` — implements `RateLimitStore` for Express/Fastify middleware |
+| Steady rate + burst pool | `compose.overflow()` or `compose.withBurst()` |
+| Nested compositions | Any `ComposedStore` can be a layer inside another |
+| Per-layer visibility | `onLayerBlock`, `req.rateLimitComposed`, `summarize()`, `extractLayerMetrics()` |
 
 ### Migration from `limits` array
 

@@ -24,6 +24,7 @@ export interface MetricsCountersSnapshot {
   readonly blockedByRateLimit: number;
   readonly blockedByBlocklist: number;
   readonly blockedByPenalty: number;
+  readonly blockedByKeyManager: number;
   readonly blockedByServiceUnavailable: number;
   readonly skippedRequests: number;
   readonly allowlistedRequests: number;
@@ -62,6 +63,7 @@ export class MetricsCounters {
   blockedByRateLimit = 0;
   blockedByBlocklist = 0;
   blockedByPenalty = 0;
+  blockedByKeyManager = 0;
   blockedByServiceUnavailable = 0;
   skippedRequests = 0;
   allowlistedRequests = 0;
@@ -169,6 +171,7 @@ export class MetricsCounters {
       blockedByRateLimit: this.blockedByRateLimit,
       blockedByBlocklist: this.blockedByBlocklist,
       blockedByPenalty: this.blockedByPenalty,
+      blockedByKeyManager: this.blockedByKeyManager,
       blockedByServiceUnavailable: this.blockedByServiceUnavailable,
       skippedRequests: this.skippedRequests,
       allowlistedRequests: this.allowlistedRequests,
@@ -186,6 +189,7 @@ export class MetricsCounters {
     this.blockedByRateLimit = 0;
     this.blockedByBlocklist = 0;
     this.blockedByPenalty = 0;
+    this.blockedByKeyManager = 0;
     this.blockedByServiceUnavailable = 0;
     this.skippedRequests = 0;
     this.allowlistedRequests = 0;
