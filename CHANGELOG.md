@@ -2,22 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
-## [2.1.0] - 2026-04-04
+## [2.1.0] - 2026-04-05
 
 ### Added
 
-- Limiter composition system: `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`
-- `ComposedStore` — implements `RateLimitStore` for direct middleware integration
-- Fluent builder API: `compose.layer()`, `compose.windows()`, `compose.withBurst()`
-- Per-layer result inspection: `ComposedIncrementResult.layers`, `summarize()`, `extractLayerMetrics()`
-- `onLayerBlock` callback for per-layer observability
-- Presets: `multiWindowPreset`, `burstablePreset`, `failoverPreset`
-- Nested composition: `ComposedStore` can be a layer in another `ComposedStore`
-- README **Limiter composition** section (modes, examples, rate-limiter-flexible comparison, `limits` migration note)
+- **Limiter composition system**: `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()` — combine multiple rate limiters with different strategies
+- **`ComposedStore`** — implements `RateLimitStore` for direct middleware integration, supports full nesting
+- **Fluent builder API**: `compose.layer()`, `compose.windows()`, `compose.withBurst()` for ergonomic composition
+- **Per-layer observability**: `ComposedIncrementResult.layers` with per-layer status, `decidingPath` for nested compositions, `summarize()` for human-readable output, `extractLayerMetrics()` for metrics extraction
+- **`onLayerBlock` callback** — middleware option for per-layer block notifications with full layer result details
+- **Redis composition presets**: `multiWindowPreset` (multi-window with Redis), `burstablePreset` (burst with Redis), `failoverPreset` (failover chain)
+- **Nested composition support** — `ComposedStore` can be a layer in another `ComposedStore` (e.g., overflow inside all with hourly cap)
+- **Comprehensive tests**: 481 tests covering composition modes, nested compositions, equivalence with `limits` array, integration tests with Express/Fastify
+- **README Limiter composition section** — detailed documentation with composition modes table, examples (multi-window, burst, failover, nested), per-layer observability, Redis presets, comparison with rate-limiter-flexible, and migration guide from `limits` array
 
 ### Changed
 
-- `limits` array is now powered by the composition system internally (fully backward compatible)
+- **`limits` array** is now powered by the composition system internally (`compose.windows()`) — fully backward compatible, existing code works unchanged
+- **Internal refactoring** — eliminated code duplication in `ComposedStore` summary formatting and `getLimit()` resolution
+
+### Fixed
+
+- **Type inference** — all `compose` methods now provide full TypeScript type inference and autocomplete
 
 ## [2.0.0] - TBD
 

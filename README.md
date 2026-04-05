@@ -73,30 +73,54 @@ app.get('/health', async () => ({ ok: true }));
 
 ## Limiter composition
 
-Combine multiple `RateLimitStore` instances with `ComposedStore` and the `compose` builder. Every composition mode implements `RateLimitStore`, so the result plugs straight into `expressRateLimiter` / `fastifyRateLimiter` via the `store` option.
+Combine multiple rate limiters with the `compose` builder. Every composition mode implements `RateLimitStore`, so composed stores plug directly into `expressRateLimiter` / `fastifyRateLimiter` via the `store` option.
 
-**Modes (one-liner):**
+### Composition modes
 
-| Mode | In one sentence | Typical API |
-|------|-----------------|-------------|
-| **`all`** | Block if any window is exceeded | `compose.all(...)` |
-| **`overflow`** | Primary + burst allowance | `compose.overflow(primary, burst)` or `compose.withBurst({ ... })` |
-| **`first-available`** | Failover chain (first store that allows wins) | `compose.firstAvailable(...)` |
-| **`race`** | Fastest response wins | `compose.race(...)` |
+| Mode | Behavior | Use case | API |
+|------|----------|----------|-----|
+| **`all`** | Block if **any** layer blocks; rollback succeeded layers when one blocks | Multi-window limiting (10/sec AND 100/min AND 1000/hour) | `compose.all(...)` |
+| **`overflow`** | Try primary first; if blocked, try burst pool (primary counts stay) | Steady rate + burst allowance (5/sec + 20 burst tokens) | `compose.overflow(primary, burst)` or `compose.withBurst({ ... })` |
+| **`first-available`** | Try layers in order; first that allows wins (failed attempts rolled back) | Failover chain (Redis → fallback memory) | `compose.firstAvailable(...)` |
+| **`race`** | Fire all layers in parallel; fastest response wins | Multi-region latency optimization | `compose.race(...)` |
 
-**Multi-window** (two sliding windows, both must allow):
+### Examples
+
+**Multi-window** (10/sec AND 100/min — both must allow):
 
 ```typescript
 import { compose, expressRateLimiter, MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
 
 const store = compose.all(
-  compose.layer('per-sec', new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 1_000, maxRequests: 10 })),
-  compose.layer('per-min', new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 60_000, maxRequests: 100 })),
+  compose.layer('per-sec', new MemoryStore({ 
+    strategy: RateLimitStrategy.SLIDING_WINDOW, 
+    windowMs: 1_000, 
+    maxRequests: 10 
+  })),
+  compose.layer('per-min', new MemoryStore({ 
+    strategy: RateLimitStrategy.SLIDING_WINDOW, 
+    windowMs: 60_000, 
+    maxRequests: 100 
+  })),
 );
+
 app.use(expressRateLimiter({ store }));
 ```
 
-**Burst allowance** (steady rate + burst pool; primary counts stay when it blocks, then burst is tried):
+**Shorthand** — `compose.windows()` auto-creates `MemoryStore` instances:
+
+```typescript
+import { compose, expressRateLimiter } from 'ratelimit-flex';
+
+const store = compose.windows(
+  { windowMs: 1_000, maxRequests: 10 },
+  { windowMs: 60_000, maxRequests: 100 },
+);
+
+app.use(expressRateLimiter({ store }));
+```
+
+**Burst allowance** (steady rate + burst pool):
 
 ```typescript
 import { compose, expressRateLimiter } from 'ratelimit-flex';
@@ -105,25 +129,167 @@ const store = compose.withBurst({
   steady: { windowMs: 1_000, maxRequests: 5 },
   burst:  { windowMs: 60_000, maxRequests: 20 },
 });
+
 app.use(expressRateLimiter({ store }));
 ```
 
-**Shorthand** — `compose.windows()` creates one `MemoryStore` per slot and wraps them in `compose.all()`:
+**Failover chain** (try Redis, fall back to memory):
+
+```typescript
+import { compose, expressRateLimiter, MemoryStore, RedisStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const primary = new RedisStore({ 
+  url: process.env.REDIS_URL!, 
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  onRedisError: 'fail-open',
+});
+
+const fallback = new MemoryStore({ 
+  strategy: RateLimitStrategy.SLIDING_WINDOW, 
+  windowMs: 60_000, 
+  maxRequests: 100 
+});
+
+const store = compose.firstAvailable(
+  compose.layer('redis', primary),
+  compose.layer('memory', fallback),
+);
+
+app.use(expressRateLimiter({ store }));
+```
+
+**Nested composition** — `ComposedStore` can be a layer in another `ComposedStore`:
 
 ```typescript
 import { compose, expressRateLimiter } from 'ratelimit-flex';
 
-// Even simpler — auto-creates stores
-const store = compose.windows(
-  { windowMs: 1_000, maxRequests: 10 },
-  { windowMs: 60_000, maxRequests: 100 },
+// Overflow (steady + burst) inside all (with hour cap)
+const rate = compose.overflow(
+  compose.layer('steady', steadyStore),
+  compose.layer('burst', burstStore),
 );
+
+const store = compose.all(
+  compose.layer('rate', rate),
+  compose.layer('hourly-cap', hourlyCapStore),
+);
+
 app.use(expressRateLimiter({ store }));
 ```
 
-**Comparison with rate-limiter-flexible:** rate-limiter-flexible uses `RateLimiterUnion` (consume only, no middleware integration) and `BurstyRateLimiter` (separate class, can’t nest). **ratelimit-flex**’s `compose` API unifies all composition patterns into a single system that implements `RateLimitStore`, plugs directly into middleware, supports full nesting, and provides per-layer observability.
+### Per-layer observability
 
-**Migration:** the `limits` array is now powered by the composition system internally. Existing code works unchanged. For more control, use `compose.all()` (or `compose.windows()`) directly.
+```typescript
+import { compose, expressRateLimiter } from 'ratelimit-flex';
+
+const store = compose.all(
+  compose.layer('per-sec', perSecStore),
+  compose.layer('per-min', perMinStore),
+);
+
+app.use(expressRateLimiter({
+  store,
+  onLayerBlock: (req, label, layerResult) => {
+    console.log(`Layer '${label}' blocked:`, layerResult);
+  },
+}));
+
+// Access per-layer results
+app.use((req, res, next) => {
+  if (req.rateLimitComposed?.layers) {
+    console.log('Per-second:', req.rateLimitComposed.layers['per-sec']);
+    console.log('Per-minute:', req.rateLimitComposed.layers['per-min']);
+  }
+  next();
+});
+
+// Human-readable summary
+console.log(store.summarize('client-key'));
+// "ALLOWED by 'per-sec' | per-sec: 9/10 remaining | per-min: 99/100 remaining"
+```
+
+### Redis composition presets
+
+**Multi-window with Redis** (10/sec + 100/min + 1000/hour):
+
+```typescript
+import { expressRateLimiter, multiWindowPreset } from 'ratelimit-flex';
+
+app.use(expressRateLimiter(
+  multiWindowPreset(
+    { url: process.env.REDIS_URL! },
+    [
+      { windowMs: 1_000, maxRequests: 10 },
+      { windowMs: 60_000, maxRequests: 100 },
+      { windowMs: 3_600_000, maxRequests: 1000 },
+    ],
+  ),
+));
+```
+
+**Burst with Redis**:
+
+```typescript
+import { expressRateLimiter, burstablePreset } from 'ratelimit-flex';
+
+app.use(expressRateLimiter(
+  burstablePreset(
+    { url: process.env.REDIS_URL! },
+    {
+      steady: { windowMs: 1_000, maxRequests: 5 },
+      burst: { windowMs: 60_000, maxRequests: 20 },
+    },
+  ),
+));
+```
+
+**Failover preset**:
+
+```typescript
+import { expressRateLimiter, failoverPreset } from 'ratelimit-flex';
+
+app.use(expressRateLimiter(
+  failoverPreset([
+    { label: 'primary', store: primaryRedisStore },
+    { label: 'fallback', store: fallbackMemoryStore },
+  ]),
+));
+```
+
+### Comparison with rate-limiter-flexible
+
+| Feature | rate-limiter-flexible | ratelimit-flex |
+|---------|----------------------|----------------|
+| Multi-window | `RateLimiterUnion` (consume API only) | `compose.all()` (middleware-ready) |
+| Burst | `BurstyRateLimiter` (separate class) | `compose.overflow()` or `compose.withBurst()` |
+| Nesting | Not supported | Full nesting support |
+| Observability | Limited | Per-layer results, `onLayerBlock`, `summarize()`, `extractLayerMetrics()` |
+| Middleware | Manual integration | Direct `RateLimitStore` interface |
+
+### Migration from `limits` array
+
+The `limits` array is now powered by the composition system internally. **Existing code works unchanged:**
+
+```typescript
+// Still works (backward compatible)
+app.use(expressRateLimiter({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  limits: [
+    { windowMs: 1_000, max: 10 },
+    { windowMs: 60_000, max: 100 },
+  ],
+}));
+
+// Equivalent with compose (more control)
+app.use(expressRateLimiter({
+  store: compose.windows(
+    { windowMs: 1_000, maxRequests: 10 },
+    { windowMs: 60_000, maxRequests: 100 },
+  ),
+}));
+```
 
 ## Request queuing
 
