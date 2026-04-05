@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.1.0] - 2026-04-04
+
+### Added
+
+- Limiter composition system: `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`
+- `ComposedStore` — implements `RateLimitStore` for direct middleware integration
+- Fluent builder API: `compose.layer()`, `compose.windows()`, `compose.withBurst()`
+- Per-layer result inspection: `ComposedIncrementResult.layers`, `summarize()`, `extractLayerMetrics()`
+- `onLayerBlock` callback for per-layer observability
+- Presets: `multiWindowPreset`, `burstablePreset`, `failoverPreset`
+- Nested composition: `ComposedStore` can be a layer in another `ComposedStore`
+- README **Limiter composition** section (modes, examples, rate-limiter-flexible comparison, `limits` migration note)
+
+### Changed
+
+- `limits` array is now powered by the composition system internally (fully backward compatible)
+
 ## [2.0.0] - TBD
 
 ### Added

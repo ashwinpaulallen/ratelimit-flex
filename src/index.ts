@@ -71,6 +71,33 @@ export {
 export { MemoryStore } from './stores/memory-store.js';
 
 /**
+ * Composition: {@link ComposedStore}, {@link compose} (primary builder: `all`, `overflow`, `firstAvailable`, `race`, `windows`, `withBurst`),
+ * {@link extractLayerMetrics}, {@link isComposedIncrementResult}, and Redis presets {@link multiWindowPreset}, {@link burstablePreset}, {@link failoverPreset}.
+ *
+ * @since 2.0.0
+ */
+export {
+  ComposedStore,
+  burstablePreset,
+  compose,
+  extractLayerMetrics,
+  failoverPreset,
+  isComposedIncrementResult,
+  multiWindowPreset,
+} from './composition/index.js';
+export type {
+  BurstableRedisConfig,
+  ComposedIncrementResult,
+  ComposedLayerMetricEntry,
+  ComposedLayerRow,
+  ComposedStoreOptions,
+  CompositionLayer,
+  CompositionMode,
+  FailoverPresetStoreEntry,
+  MultiWindowRedisWindow,
+} from './composition/index.js';
+
+/**
  * Redis-backed {@link RedisStore} and error mode type.
  *
  * @since 1.0.0

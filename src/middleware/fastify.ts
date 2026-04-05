@@ -13,7 +13,12 @@ import {
   matchingDecrementOptions,
   resolveIncrementOpts,
 } from '../strategies/rate-limit-engine.js';
-import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import type {
+  RateLimitConsumeResult,
+  RateLimitInfo,
+  RateLimitOptions,
+  WindowRateLimitOptions,
+} from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
@@ -56,6 +61,12 @@ declare module 'fastify' {
      * @default undefined
      */
     rateLimit?: RateLimitInfo;
+    /**
+     * @description When the backing store is a {@link ComposedStore}, the last consume result including per-layer `layers`.
+     * @default undefined
+     * @since 2.0.0
+     */
+    rateLimitComposed?: RateLimitConsumeResult;
     /**
      * @description Internal: key for optional decrement on `onResponse`.
      * @default undefined
@@ -130,6 +141,10 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     try {
       const key = keyGen(request);
       const result = await engine.consumeWithKey(key, request);
+
+      if (result.layers) {
+        request.rateLimitComposed = result;
+      }
 
       if (result.storeUnavailable === true) {
         reply.header('X-RateLimit-Store', 'fallback');

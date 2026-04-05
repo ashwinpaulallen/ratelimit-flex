@@ -1,3 +1,4 @@
+import type { ComposedIncrementResult } from '../composition/types.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import {
   sanitizeIncrementCost,
@@ -6,6 +7,7 @@ import {
   sanitizeWindowMs,
 } from '../utils/clamp.js';
 import type {
+  LayerResult,
   RateLimitConsumeResult,
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
@@ -17,6 +19,7 @@ import type {
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 import { validateRateLimitHeaderOptions } from '../middleware/validate-header-options.js';
+import { getLimit } from '../middleware/merge-options.js';
 import type { MetricsCounters } from '../metrics/counters.js';
 import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
@@ -91,14 +94,6 @@ function resolveOptions(input: RateLimiterConfigInput): RateLimitOptions {
 
 function isWindowOpts(o: RateLimitOptions): o is WindowRateLimitOptions {
   return o.strategy !== RateLimitStrategy.TOKEN_BUCKET;
-}
-
-function resolveWindowMaxRequests(opts: WindowRateLimitOptions, req: unknown): number {
-  const mr = opts.maxRequests ?? 100;
-  if (typeof mr === 'function') {
-    return sanitizeRateLimitCap(mr(req), 100);
-  }
-  return sanitizeRateLimitCap(mr, 100);
 }
 
 /**
@@ -292,9 +287,11 @@ export class RateLimitEngine {
       const ts = m ? performance.now() : 0;
       result = await this.options.store.increment(key, incOpts);
       if (m) m.recordStoreLatency(ts);
+      bindingSlotIndex = this.bindingSlotIndexForComposedResult(result);
     }
 
     if (result.isBlocked && draft && !result.storeUnavailable) {
+      await this.maybeOnLayerBlocks(req, result);
       if (grouped && grouped.length > 0 && blockedAtIndex !== undefined) {
         for (let k = 0; k <= blockedAtIndex; k++) {
           const slot = grouped[k];
@@ -305,9 +302,20 @@ export class RateLimitEngine {
           }
         }
       } else if (!grouped || grouped.length === 0) {
-        await this.options.store.decrement(key, decOpts).catch(() => {
-          /* ignore */
-        });
+        const cs = this.options.store as RateLimitStore & {
+          rollbackDraftForBlockedIncrement?: (
+            key: string,
+            res: Pick<ComposedIncrementResult, 'layers'>,
+            dec?: RateLimitDecrementOptions,
+          ) => Promise<void>;
+        };
+        if (typeof cs.rollbackDraftForBlockedIncrement === 'function') {
+          await cs.rollbackDraftForBlockedIncrement(key, result as ComposedIncrementResult, decOpts);
+        } else {
+          await cs.decrement(key, decOpts).catch(() => {
+            /* ignore */
+          });
+        }
       }
       if (this.options.onDraftViolation) {
         await Promise.resolve(this.options.onDraftViolation(req, result));
@@ -319,6 +327,13 @@ export class RateLimitEngine {
         isBlocked: false,
         headers: {},
         draftWouldBlock: true,
+        ...(result.layers !== undefined
+          ? {
+              layers: result.layers,
+              ...(result.mode !== undefined ? { mode: result.mode } : {}),
+              ...(result.decidingLayer !== undefined ? { decidingLayer: result.decidingLayer } : {}),
+            }
+          : {}),
         ...(bindingSlotIndex !== undefined ? { bindingSlotIndex } : {}),
       };
       if (m) this.recordMetricsAfterConsume(m, key, t0, draftOut);
@@ -329,8 +344,11 @@ export class RateLimitEngine {
       this.recordViolation(key, req);
     }
 
-    if (result.isBlocked && !result.storeUnavailable && this.options.onLimitReached) {
-      await Promise.resolve(this.options.onLimitReached(req, result));
+    if (result.isBlocked && !result.storeUnavailable) {
+      await this.maybeOnLayerBlocks(req, result);
+      if (this.options.onLimitReached) {
+        await Promise.resolve(this.options.onLimitReached(req, result));
+      }
     }
 
     const consumeResult: RateLimitConsumeResult = {
@@ -345,6 +363,45 @@ export class RateLimitEngine {
     };
     if (m) this.recordMetricsAfterConsume(m, key, t0, consumeResult);
     return consumeResult;
+  }
+
+  private async maybeOnLayerBlocks(req: unknown, result: RateLimitResult): Promise<void> {
+    const cb = this.options.onLayerBlock;
+    if (!cb || !result.layers) {
+      return;
+    }
+    for (const [label, row] of Object.entries(result.layers)) {
+      if (row.isBlocked && row.consulted && !row.error) {
+        await Promise.resolve(cb(req, label, row as LayerResult));
+      }
+    }
+  }
+
+  /**
+   * When {@link WindowRateLimitOptions.limits} drives a {@link ComposedStore} built via {@link compose.windows},
+   * layer labels are `limit-0`, `limit-1`, … — map {@link RateLimitResult.decidingLayer} to a slot index for headers.
+   */
+  private bindingSlotIndexForComposedResult(result: RateLimitResult): number | undefined {
+    if (!isWindowOpts(this.options)) {
+      return undefined;
+    }
+    const limits = this.options.limits;
+    if (!limits || limits.length === 0) {
+      return undefined;
+    }
+    const deciding = result.decidingLayer;
+    if (typeof deciding !== 'string') {
+      return undefined;
+    }
+    const matched = /^limit-(\d+)$/.exec(deciding);
+    if (!matched) {
+      return undefined;
+    }
+    const idx = Number(matched[1]);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= limits.length) {
+      return undefined;
+    }
+    return idx;
   }
 
   /**
@@ -620,14 +677,7 @@ export class RateLimitEngine {
   }
 
   private getLimit(req: unknown): number {
-    if (this.options.strategy === RateLimitStrategy.TOKEN_BUCKET) {
-      return this.options.bucketSize;
-    }
-    const w = this.options as WindowRateLimitOptions;
-    if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
-      return Math.min(...w.groupedWindowStores.map((g) => g.maxRequests));
-    }
-    return resolveWindowMaxRequests(w, req);
+    return getLimit(this.options, req);
   }
 
   private buildPassthroughResult(req: unknown): RateLimitConsumeResult {
