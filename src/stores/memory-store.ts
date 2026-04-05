@@ -161,6 +161,19 @@ export class MemoryStore implements RateLimitStore {
   }
 
   /**
+   * Configured window length for sliding/fixed strategies (used by composition diagnostics).
+   * Token bucket returns `undefined`.
+   *
+   * @since 2.0.0
+   */
+  getWindowLengthMs(): number | undefined {
+    if (this.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+      return undefined;
+    }
+    return this.windowMs;
+  }
+
+  /**
    * @inheritdoc
    * @param key - Client identifier.
    * @param options - Optional **`maxRequests`** (sliding/fixed) and **`cost`** (all strategies; default `1`).

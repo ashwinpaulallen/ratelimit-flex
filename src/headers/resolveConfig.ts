@@ -1,6 +1,7 @@
 import { getLimit } from '../middleware/merge-options.js';
 import type { RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { sanitizeWindowMs } from '../utils/clamp.js';
 import { defaultRateLimitIdentifier, type HeaderFormat } from './formatHeaders.js';
 
 /**
@@ -31,6 +32,15 @@ export function resolveWindowMsForHeaders(opts: RateLimitOptions, bindingSlotInd
     return opts.interval ?? 60_000;
   }
   const w = opts as WindowRateLimitOptions;
+  if (w.limits && w.limits.length > 0) {
+    if (bindingSlotIndex !== undefined) {
+      const slot = w.limits[bindingSlotIndex];
+      if (slot !== undefined) {
+        return sanitizeWindowMs(slot.windowMs, 60_000);
+      }
+    }
+    return Math.min(...w.limits.map((e) => sanitizeWindowMs(e.windowMs, 60_000)));
+  }
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
     const grouped = w.groupedWindowStores;
     if (bindingSlotIndex !== undefined) {

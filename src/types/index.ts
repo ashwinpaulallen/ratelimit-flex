@@ -27,6 +27,21 @@ export enum RateLimitStrategy {
 }
 
 /**
+ * One layer’s row when {@link ComposedStore} reports per-layer state (same shape as composition internals).
+ *
+ * @see {@link RateLimitOptionsBase.onLayerBlock}
+ * @since 2.0.0
+ */
+export interface LayerResult {
+  totalHits: number;
+  remaining: number;
+  resetTime: Date;
+  isBlocked: boolean;
+  consulted: boolean;
+  error?: string;
+}
+
+/**
  * Result of calling {@link RateLimitStore.increment}.
  *
  * @description Snapshot of usage after recording (or attempting) a weighted increment for a key. When {@link RateLimitIncrementOptions.cost} is above `1`, window strategies count **units** (not only HTTP requests); token bucket `totalHits` reflects consumed capacity (`bucketSize - remaining`).
@@ -56,6 +71,21 @@ export interface RateLimitResult {
    * @see {@link RedisStore}
    */
   storeUnavailable?: boolean;
+  /**
+   * @description When {@link ComposedStore} produced this result: composition mode (`all`, `overflow`, etc.).
+   * @since 2.0.0
+   */
+  mode?: string;
+  /**
+   * @description When {@link ComposedStore} produced this result: label of the layer that decided the outcome.
+   * @since 2.0.0
+   */
+  decidingLayer?: string;
+  /**
+   * @description When {@link ComposedStore} produced this result: per-layer rows keyed by layer label.
+   * @since 2.0.0
+   */
+  layers?: Record<string, LayerResult>;
 }
 
 /**
@@ -249,6 +279,13 @@ export interface RateLimitOptionsBase {
    * @default undefined
    */
   onLimitReached?: (req: unknown, result: RateLimitResult) => void | Promise<void>;
+
+  /**
+   * @description Called when a specific layer in a {@link ComposedStore} reports a block (after {@link RateLimitStore.increment}, before {@link RateLimitOptionsBase.onLimitReached}). Fires once per blocked layer with `consulted` and no `error`. Only applies when the store returns {@link RateLimitResult.layers}.
+   * @default undefined
+   * @since 2.0.0
+   */
+  onLayerBlock?: (req: unknown, layerLabel: string, layerResult: LayerResult) => void | Promise<void>;
 
   /**
    * @description When true, responses with status `>= 400` trigger a {@link RateLimitStore.decrement} after send.
@@ -450,14 +487,14 @@ export interface WindowRateLimitOptions extends RateLimitOptionsBase {
   strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
 
   /**
-   * @description Multiple independent windows for the same route; blocks if any limit is exceeded. When set, single `windowMs`/`maxRequests` are ignored for the default store setup.
+   * @description Multiple independent windows for the same route; blocks if any limit is exceeded. Merged options build a {@link ComposedStore} via {@link compose.windows} (mutually exclusive with a custom `store`). Top-level `windowMs` / `maxRequests` are set to the shortest window and minimum cap for header defaults.
    * @default undefined
    * @since 1.1.0
    */
   limits?: readonly WindowLimitSpec[];
 
   /**
-   * @description Populated from {@link WindowRateLimitOptions.limits} by middleware merge — do not set manually.
+   * @description Advanced: supply one store per window (e.g. shared {@link RedisStore} per slot). Mutually exclusive with {@link WindowRateLimitOptions.limits}; do not set together with `limits`.
    * @default undefined
    * @since 1.1.0
    */

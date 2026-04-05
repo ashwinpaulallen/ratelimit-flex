@@ -1,6 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ComposedStore } from '../src/composition/ComposedStore.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 import { RateLimitEngine, createRateLimiter } from '../src/strategies/rate-limit-engine.js';
 import { expressRateLimiter } from '../src/middleware/express.js';
@@ -251,9 +252,10 @@ describe('draft mode', () => {
         { windowMs: 60_000, max: 1 },
       ],
     });
-    const grouped = merged.groupedWindowStores!;
-    const dec0 = vi.spyOn(grouped[0]!.store, 'decrement');
-    const dec1 = vi.spyOn(grouped[1]!.store, 'decrement');
+    const composed = merged.store as ComposedStore;
+    const innerStores = composed.layers.map((l) => l.store);
+    const dec0 = vi.spyOn(innerStores[0]!, 'decrement');
+    const dec1 = vi.spyOn(innerStores[1]!, 'decrement');
     const engine = new RateLimitEngine(merged);
 
     const first = await engine.consumeWithKey('draft-grouped', {});
@@ -265,9 +267,11 @@ describe('draft mode', () => {
     const wouldBlock = await engine.consumeWithKey('draft-grouped', {});
     expect(wouldBlock.isBlocked).toBe(false);
     expect(wouldBlock.draftWouldBlock).toBe(true);
-    // Blocking window is index 1; draft rollback must decrement every window 0..1, not only 1.
+    // Stricter layer blocks: inner rollback of the successful layer + draft rollback on the blocking layer.
     expect(dec0).toHaveBeenCalledTimes(1);
     expect(dec1).toHaveBeenCalledTimes(1);
+
+    await merged.store.shutdown();
   });
 });
 

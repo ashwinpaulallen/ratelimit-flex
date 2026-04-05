@@ -17,6 +17,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
+- **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore` — see [Limiter composition](#limiter-composition)
 
 ## Installation
 
@@ -69,6 +70,60 @@ const app = Fastify();
 await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
 app.get('/health', async () => ({ ok: true }));
 ```
+
+## Limiter composition
+
+Combine multiple `RateLimitStore` instances with `ComposedStore` and the `compose` builder. Every composition mode implements `RateLimitStore`, so the result plugs straight into `expressRateLimiter` / `fastifyRateLimiter` via the `store` option.
+
+**Modes (one-liner):**
+
+| Mode | In one sentence | Typical API |
+|------|-----------------|-------------|
+| **`all`** | Block if any window is exceeded | `compose.all(...)` |
+| **`overflow`** | Primary + burst allowance | `compose.overflow(primary, burst)` or `compose.withBurst({ ... })` |
+| **`first-available`** | Failover chain (first store that allows wins) | `compose.firstAvailable(...)` |
+| **`race`** | Fastest response wins | `compose.race(...)` |
+
+**Multi-window** (two sliding windows, both must allow):
+
+```typescript
+import { compose, expressRateLimiter, MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const store = compose.all(
+  compose.layer('per-sec', new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 1_000, maxRequests: 10 })),
+  compose.layer('per-min', new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 60_000, maxRequests: 100 })),
+);
+app.use(expressRateLimiter({ store }));
+```
+
+**Burst allowance** (steady rate + burst pool; primary counts stay when it blocks, then burst is tried):
+
+```typescript
+import { compose, expressRateLimiter } from 'ratelimit-flex';
+
+const store = compose.withBurst({
+  steady: { windowMs: 1_000, maxRequests: 5 },
+  burst:  { windowMs: 60_000, maxRequests: 20 },
+});
+app.use(expressRateLimiter({ store }));
+```
+
+**Shorthand** — `compose.windows()` creates one `MemoryStore` per slot and wraps them in `compose.all()`:
+
+```typescript
+import { compose, expressRateLimiter } from 'ratelimit-flex';
+
+// Even simpler — auto-creates stores
+const store = compose.windows(
+  { windowMs: 1_000, maxRequests: 10 },
+  { windowMs: 60_000, maxRequests: 100 },
+);
+app.use(expressRateLimiter({ store }));
+```
+
+**Comparison with rate-limiter-flexible:** rate-limiter-flexible uses `RateLimiterUnion` (consume only, no middleware integration) and `BurstyRateLimiter` (separate class, can’t nest). **ratelimit-flex**’s `compose` API unifies all composition patterns into a single system that implements `RateLimitStore`, plugs directly into middleware, supports full nesting, and provides per-layer observability.
+
+**Migration:** the `limits` array is now powered by the composition system internally. Existing code works unchanged. For more control, use `compose.all()` (or `compose.windows()`) directly.
 
 ## Request queuing
 
@@ -1240,23 +1295,86 @@ Default export = **`expressRateLimiter`**.
 
 ## Migration guide
 
+Options are the same **`RateLimitOptions`** shape for **`expressRateLimiter`** and **`fastifyRateLimiter`**; only the import path and how you mount the integration differ (see [Quick Start](#quick-start)).
+
 ### From `express-rate-limit`
 
-`express-rate-limit` uses **`max`**; ratelimit-flex uses **`maxRequests`**. Map **`windowMs`** the same.
+| express-rate-limit | ratelimit-flex |
+|--------------------|----------------|
+| `max` | `maxRequests` |
+| `windowMs` | `windowMs` (unchanged) |
+| `standardHeaders: true` | `standardHeaders: 'draft-6'` (or use the helper below) |
+| `standardHeaders: false` | `standardHeaders: false` |
+| `standardHeaders: 'draft-6'` \| `'draft-7'` \| `'draft-8'` | Same string values |
+| `legacyHeaders` | `legacyHeaders` |
+| `headers: true` (older API) | Prefer `standardHeaders: 'legacy'` or explicit draft profile |
+
+Use **`fromExpressRateLimitOptions()`** (exported from **`ratelimit-flex`**) to map **`max` → `maxRequests`** and express-rate-limit **`standardHeaders`** / **`legacyHeaders`** semantics in one call:
 
 ```ts
-// express-rate-limit
+import expressRateLimiter, { fromExpressRateLimitOptions } from 'ratelimit-flex';
+
+// express-rate-limit:
 // rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true })
 
+app.use(
+  expressRateLimiter(
+    fromExpressRateLimitOptions({
+      windowMs: 15 * 60 * 1000,
+      max: 100,
+      standardHeaders: true,
+    }),
+  ),
+);
+```
+
+Equivalent manual mapping:
+
+```ts
+import { expressRateLimiter } from 'ratelimit-flex';
+
+app.use(
+  expressRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    maxRequests: 100,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
+  }),
+);
+```
+
+Default export is **`expressRateLimiter`** (same as named import). For **Redis** across instances, use **`RedisStore`**, **`multiInstancePreset`**, or **`resilientRedisPreset`** and wire **`url`** or **`client`** as in [Deployment guide](#deployment-guide).
+
+### From `@fastify/rate-limit`
+
+| `@fastify/rate-limit` | ratelimit-flex (`ratelimit-flex/fastify`) |
+|----------------------|-------------------------------------------|
+| `max` | `maxRequests` |
+| `timeWindow` (ms number) | `windowMs` (same numeric value) |
+| `timeWindow` (`'1 minute'` etc. via [`ms`](https://github.com/vercel/ms)) | `windowMs` — convert to milliseconds (e.g. `60_000` for one minute, or `import ms from 'ms'; ms('1 minute')`) |
+| `allowList` | `allowlist` |
+| `keyGenerator(request)` | `keyGenerator` — same idea; signature is **`(req: unknown) => string`** (pass your Fastify `request`) |
+| `redis` / `nameSpace` | Use **`RedisStore`** with **`url`** / **`client`** and **`keyPrefix`** (see [When to use RedisStore](#when-to-use-redisstore)) |
+| `skip` / `skipOnError` | `skip` — for Redis errors, configure **`onRedisError`** on **`RedisStore`** ([Redis failure handling](#redis-failure-handling)) |
+| `errorResponseBuilder` | `message` / `statusCode` |
+| `enableDraftSpec: true` | `standardHeaders: 'draft-6'` (or a newer draft profile) |
+| `ban` / `onBanReach` | No single drop-in — use **`penaltyBox`**, **`blocklist`**, or custom handlers as needed |
+| Per-route `fastify.rateLimit({ ... })` | Register scoped plugins or use different **`RateLimitOptions`** per route / plugin scope |
+
+```ts
+// @fastify/rate-limit
+// await fastify.register(import('@fastify/rate-limit'), { max: 100, timeWindow: '1 minute' });
+
 // ratelimit-flex
-expressRateLimiter({
-  windowMs: 15 * 60 * 1000,
+import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+
+await fastify.register(fastifyRateLimiter, {
   maxRequests: 100,
-  headers: true,
+  windowMs: 60_000,
 });
 ```
 
-For a **Redis** store, use **`RedisStore`**, **`multiInstancePreset`**, or **`resilientRedisPreset`** (insurance + circuit breaker)—wire **`url`** or **`client`** per this README.
+**`global: false`** in `@fastify/rate-limit` limits encapsulation to routes registered in that plugin’s scope. Achieve the same by registering **`fastifyRateLimiter`** in a [Fastify plugin encapsulation](https://fastify.dev/docs/latest/Reference/Plugins/) context (child instance) instead of the root app.
 
 ## Contributing
 

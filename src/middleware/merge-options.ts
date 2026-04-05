@@ -1,3 +1,5 @@
+import type { ComposedStore } from '../composition/ComposedStore.js';
+import { compose } from '../composition/compose.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 import {
@@ -24,6 +26,23 @@ export const baseDefaults = {
 } as const;
 
 /**
+ * Builds a multi-window {@link ComposedStore} from `limits` (one {@link MemoryStore} per slot, `compose.all` semantics).
+ * Same as {@link compose.windows} with the given strategy.
+ */
+export function limitsToComposedStore(
+  strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW,
+  slots: ReadonlyArray<{ windowMs: number; maxRequests: number }>,
+): ComposedStore {
+  return compose.windows(
+    ...slots.map((s) => ({
+      windowMs: s.windowMs,
+      maxRequests: s.maxRequests,
+      strategy,
+    })),
+  );
+}
+
+/**
  * Resolves the effective limit for headers and `req.rateLimit` / `request.rateLimit`.
  *
  * @remarks
@@ -34,6 +53,15 @@ export function getLimit(opts: RateLimitOptions, req?: unknown, bindingSlotIndex
     return opts.bucketSize;
   }
   const w = opts as WindowRateLimitOptions;
+  if (w.limits && w.limits.length > 0) {
+    if (bindingSlotIndex !== undefined) {
+      const slot = w.limits[bindingSlotIndex];
+      if (slot !== undefined) {
+        return sanitizeRateLimitCap(slot.max, 100);
+      }
+    }
+    return Math.min(...w.limits.map((e) => sanitizeRateLimitCap(e.max, 100)));
+  }
   if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
     const grouped = w.groupedWindowStores;
     if (bindingSlotIndex !== undefined) {
@@ -56,6 +84,10 @@ export function getLimit(opts: RateLimitOptions, req?: unknown, bindingSlotIndex
  */
 export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
   validateRateLimitHeaderOptions(options);
+  const limitsOpt = (options as WindowRateLimitOptions).limits;
+  if (limitsOpt && limitsOpt.length > 0 && options.store !== undefined) {
+    throw new Error('ratelimit-flex: `limits` and `store` are mutually exclusive');
+  }
   const strategy = options.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
 
   if (strategy === RateLimitStrategy.TOKEN_BUCKET) {
@@ -88,21 +120,27 @@ export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): Rat
 
   const limits = (merged as WindowRateLimitOptions).limits;
   if (limits && limits.length > 0) {
-    const groupedWindowStores = limits.map((entry: WindowLimitSpec) => {
-      const windowMs = sanitizeWindowMs(entry.windowMs, 60_000);
-      const maxRequests = sanitizeRateLimitCap(entry.max, 100);
-      return {
-        windowMs,
-        maxRequests,
-        store: new MemoryStore({
-          strategy: merged.strategy,
-          windowMs,
-          maxRequests,
-        }),
-      };
-    });
-    const store = groupedWindowStores[0]!.store;
-    return { ...merged, groupedWindowStores, store };
+    const sanitized = limits.map((entry: WindowLimitSpec) => ({
+      windowMs: sanitizeWindowMs(entry.windowMs, 60_000),
+      max: sanitizeRateLimitCap(entry.max, 100),
+    }));
+    const strategy =
+      merged.strategy === RateLimitStrategy.FIXED_WINDOW
+        ? RateLimitStrategy.FIXED_WINDOW
+        : RateLimitStrategy.SLIDING_WINDOW;
+    const store = limitsToComposedStore(
+      strategy,
+      sanitized.map((s) => ({ windowMs: s.windowMs, maxRequests: s.max })),
+    );
+    const minCap = Math.min(...sanitized.map((s) => s.max));
+    const minWin = Math.min(...sanitized.map((s) => s.windowMs));
+    return {
+      ...merged,
+      store,
+      limits,
+      maxRequests: minCap,
+      windowMs: minWin,
+    };
   }
 
   const maxForStore = typeof merged.maxRequests === 'number' ? merged.maxRequests : 100;

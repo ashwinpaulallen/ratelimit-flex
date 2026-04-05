@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { expressRateLimiter } from '../src/middleware/express.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 import * as environment from '../src/utils/environment.js';
+import { ComposedStore } from '../src/composition/ComposedStore.js';
 import {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
@@ -13,6 +14,11 @@ import {
   resilientRedisPreset,
   singleInstancePreset,
 } from '../src/presets/index.js';
+import {
+  burstablePreset,
+  failoverPreset,
+  multiWindowPreset,
+} from '../src/composition/index.js';
 import { defaultKeyGenerator } from '../src/strategies/rate-limit-engine.js';
 import type { RedisLikeClient } from '../src/stores/redis-store.js';
 import { MemoryStore } from '../src/stores/memory-store.js';
@@ -73,6 +79,7 @@ function insuranceStoreFromRedis(store: RedisStore): MemoryStore {
 
 const memoryStores: MemoryStore[] = [];
 const redisStores: RedisStore[] = [];
+const composedStores: ComposedStore[] = [];
 
 function trackMemoryStore(s: MemoryStore): MemoryStore {
   memoryStores.push(s);
@@ -84,10 +91,16 @@ function trackRedisStore(s: RedisStore): RedisStore {
   return s;
 }
 
+function trackComposedStore(s: ComposedStore): ComposedStore {
+  composedStores.push(s);
+  return s;
+}
+
 afterEach(async () => {
   await Promise.all([
     ...memoryStores.splice(0).map((s) => s.shutdown()),
     ...redisStores.splice(0).map((s) => s.shutdown()),
+    ...composedStores.splice(0).map((s) => s.shutdown()),
   ]);
 });
 
@@ -318,6 +331,82 @@ describe('presets — unit', () => {
     it('user override: maxRequests 50', () => {
       const merged = mergeRateLimiterOptions(publicApiPreset({ maxRequests: 50 }));
       expect(merged.maxRequests).toBe(50);
+    });
+  });
+
+  describe('composition presets (multiWindow, burstable, failover)', () => {
+    it('multiWindowPreset throws when windows is empty', () => {
+      expect(() =>
+        multiWindowPreset({ client: mockRedisClient() }, []),
+      ).toThrow(/non-empty/);
+    });
+
+    it('multiWindowPreset: ComposedStore all mode, min window/cap, distinct Redis key prefixes', async () => {
+      const evalMock = vi.fn().mockResolvedValue([1, 0, String(Date.now() + 60_000)]);
+      const client = mockRedisClient({ eval: evalMock });
+      const partial = multiWindowPreset(
+        { client, prefix: 'rlf:' },
+        [
+          { windowMs: 1_000, maxRequests: 10 },
+          { windowMs: 60_000, maxRequests: 100 },
+        ],
+      );
+      const merged = mergeRateLimiterOptions(partial);
+      const store = trackComposedStore(merged.store as ComposedStore);
+      expect(store.mode).toBe('all');
+      expect(store.layers).toHaveLength(2);
+      expect(store.layers[0]!.label).toBe('limit-0');
+      expect(store.layers[1]!.label).toBe('limit-1');
+      expect(merged.windowMs).toBe(1_000);
+      expect(merged.maxRequests).toBe(10);
+      expect(merged.standardHeaders).toBe('draft-6');
+      expect(merged.legacyHeaders).toBe(false);
+
+      await store.increment('k');
+      expect(evalMock.mock.calls.length).toBe(2);
+      const k0 = String(evalMock.mock.calls[0]![2]);
+      const k1 = String(evalMock.mock.calls[1]![2]);
+      expect(k0).toContain('mw:0:w1000');
+      expect(k1).toContain('mw:1:w60000');
+    });
+
+    it('burstablePreset: overflow ComposedStore with steady + burst RedisStores', () => {
+      const client = mockRedisClient();
+      const partial = burstablePreset(
+        { client, prefix: 'rlf:' },
+        {
+          steady: { windowMs: 1_000, maxRequests: 5 },
+          burst: { windowMs: 60_000, maxRequests: 20 },
+        },
+      );
+      const merged = mergeRateLimiterOptions(partial);
+      const store = merged.store as ComposedStore;
+      trackComposedStore(store);
+      expect(store.mode).toBe('overflow');
+      expect(store.layers.map((l) => l.label)).toEqual(['steady', 'burst']);
+      expect(merged.windowMs).toBe(1_000);
+      expect(merged.maxRequests).toBe(5);
+      expect(merged.standardHeaders).toBe('draft-6');
+    });
+
+    it('failoverPreset: first-available ComposedStore', async () => {
+      const a = trackMemoryStore(new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 60_000, maxRequests: 10 }));
+      const b = trackMemoryStore(new MemoryStore({ strategy: RateLimitStrategy.SLIDING_WINDOW, windowMs: 60_000, maxRequests: 10 }));
+      const partial = failoverPreset(
+        [
+          { label: 'primary', store: a },
+          { label: 'fallback', store: b },
+        ],
+        { maxRequests: 10 },
+      );
+      const merged = mergeRateLimiterOptions(partial);
+      const store = trackComposedStore(merged.store as ComposedStore);
+      expect(store.mode).toBe('first-available');
+      const r = await store.increment('k');
+      expect(r.decidingLayer).toBe('primary');
+      expect(r.layers.fallback?.consulted).toBe(false);
+      expect(a.getActiveKeys().has('k')).toBe(true);
+      expect(b.getActiveKeys().has('k')).toBe(false);
     });
   });
 

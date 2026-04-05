@@ -24,9 +24,13 @@ import {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
+  burstablePreset,
   clusterPreset,
+  failoverPreset,
   ClusterStore,
   ClusterStorePrimary,
+  ComposedStore,
+  compose,
   createRateLimiter,
   createRateLimiterQueue,
   createRateLimitEngine,
@@ -46,6 +50,7 @@ import {
   MetricsCounters,
   MetricsManager,
   multiInstancePreset,
+  multiWindowPreset,
   publicApiPreset,
   queuedClusterPreset,
   RedisStore,
@@ -140,7 +145,13 @@ describe('package exports', () => {
   it('exports stores and factory', () => {
     expect(MemoryStore).toBeDefined();
     expect(RedisStore).toBeDefined();
+    expect(ComposedStore).toBeDefined();
+    expect(typeof compose.all).toBe('function');
+    expect(typeof compose.layer).toBe('function');
     expect(typeof createStore).toBe('function');
+    expect(typeof multiWindowPreset).toBe('function');
+    expect(typeof burstablePreset).toBe('function');
+    expect(typeof failoverPreset).toBe('function');
   });
 
   it('exports detectEnvironment', () => {

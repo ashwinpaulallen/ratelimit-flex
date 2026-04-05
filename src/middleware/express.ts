@@ -12,7 +12,12 @@ import {
   matchingDecrementOptions,
   resolveIncrementOpts,
 } from '../strategies/rate-limit-engine.js';
-import type { RateLimitInfo, RateLimitOptions, WindowRateLimitOptions } from '../types/index.js';
+import type {
+  RateLimitConsumeResult,
+  RateLimitInfo,
+  RateLimitOptions,
+  WindowRateLimitOptions,
+} from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { jsonErrorBody, mergeRateLimiterOptions, toRateLimitInfo } from './merge-options.js';
@@ -24,6 +29,12 @@ declare module 'express-serve-static-core' {
      * @default undefined
      */
     rateLimit?: RateLimitInfo;
+    /**
+     * @description When the backing store is a {@link ComposedStore}, the last {@link RateLimitEngine.consumeWithKey} result (including `layers`). Set whenever `result.layers` is present.
+     * @default undefined
+     * @since 2.0.0
+     */
+    rateLimitComposed?: RateLimitConsumeResult;
   }
 }
 
@@ -120,6 +131,10 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
     try {
       key = keyGen(req);
       const result = await engine.consumeWithKey(key, req);
+
+      if (result.layers) {
+        req.rateLimitComposed = result;
+      }
 
       if (result.storeUnavailable === true) {
         res.setHeader('X-RateLimit-Store', 'fallback');
