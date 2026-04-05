@@ -117,6 +117,20 @@ export class PrometheusAdapter {
 
   private storeHist: import('prom-client').Histogram<string> | null = null;
 
+  private shieldBlockedGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldSavedGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldTotalBlockedGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldTotalExpiredGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldTotalEvictedGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldHitRateGauge: import('prom-client').Gauge<string> | null = null;
+
+  private shieldStoreCallsGauge: import('prom-client').Gauge<string> | null = null;
+
   constructor(collector: MetricsCollector, options?: PrometheusAdapterOptions) {
     this.collector = collector;
     this.prefix = normalizePrefix(options?.prefix ?? DEFAULT_PREFIX);
@@ -241,6 +255,35 @@ export class PrometheusAdapter {
       }
     }
 
+    const nameShBlk = `${p}shield_blocked_keys`;
+    const nameShSaved = `${p}shield_store_calls_saved_total`;
+    const nameShBlocked = `${p}shield_total_keys_blocked`;
+    const nameShExpired = `${p}shield_total_keys_expired`;
+    const nameShEvicted = `${p}shield_total_keys_evicted`;
+    const nameShRate = `${p}shield_hit_rate`;
+    const nameShCalls = `${p}shield_store_calls_total`;
+    lines.push(`# HELP ${nameShBlk} Keys currently blocked in the in-memory shield cache`);
+    lines.push(`# TYPE ${nameShBlk} gauge`);
+    lines.push(`${nameShBlk} ${snap?.shield?.blockedKeyCount ?? 0}`);
+    lines.push(`# HELP ${nameShSaved} Store calls avoided by the in-memory shield (cumulative)`);
+    lines.push(`# TYPE ${nameShSaved} gauge`);
+    lines.push(`${nameShSaved} ${snap?.shield?.storeCallsSaved ?? 0}`);
+    lines.push(`# HELP ${nameShBlocked} Total keys that have been blocked in memory since startup`);
+    lines.push(`# TYPE ${nameShBlocked} gauge`);
+    lines.push(`${nameShBlocked} ${snap?.shield?.totalKeysBlocked ?? 0}`);
+    lines.push(`# HELP ${nameShExpired} Total keys removed due to block window expiry`);
+    lines.push(`# TYPE ${nameShExpired} gauge`);
+    lines.push(`${nameShExpired} ${snap?.shield?.totalKeysExpired ?? 0}`);
+    lines.push(`# HELP ${nameShEvicted} Total keys evicted due to maxBlockedKeys limit (LRU)`);
+    lines.push(`# TYPE ${nameShEvicted} gauge`);
+    lines.push(`${nameShEvicted} ${snap?.shield?.totalKeysEvicted ?? 0}`);
+    lines.push(`# HELP ${nameShRate} Shield hit rate (storeCallsSaved / (storeCallsSaved + storeCalls))`);
+    lines.push(`# TYPE ${nameShRate} gauge`);
+    lines.push(`${nameShRate} ${snap?.shield?.hitRate ?? 0}`);
+    lines.push(`# HELP ${nameShCalls} Store increment calls that passed through the shield (cumulative)`);
+    lines.push(`# TYPE ${nameShCalls} gauge`);
+    lines.push(`${nameShCalls} ${snap?.shield?.storeCalls ?? 0}`);
+
     return `${lines.join('\n')}\n`;
   }
 
@@ -315,6 +358,41 @@ export class PrometheusAdapter {
       buckets: [...this.buckets],
       registers: [reg],
     });
+    this.shieldBlockedGauge = new prom.Gauge({
+      name: `${p}shield_blocked_keys`,
+      help: 'Keys currently blocked in the in-memory shield cache',
+      registers: [reg],
+    });
+    this.shieldSavedGauge = new prom.Gauge({
+      name: `${p}shield_store_calls_saved_total`,
+      help: 'Store calls avoided by the in-memory shield (cumulative)',
+      registers: [reg],
+    });
+    this.shieldTotalBlockedGauge = new prom.Gauge({
+      name: `${p}shield_total_keys_blocked`,
+      help: 'Total keys that have been blocked in memory since startup',
+      registers: [reg],
+    });
+    this.shieldTotalExpiredGauge = new prom.Gauge({
+      name: `${p}shield_total_keys_expired`,
+      help: 'Total keys removed due to block window expiry',
+      registers: [reg],
+    });
+    this.shieldTotalEvictedGauge = new prom.Gauge({
+      name: `${p}shield_total_keys_evicted`,
+      help: 'Total keys evicted due to maxBlockedKeys limit (LRU)',
+      registers: [reg],
+    });
+    this.shieldHitRateGauge = new prom.Gauge({
+      name: `${p}shield_hit_rate`,
+      help: 'Shield hit rate (storeCallsSaved / (storeCallsSaved + storeCalls))',
+      registers: [reg],
+    });
+    this.shieldStoreCallsGauge = new prom.Gauge({
+      name: `${p}shield_store_calls_total`,
+      help: 'Store increment calls that passed through the shield (cumulative)',
+      registers: [reg],
+    });
     })();
     await this.promRegisterPromise;
   }
@@ -384,5 +462,14 @@ export class PrometheusAdapter {
         this.storeHist.observe(st[i]!);
       }
     }
+
+    const sh = s.shield;
+    this.shieldBlockedGauge?.set(sh?.blockedKeyCount ?? 0);
+    this.shieldSavedGauge?.set(sh?.storeCallsSaved ?? 0);
+    this.shieldTotalBlockedGauge?.set(sh?.totalKeysBlocked ?? 0);
+    this.shieldTotalExpiredGauge?.set(sh?.totalKeysExpired ?? 0);
+    this.shieldTotalEvictedGauge?.set(sh?.totalKeysEvicted ?? 0);
+    this.shieldHitRateGauge?.set(sh?.hitRate ?? 0);
+    this.shieldStoreCallsGauge?.set(sh?.storeCalls ?? 0);
   }
 }

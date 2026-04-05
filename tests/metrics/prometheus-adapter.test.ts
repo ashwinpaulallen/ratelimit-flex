@@ -69,6 +69,8 @@ describe('PrometheusAdapter', () => {
     expect(text).toContain('# TYPE rl_requests_per_second gauge');
     expect(text).toContain('rl_block_rate');
     expect(text).toContain('rl_hot_key_hits');
+    expect(text).toContain('rl_shield_blocked_keys');
+    expect(text).toContain('# TYPE rl_shield_hit_rate gauge');
     void collector.shutdown();
     adapter.destroy();
   });
@@ -144,6 +146,36 @@ describe('PrometheusAdapter', () => {
     const next = vi.fn() as NextFunction;
     mw({ method: 'POST' } as Request, {} as Response, next);
     expect(next).toHaveBeenCalled();
+    void collector.shutdown();
+    adapter.destroy();
+  });
+
+  it('exposes all shield metrics including eviction and expiry counters', () => {
+    const counters = new MetricsCounters();
+    const collector = new MetricsCollector({ counters, intervalMs: 60_000 });
+    const adapter = new PrometheusAdapter(collector, { prefix: 'rl_' });
+    (collector as unknown as { emit: (e: string, s: unknown) => void }).emit(
+      'metrics',
+      makeSnapshot({
+        shield: {
+          blockedKeyCount: 42,
+          storeCallsSaved: 1000,
+          totalKeysBlocked: 100,
+          totalKeysExpired: 30,
+          totalKeysEvicted: 28,
+          hitRate: 0.95,
+          storeCalls: 50,
+        },
+      }),
+    );
+    const text = adapter.getMetricsText();
+    expect(text).toContain('rl_shield_blocked_keys 42');
+    expect(text).toContain('rl_shield_store_calls_saved_total 1000');
+    expect(text).toContain('rl_shield_total_keys_blocked 100');
+    expect(text).toContain('rl_shield_total_keys_expired 30');
+    expect(text).toContain('rl_shield_total_keys_evicted 28');
+    expect(text).toContain('rl_shield_hit_rate 0.95');
+    expect(text).toContain('rl_shield_store_calls_total 50');
     void collector.shutdown();
     adapter.destroy();
   });

@@ -138,6 +138,12 @@ describe('presets — unit', () => {
       expect(merged.standardHeaders).toBe('legacy');
       expect(merged.legacyHeaders).toBe(false);
     });
+
+    it('does not set inMemoryBlock (MemoryStore — shielding is not used)', () => {
+      expect(singleInstancePreset().inMemoryBlock).toBeUndefined();
+      const merged = mergeRateLimiterOptions(singleInstancePreset());
+      expect(merged.inMemoryBlock).toBeUndefined();
+    });
   });
 
   describe('multiInstancePreset', () => {
@@ -160,6 +166,20 @@ describe('presets — unit', () => {
       expect(m.maxRequests).toBe(100);
       expect(m.standardHeaders).toBe('draft-6');
       expect(m.legacyHeaders).toBe(false);
+    });
+
+    it('sets inMemoryBlock true by default for Redis-backed limits', () => {
+      const m = multiInstancePreset({ client: mockRedisClient() });
+      expect(m.inMemoryBlock).toBe(true);
+      const merged = mergeRateLimiterOptions(m);
+      expect(merged.inMemoryBlock).toBe(true);
+    });
+
+    it('user can override inMemoryBlock to false', () => {
+      const m = multiInstancePreset({ client: mockRedisClient() }, { inMemoryBlock: false });
+      expect(m.inMemoryBlock).toBe(false);
+      const merged = mergeRateLimiterOptions(m);
+      expect(merged.inMemoryBlock).toBe(false);
     });
 
     it('user override: maxRequests 50', () => {
@@ -223,6 +243,10 @@ describe('presets — unit', () => {
       expect(p.identifier).toBe('api-gateway');
     });
 
+    it('sets inMemoryBlock true by default', () => {
+      expect(apiGatewayPreset({ client: mockRedisClient() }).inMemoryBlock).toBe(true);
+    });
+
     it('user override: tokensPerInterval 50', () => {
       const merged = mergeRateLimiterOptions(
         apiGatewayPreset({ client: mockRedisClient() }, { tokensPerInterval: 50 }),
@@ -279,6 +303,10 @@ describe('presets — unit', () => {
       expect(p.legacyHeaders).toBe(false);
     });
 
+    it('sets inMemoryBlock true by default', () => {
+      expect(authEndpointPreset({ client: mockRedisClient() }).inMemoryBlock).toBe(true);
+    });
+
     it('user override: maxRequests 50', () => {
       const merged = mergeRateLimiterOptions(
         authEndpointPreset({ client: mockRedisClient() }, { maxRequests: 50 }),
@@ -326,6 +354,10 @@ describe('presets — unit', () => {
         error: 'Rate limit exceeded',
         retryAfter: '<seconds>',
       });
+    });
+
+    it('does not set inMemoryBlock (MemoryStore by default)', () => {
+      expect(publicApiPreset().inMemoryBlock).toBeUndefined();
     });
 
     it('user override: maxRequests 50', () => {
@@ -411,6 +443,10 @@ describe('presets — unit', () => {
   });
 
   describe('resilientRedisPreset', () => {
+    it('sets inMemoryBlock true by default', () => {
+      expect(resilientRedisPreset({ client: mockRedisClient() }).inMemoryBlock).toBe(true);
+    });
+
     it('merges to valid RateLimitOptions with RedisStore and insurance MemoryStore (defaults)', () => {
       const client = mockRedisClient();
       const partial = resilientRedisPreset({ client });
@@ -536,7 +572,8 @@ describe('presets — integration (Express + supertest)', () => {
 
     expect(statuses.slice(0, 5).every((s) => s === 200)).toBe(true);
     expect(statuses[5]).toBe(429);
-    expect(evalMock.mock.calls.length).toBeGreaterThanOrEqual(6);
+    // Default inMemoryBlock: 5th consume hits the limit and caches; 6th is shielded (no Redis eval).
+    expect(evalMock.mock.calls.length).toBe(5);
   });
 
   it('resilientRedisPreset: enforces maxRequests when passed to expressRateLimiter', async () => {

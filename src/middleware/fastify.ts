@@ -14,6 +14,7 @@ import {
   resolveIncrementOpts,
 } from '../strategies/rate-limit-engine.js';
 import type { KeyManager } from '../key-manager/KeyManager.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type {
   RateLimitConsumeResult,
   RateLimitInfo,
@@ -27,6 +28,7 @@ import {
   keyManagerBlockedJson,
   keyManagerRetryAfterSeconds,
   mergeRateLimiterOptions,
+  resolveStoreWithInMemoryShield,
   toRateLimitInfo,
 } from './merge-options.js';
 
@@ -65,6 +67,11 @@ declare module 'fastify' {
       request: import('fastify').FastifyRequest,
       reply: import('fastify').FastifyReply,
     ) => Promise<void>;
+    /**
+     * When {@link RateLimitOptionsBase.inMemoryBlock} wrapped the backing store with {@link InMemoryShield}.
+     * @since 2.3.0
+     */
+    rateLimitShield: InMemoryShield | null;
   }
 
   interface FastifyRequest {
@@ -120,10 +127,11 @@ function decrementStores(resolved: RateLimitOptions, key: string, req: unknown):
 }
 
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
-  const resolved = mergeRateLimiterOptions(options);
+  const merged = mergeRateLimiterOptions(options);
+  const { optionsForEngine: resolved, shield } = resolveStoreWithInMemoryShield(merged);
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
-  const metricsManager = new MetricsManager(resolved.metrics);
+  const metricsManager = new MetricsManager(resolved.metrics, shield);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
@@ -133,6 +141,8 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
   if (resolved.keyManager !== undefined) {
     fastify.decorate('keyManager', resolved.keyManager);
   }
+
+  fastify.decorate('rateLimitShield', shield);
 
   if (metricsManager.isEnabled()) {
     fastify.decorate('rateLimitMetrics', metricsManager);

@@ -131,6 +131,7 @@ function extractStrategyFromRedisOptions(redisOptions: ResilientRedisPresetRedis
  * Distributed preset with **insurance** {@link MemoryStore} + circuit breaker around {@link RedisStore}.
  *
  * @description The in-memory store’s cap is `ceil(maxRequests / workers)` so failover traffic stays roughly fair across replicas. Worker count defaults from {@link detectEnvironment} when `estimatedWorkers` is omitted.
+ * Sets {@link RateLimitOptionsBase.inMemoryBlock} to **`true`** by default (override with `false` or a config object).
  * @param redisOptions - `client` or `url`, optional `prefix` / `onWarn` / `onRedisError`, optional window overrides.
  * @param options - Rate limit overrides plus `estimatedWorkers`, `hooks`, `circuitBreaker`, `syncOnRecovery`.
  * @returns Partial {@link RateLimitOptions} with a configured {@link RedisStore}.
@@ -172,6 +173,7 @@ export function resilientRedisPreset(
     maxRequests: 100,
     standardHeaders: 'draft-6',
     legacyHeaders: false,
+    inMemoryBlock: true,
     ...extractStrategyFromRedisOptions(redisOptions),
     ...rateLimitOverrides,
   };
@@ -452,6 +454,7 @@ export function queuedClusterPreset(
  * Distributed preset: {@link RedisStore}, sliding window, **100 req / minute**, **`onRedisError`: `fail-open`** by default.
  *
  * @description For PM2 cluster, Kubernetes, or any multi-instance deployment with shared Redis.
+ * Sets {@link RateLimitOptionsBase.inMemoryBlock} to **`true`** by default (override with `false` or a config object).
  * @param redisOptions - `client` or `url`, optional `prefix` / `onRedisError`.
  * @param options - Window overrides; pass `store` to replace the built-in {@link RedisStore}.
  * @returns Partial options including a `RedisStore` unless `options.store` is provided.
@@ -477,6 +480,7 @@ export function multiInstancePreset(
     maxRequests: 100,
     standardHeaders: 'draft-6',
     legacyHeaders: false,
+    inMemoryBlock: true,
     ...options,
   };
 
@@ -503,6 +507,7 @@ export function multiInstancePreset(
  * API gateway preset: {@link RedisStore}, **token bucket** (~30 tokens/min, burst **60**), {@link apiKeyHeaderKeyGenerator}, **`fail-closed`** when Redis is down by default.
  *
  * @description Stricter availability trade-off: blocks when Redis cannot evaluate limits (HTTP **503**).
+ * Sets {@link RateLimitOptionsBase.inMemoryBlock} to **`true`** by default (override with `false` or a config object).
  * @param redisOptions - `client` or `url`, optional `prefix` / `onRedisError`.
  * @param options - Token bucket overrides (`tokensPerInterval`, `interval`, `bucketSize`, `keyGenerator`, etc.).
  * @returns Partial {@link TokenBucketRateLimitOptions}-shaped config with `store`.
@@ -527,6 +532,7 @@ export function apiGatewayPreset(
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     identifier: 'api-gateway',
+    inMemoryBlock: true,
     ...options,
   };
 
@@ -554,6 +560,7 @@ export function apiGatewayPreset(
  * Auth endpoint preset: {@link RedisStore}, **fixed window**, **5 req / minute** per IP (default), {@link defaultKeyGenerator}, **`fail-closed`** when Redis is down by default.
  *
  * @description For login/signup/password flows—combine with your auth routes.
+ * Sets {@link RateLimitOptionsBase.inMemoryBlock} to **`true`** by default (override with `false` or a config object).
  * @param redisOptions - `client` or `url`, optional `prefix` / `onRedisError`.
  * @param options - Overrides (`maxRequests`, `windowMs`, `keyGenerator`, or custom `store`).
  * @returns Partial window options with `store`.
@@ -580,6 +587,7 @@ export function authEndpointPreset(
     keyGenerator: defaultKeyGenerator,
     standardHeaders: 'draft-6',
     legacyHeaders: false,
+    inMemoryBlock: true,
     ...options,
   };
 

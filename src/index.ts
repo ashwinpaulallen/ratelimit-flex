@@ -71,6 +71,21 @@ export {
 export { MemoryStore } from './stores/memory-store.js';
 
 /**
+ * In-memory block shield (wraps a remote rate-limit store).
+ *
+ * Re-exports {@link InMemoryShield}, {@link shield}, {@link InMemoryShieldOptions}, {@link ShieldEntry}, {@link ShieldMetrics}.
+ *
+ * @since 2.3.0
+ */
+export {
+  InMemoryShield,
+  shield,
+  type InMemoryShieldOptions,
+  type ShieldEntry,
+  type ShieldMetrics,
+} from './shield/index.js';
+
+/**
  * Composition: {@link ComposedStore}, {@link compose} (primary builder: `all`, `overflow`, `firstAvailable`, `race`, `windows`, `withBurst`),
  * {@link extractLayerMetrics}, {@link isComposedIncrementResult}, and Redis presets {@link multiWindowPreset}, {@link burstablePreset}, {@link failoverPreset}.
  *

@@ -71,11 +71,39 @@ export class OpenTelemetryAdapter {
 
   private readonly hotKeyGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
 
+  private readonly shieldBlockedGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldSavedGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldTotalBlockedGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldTotalExpiredGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldTotalEvictedGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldHitRateGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly shieldStoreCallsGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
   private readonly rpsCallback: (r: ObservableResult) => void;
 
   private readonly blockRateCallback: (r: ObservableResult) => void;
 
   private readonly hotKeyCallback: (r: ObservableResult) => void;
+
+  private readonly shieldBlockedCallback: (r: ObservableResult) => void;
+
+  private readonly shieldSavedCallback: (r: ObservableResult) => void;
+
+  private readonly shieldTotalBlockedCallback: (r: ObservableResult) => void;
+
+  private readonly shieldTotalExpiredCallback: (r: ObservableResult) => void;
+
+  private readonly shieldTotalEvictedCallback: (r: ObservableResult) => void;
+
+  private readonly shieldHitRateCallback: (r: ObservableResult) => void;
+
+  private readonly shieldStoreCallsCallback: (r: ObservableResult) => void;
 
   private readonly onMetrics: (snap: MetricsSnapshot) => void;
 
@@ -108,6 +136,28 @@ export class OpenTelemetryAdapter {
       description: 'Observed hits per hot key (top K)',
     });
 
+    this.shieldBlockedGauge = m.createObservableGauge(`${p}_shield_blocked_keys`, {
+      description: 'Keys currently blocked in the in-memory shield cache',
+    });
+    this.shieldSavedGauge = m.createObservableGauge(`${p}_shield_store_calls_saved_total`, {
+      description: 'Store calls avoided by the in-memory shield (cumulative)',
+    });
+    this.shieldTotalBlockedGauge = m.createObservableGauge(`${p}_shield_total_keys_blocked`, {
+      description: 'Total keys that have been blocked in memory since startup',
+    });
+    this.shieldTotalExpiredGauge = m.createObservableGauge(`${p}_shield_total_keys_expired`, {
+      description: 'Total keys removed due to block window expiry',
+    });
+    this.shieldTotalEvictedGauge = m.createObservableGauge(`${p}_shield_total_keys_evicted`, {
+      description: 'Total keys evicted due to maxBlockedKeys limit (LRU)',
+    });
+    this.shieldHitRateGauge = m.createObservableGauge(`${p}_shield_hit_rate`, {
+      description: 'Shield hit rate (storeCallsSaved / (storeCallsSaved + storeCalls))',
+    });
+    this.shieldStoreCallsGauge = m.createObservableGauge(`${p}_shield_store_calls_total`, {
+      description: 'Store increment calls that passed through the shield (cumulative)',
+    });
+
     this.rpsCallback = (observableResult) => {
       const snap = this.lastSnapshot;
       observableResult.observe(snap !== null ? snap.window.requestsPerSecond : 0);
@@ -124,9 +174,45 @@ export class OpenTelemetryAdapter {
       }
     };
 
+    this.shieldBlockedCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.blockedKeyCount ?? 0);
+    };
+    this.shieldSavedCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.storeCallsSaved ?? 0);
+    };
+    this.shieldTotalBlockedCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.totalKeysBlocked ?? 0);
+    };
+    this.shieldTotalExpiredCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.totalKeysExpired ?? 0);
+    };
+    this.shieldTotalEvictedCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.totalKeysEvicted ?? 0);
+    };
+    this.shieldHitRateCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.hitRate ?? 0);
+    };
+    this.shieldStoreCallsCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      observableResult.observe(snap?.shield?.storeCalls ?? 0);
+    };
+
     this.rpsGauge.addCallback(this.rpsCallback);
     this.blockRateGauge.addCallback(this.blockRateCallback);
     this.hotKeyGauge.addCallback(this.hotKeyCallback);
+    this.shieldBlockedGauge.addCallback(this.shieldBlockedCallback);
+    this.shieldSavedGauge.addCallback(this.shieldSavedCallback);
+    this.shieldTotalBlockedGauge.addCallback(this.shieldTotalBlockedCallback);
+    this.shieldTotalExpiredGauge.addCallback(this.shieldTotalExpiredCallback);
+    this.shieldTotalEvictedGauge.addCallback(this.shieldTotalEvictedCallback);
+    this.shieldHitRateGauge.addCallback(this.shieldHitRateCallback);
+    this.shieldStoreCallsGauge.addCallback(this.shieldStoreCallsCallback);
 
     this.onMetrics = (snap: MetricsSnapshot) => {
       const prev = this.lastSnapshot;
@@ -145,6 +231,13 @@ export class OpenTelemetryAdapter {
     this.rpsGauge.removeCallback(this.rpsCallback);
     this.blockRateGauge.removeCallback(this.blockRateCallback);
     this.hotKeyGauge.removeCallback(this.hotKeyCallback);
+    this.shieldBlockedGauge.removeCallback(this.shieldBlockedCallback);
+    this.shieldSavedGauge.removeCallback(this.shieldSavedCallback);
+    this.shieldTotalBlockedGauge.removeCallback(this.shieldTotalBlockedCallback);
+    this.shieldTotalExpiredGauge.removeCallback(this.shieldTotalExpiredCallback);
+    this.shieldTotalEvictedGauge.removeCallback(this.shieldTotalEvictedCallback);
+    this.shieldHitRateGauge.removeCallback(this.shieldHitRateCallback);
+    this.shieldStoreCallsGauge.removeCallback(this.shieldStoreCallsCallback);
   }
 
   private applyCounterDeltas(s: MetricsSnapshot, prev: MetricsSnapshot | null): void {

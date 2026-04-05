@@ -1,3 +1,4 @@
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { RateLimitStore } from '../types/index.js';
 
 /** Why a key was blocked */
@@ -137,4 +138,14 @@ export interface KeyManagerOptions {
    * Default: 5000. Set to 0 to disable background sync (use {@link KeyManager.syncBlocks} manually).
    */
   syncIntervalMs?: number;
+
+  /**
+   * {@link InMemoryShield} to invalidate when keys are modified via
+   * block / unblock / reward / delete / set, when {@link KeyManagerOptions.store} is the
+   * raw (unwrapped) backing store rather than the shield instance.
+   *
+   * Not needed when `store` is already the shield — {@link InMemoryShield.decrement},
+   * {@link InMemoryShield.reset}, and {@link InMemoryShield.delete} then invalidate automatically.
+   */
+  shield?: InMemoryShield;
 }

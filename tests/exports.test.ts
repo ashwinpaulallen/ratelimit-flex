@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { RedisErrorMode } from '../src/stores/redis-store.js';
 import {
   RateLimitStrategy,
@@ -46,6 +46,7 @@ import {
   expressRateLimiter,
   fixedWindowDefaults,
   Histogram,
+  InMemoryShield,
   MemoryStore,
   MetricsCounters,
   MetricsManager,
@@ -59,6 +60,7 @@ import {
   RateLimiterQueue,
   RateLimiterQueueError,
   singleInstancePreset,
+  shield,
   slidingWindowDefaults,
   tokenBucketDefaults,
   isRateLimitFlexMessage,
@@ -119,6 +121,32 @@ describe('package exports', () => {
   it('exports CircuitBreaker', () => {
     expect(CircuitBreaker).toBeDefined();
     expect(new CircuitBreaker().state).toBe('CLOSED');
+  });
+
+  it('exports InMemoryShield and shield', () => {
+    expect(InMemoryShield).toBeDefined();
+    expect(typeof shield).toBe('function');
+  });
+
+  it('shield() return type is InMemoryShield (RateLimitStore + shield helpers)', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.FIXED_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+    try {
+      const shielded = shield(store, { blockOnConsumed: 10 });
+      expectTypeOf(shielded).toEqualTypeOf<InMemoryShield>();
+      expectTypeOf(shielded.increment).toBeFunction();
+      expectTypeOf(shielded.getMetrics).toBeFunction();
+      expectTypeOf(shielded.isShielded).toBeFunction();
+      expectTypeOf(shielded.getShieldedKeys).toBeFunction();
+      expectTypeOf(shielded.unshield).toBeFunction();
+      expectTypeOf(shielded.clearShield).toBeFunction();
+      expectTypeOf(shielded.sweep).toBeFunction();
+    } finally {
+      await store.shutdown();
+    }
   });
 
   it('exports resilience-related types (compile-time re-exports from main entry)', async () => {

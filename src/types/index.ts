@@ -1,5 +1,6 @@
 /** Shared types for rate limiting */
 
+import type { InMemoryShieldOptions } from '../shield/types.js';
 import type { MetricsConfig } from './metrics.js';
 
 export type {
@@ -442,6 +443,25 @@ export interface RateLimitOptionsBase {
    * @see {@link RedisStore}
    */
   store: RateLimitStore;
+
+  /**
+   * @description Enable in-memory block shielding for DoS protection.
+   * When a key's consumed hits reach this threshold, subsequent requests
+   * are blocked in local memory without touching the store.
+   *
+   * Can be:
+   * - A number: shorthand for `{ blockOnConsumed: N }` where N = the number.
+   *   `blockDurationMs` defaults to `windowMs` (or token-bucket `interval`).
+   * - An {@link InMemoryShieldOptions} object for full control.
+   * - `true`: shorthand for `{ blockOnConsumed: maxRequests }` — shield kicks in
+   *   exactly when the key hits the rate limit.
+   *
+   * Only effective with remote stores (e.g. Redis-backed or cluster stores).
+   * Ignored for in-process `MemoryStore` (already in-memory, no network to save).
+   * @default undefined (no shield)
+   * @since 2.3.0
+   */
+  inMemoryBlock?: number | boolean | InMemoryShieldOptions;
 
   /**
    * @description Observability: `true` enables defaults; object configures intervals and callbacks.
