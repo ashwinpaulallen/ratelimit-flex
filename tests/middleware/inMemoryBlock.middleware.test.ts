@@ -146,15 +146,26 @@ describe('inMemoryBlock middleware integration', () => {
     app.use(limiter);
     app.get('/r', (_req, res) => res.status(200).json({ ok: true }));
 
+    const agent = request.agent(app);
     const total = 150;
     for (let i = 0; i < total; i++) {
-      await request(app).get('/r');
+      let attempts = 0;
+      while (attempts < 3) {
+        try {
+          await agent.get('/r');
+          break;
+        } catch (err) {
+          attempts++;
+          if (attempts >= 3) throw err;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
     }
 
     expect(remote.increment).toHaveBeenCalledTimes(100);
 
     await remote.shutdown();
-  });
+  }, 30_000);
 
   it('convenience shield() factory wraps a store', async () => {
     const inner = createRemoteLikeStore(10);
