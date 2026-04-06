@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.4.0] - 2026-04-06
+
+### Added
+
+- NestJS integration (`ratelimit-flex/nestjs`): `RateLimitModule`, `RateLimitGuard`,
+  `@RateLimit()` and `@SkipRateLimit()` decorators, `forRoot` / `forRootAsync`,
+  DI injection tokens, GraphQL/WebSocket/RPC context support, NestJS presets
+- Hono integration (`ratelimit-flex/hono`): `rateLimiter()`, `queuedRateLimiter()`,
+  `webSocketLimiter()` middleware factories, typed Hono Context, edge/serverless compatible
+  - `HonoRateLimiterHandler` with metrics support (`metricsManager`, `getMetricsSnapshot()`, `getMetricsHistory()`, `shutdown()`)
+  - `honoDefaultKeyGenerator` exported for custom key generator composition
+  - `inMemoryBlock` support in both `rateLimiter` and `queuedRateLimiter` for DoS protection
+  - Error handling wrapper for graceful failure recovery
+  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` not supported due to Hono's lack of response lifecycle hooks
+
+### Changed
+
+- **NestJS:** `globalGuard` (preferred) and deprecated `global` now control both `APP_GUARD` registration **and** Nest `DynamicModule.global`. Previously `global: false` skipped the guard but the module was still registered as global, which was easy to misread.
+
+### Breaking changes
+
+- **NestJS (`RateLimitModule.forRoot` / `forRootAsync`):** If you previously passed **`global: false`** (or **`globalGuard: false`**) only to **disable automatic `APP_GUARD` registration** while still relying on the module being a **Nest global module** (so `RATE_LIMIT_*` tokens were available everywhere without importing `RateLimitModule` again), behavior has changed: **`false` now also sets `DynamicModule.global` to `false`**, so those tokens are no longer re-exported app-wide unless you import `RateLimitModule` where needed (or register the guard manually with `@UseGuards(RateLimitGuard)` and import the module for DI). Prefer the new name **`globalGuard`**; **`global`** remains as a deprecated alias. See `NestRateLimitModuleOptions` JSDoc in `types.ts`.
+
 ## [2.3.0] - 2026-04-07
 
 ### Added
