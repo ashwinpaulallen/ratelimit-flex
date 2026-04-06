@@ -2,11 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
-
-(nothing yet)
-
 ## [3.0.0] - 2026-04-06
+
+### Documentation
+
+- **README:** Added **"Atomicity & Distributed Systems"** section explaining that all `RedisStore` operations use Lua scripts for atomic multi-step operations, preventing race conditions in distributed deployments. Clarifies that concurrent requests cannot interleave, and provides guidance on `ClusterStore` vs `RedisStore` for different deployment scenarios.
+- **README:** Enhanced **"Choosing a strategy"** section to explicitly state that all three algorithms (sliding window, token bucket, fixed window) are fully implemented with atomic Lua scripts in `RedisStore`. Added implementation details for each strategy showing the specific Redis commands used. Updated Quick Start examples to show all three strategies.
+- **README:** Updated feature list to emphasize "Three algorithms" with explicit mention of atomic Lua script implementation in both stores.
+
 
 ### Breaking changes
 

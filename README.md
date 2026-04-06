@@ -8,9 +8,9 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
-- **Three strategies:** sliding window, token bucket, fixed window
+- **Three algorithms:** **Sliding window** (default, smooth & accurate), **Token bucket** (allows bursts), **Fixed window** (simplest, lowest memory) — all fully implemented in both `MemoryStore` and `RedisStore` with atomic Lua scripts
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean); NestJS (`ratelimit-flex/nestjs`) and Hono (`ratelimit-flex/hono`)
-- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed), and `ClusterStore` (Node.js native cluster IPC)
+- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed for atomic multi-step operations), and `ClusterStore` (Node.js native cluster IPC)
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance ([Redis failure handling](#redis-failure-handling), [Redis resilience](#redis-resilience))
@@ -55,25 +55,54 @@ All peers are optional at install time; the runtime you choose must be present w
 
 ## Quick Start
 
-**Express (6 lines):**
+**Express (sliding window, the default):**
 
 ```ts
 import express from 'express';
-import rateLimit from 'ratelimit-flex';
+import rateLimit, { RateLimitStrategy } from 'ratelimit-flex';
 
 const app = express();
-app.use(rateLimit({ maxRequests: 100, windowMs: 60_000 }));
+
+// Sliding window (default) - smooth, accurate rate limiting
+app.use(rateLimit({ 
+  strategy: RateLimitStrategy.SLIDING_WINDOW, // optional, this is the default
+  maxRequests: 100, 
+  windowMs: 60_000 
+}));
+
+// Token bucket - allows bursts
+app.use(rateLimit({
+  strategy: RateLimitStrategy.TOKEN_BUCKET,
+  tokensPerInterval: 20,
+  interval: 60_000,
+  bucketSize: 60,
+}));
+
+// Fixed window - simplest, lowest memory
+app.use(rateLimit({
+  strategy: RateLimitStrategy.FIXED_WINDOW,
+  maxRequests: 100,
+  windowMs: 60_000,
+}));
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 ```
 
-**Fastify (6 lines):**
+**Fastify (same strategies):**
 
 ```ts
 import Fastify from 'fastify';
-import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+import { fastifyRateLimiter, RateLimitStrategy } from 'ratelimit-flex/fastify';
 
 const app = Fastify();
-await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
+
+// Sliding window (default)
+await app.register(fastifyRateLimiter, { 
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  maxRequests: 100, 
+  windowMs: 60_000 
+});
+
 app.get('/health', async () => ({ ok: true }));
 ```
 
@@ -559,6 +588,46 @@ All Lua in `RedisStore` is **static source** in the package. Quota and key data 
 
 **`createAdminRouter`** (Express) and **`createFastifyAdminPlugin`** expose full control over rate limit and block state. In **production**, mount them **only** behind **authentication**, **authorization**, and ideally **network isolation** (VPN, admin-only ingress). The JSDoc on those factories repeats this warning—treat it as mandatory for exposed deployments.
 
+## Atomicity & Distributed Systems
+
+### Redis operations are atomic
+
+**All `RedisStore` operations use Lua scripts for atomicity.** Each rate limit check executes as a single atomic operation on the Redis server—no race conditions, no requests slipping through under concurrent load from multiple processes or nodes.
+
+**What this means:**
+
+- **Sliding window:** `ZREMRANGEBYSCORE` (prune expired) + `ZADD` (add entries) + `ZCARD` (count) + `PEXPIRE` — all in one `EVAL`
+- **Fixed window:** `INCRBY` + conditional `PEXPIRE` + `PTTL` — all in one `EVAL`
+- **Token bucket:** `HGET` (read state) + refill calculation + token deduction + `HSET` (write) + `PEXPIRE` — all in one `EVAL`
+
+**No interleaving:** Other Redis clients cannot execute commands between the steps of a rate limit operation. The entire check-and-increment logic runs atomically.
+
+**Why Lua?** Redis `EVAL` executes Lua scripts as atomic blocks. While a script runs, Redis does not process other commands from other clients. This guarantees that:
+
+1. **Concurrent requests** from multiple app instances cannot race
+2. **Distributed systems** get consistent, accurate rate limiting
+3. **Multi-step operations** (read → calculate → write) are safe
+
+**Script caching:** Most Redis clients (including `ioredis` and `node-redis`) automatically cache Lua scripts server-side after the first execution using `EVALSHA`. Subsequent calls reuse the cached script, reducing network overhead. The library passes the full script source on every call; the client handles optimization transparently.
+
+**MemoryStore & ClusterStore:** In-process stores use JavaScript synchronous operations (no atomicity concerns within a single event loop). `ClusterStore` uses IPC message passing with acknowledgments to coordinate across Node.js cluster workers.
+
+### Distributed deployment considerations
+
+When running multiple app instances with `RedisStore`:
+
+- **Shared state:** All instances see the same counters in Redis
+- **Consistent limits:** A user hitting 100 req/min is enforced globally, not per instance
+- **No coordination needed:** Each instance independently calls Redis; Lua atomicity handles races
+- **Network latency:** Redis round-trip adds ~1-5ms per request (use `InMemoryShield` to cache blocked keys and eliminate Redis calls for hot attackers)
+
+**Cluster vs Redis:**
+
+- **`ClusterStore`:** Coordinates rate limits across Node.js `cluster` workers in a **single machine** (IPC, no network)
+- **`RedisStore`:** Coordinates across **multiple machines/containers/regions** (network, shared Redis)
+
+For multi-instance deployments (Kubernetes, serverless, multiple VMs), use **`RedisStore`**. For single-machine concurrency (one server, multiple CPU cores), use **`ClusterStore`**.
+
 ## Limiter composition
 
 Combine multiple rate limiters with the `compose` builder. Every composition mode implements `RateLimitStore`, so composed stores plug directly into `expressRateLimiter` / `fastifyRateLimiter` via the `store` option.
@@ -896,27 +965,43 @@ await app.register(fastifyQueuedRateLimiter, {
 
 ## Choosing a strategy
 
-| Strategy       | Best for                     | Accuracy | Memory | Burst handling   |
-|----------------|------------------------------|----------|--------|------------------|
-| Sliding window | General API rate limiting    | High     | Medium | Smooth           |
-| Token bucket   | APIs that allow bursts       | High     | Low    | Allows bursts    |
-| Fixed window   | Simple counting, low memory  | Moderate | Low    | Edge spikes      |
+**All three algorithms are fully implemented** with atomic Lua scripts in `RedisStore` and efficient in-memory tracking in `MemoryStore`:
 
-**Sliding window** — Counts requests in a moving time window. Best default when you care about fairness and boundary behavior (no big “reset line” artifacts).
+| Strategy       | Best for                     | Accuracy | Memory | Burst handling   | Boundary behavior |
+|----------------|------------------------------|----------|--------|------------------|-------------------|
+| **Sliding window** | General API rate limiting    | **High** | Medium | Smooth           | No reset spikes   |
+| **Token bucket**   | APIs that allow bursts       | **High** | Low    | **Allows bursts**    | Controlled bursts |
+| **Fixed window**   | Simple counting, low memory  | Moderate | **Low**    | Edge spikes      | 2x burst at boundaries |
+
+### Sliding window (default, recommended)
+
+Counts requests in a **moving time window**. Most accurate and fair - no "reset line" artifacts.
+
+**Implementation:**
+- **Redis:** `ZSET` with `ZREMRANGEBYSCORE` + `ZADD` + `ZCARD` in atomic Lua
+- **Memory:** Sorted array of timestamps per key
+- **Boundary behavior:** Smooth - no 2x burst at window edges
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
 
 app.use(
   expressRateLimiter({
-    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    strategy: RateLimitStrategy.SLIDING_WINDOW, // default
     windowMs: 60_000,
     maxRequests: 100,
   }),
 );
 ```
 
-**Token bucket** — Refills tokens on a schedule; clients can burst up to `bucketSize`. Good for spiky traffic (mobile, retries, webhooks).
+### Token bucket (for bursty traffic)
+
+Refills tokens on a schedule; clients can **burst** up to `bucketSize`. Best for spiky traffic (mobile apps, retries, webhooks).
+
+**Implementation:**
+- **Redis:** `HASH` with atomic refill calculation + token deduction in Lua
+- **Memory:** Stores `{ tokens, lastRefill }` per key
+- **Burst control:** Allows bursts when bucket is full
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
@@ -924,14 +1009,21 @@ import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
 app.use(
   expressRateLimiter({
     strategy: RateLimitStrategy.TOKEN_BUCKET,
-    tokensPerInterval: 20,
-    interval: 60_000,
-    bucketSize: 60,
+    tokensPerInterval: 20,  // Add 20 tokens per minute
+    interval: 60_000,       // Every 60 seconds
+    bucketSize: 60,         // Max 60 tokens (allows 3x burst)
   }),
 );
 ```
 
-**Fixed window** — One counter per fixed time slice. Simplest and lightest; acceptable when occasional boundary spikes are OK (internal tools, coarse limits).
+### Fixed window (simplest)
+
+One counter per fixed time slice. Simplest and lowest memory; acceptable when occasional boundary spikes are OK.
+
+**Implementation:**
+- **Redis:** `INCRBY` + `PEXPIRE` in atomic Lua script
+- **Memory:** Single counter per key
+- **Warning:** Users can burst 2x limit at boundaries (50 at 11:59:59, 50 at 12:00:00)
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
