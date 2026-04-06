@@ -1,3 +1,4 @@
+import type { NextFunction, Request, Response } from 'express';
 import type { Context, MiddlewareHandler } from 'hono';
 import {
   formatRateLimitHeaders,
@@ -13,23 +14,22 @@ import {
   resolveStoreWithInMemoryShield,
   toRateLimitInfo,
 } from '../middleware/merge-options.js';
-import {
-  RateLimitEngine,
-  matchingDecrementOptions,
-  resolveIncrementOpts,
-} from '../strategies/rate-limit-engine.js';
+import { RateLimitEngine, resolveIncrementOpts } from '../strategies/rate-limit-engine.js';
+import { decrementStoresAfterConsume } from '../middleware/decrement-stores-after-consume.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { InMemoryShieldOptions } from '../shield/types.js';
+import type { KeyManager } from '../key-manager/KeyManager.js';
 import type {
   RateLimitConsumeResult,
   RateLimitInfo,
   RateLimitOptions,
   RateLimitStore,
   RateLimitStrategy,
-  WindowRateLimitOptions,
 } from '../types/index.js';
 import type { StandardHeadersDraft } from '../types/index.js';
 import type { MetricsConfig } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
+import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
 import { MetricsManager } from '../metrics/manager.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { applyHeadersToContext, resolvedHonoRollbackStatus, toContentfulStatus } from './utils.js';
@@ -173,23 +173,6 @@ function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLim
   };
 }
 
-function honoDecrementAfterResponse(resolved: RateLimitOptions, key: string, req: unknown): void {
-  const incOpts = resolveIncrementOpts(resolved, req);
-  const decOpts = matchingDecrementOptions(incOpts);
-  const w = resolved as WindowRateLimitOptions;
-  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
-    for (const g of w.groupedWindowStores) {
-      void g.store.decrement(key, decOpts).catch(() => {
-        /* ignore */
-      });
-    }
-    return;
-  }
-  void resolved.store.decrement(key, decOpts).catch(() => {
-    /* ignore */
-  });
-}
-
 async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<number> {
   if (h.cost === undefined) {
     return 1;
@@ -201,17 +184,31 @@ async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<
 }
 
 /**
- * Extended middleware handler with metrics support.
+ * Extended middleware handler with metrics support (parity with the Express adapter where applicable).
  */
 export interface HonoRateLimiterHandler extends MiddlewareHandler {
   /** Metrics manager instance (no-op when metrics disabled). */
   metricsManager: MetricsManager;
-  /** Get current metrics snapshot. */
   getMetricsSnapshot(): MetricsSnapshot | null;
-  /** Get metrics history. */
   getMetricsHistory(): MetricsSnapshot[];
-  /** Shutdown the metrics manager and cleanup resources. */
+  /** Alias of {@link getMetricsHistory}. */
+  getHistory(): MetricsSnapshot[];
+  /** Shutdown metrics collector and adapters (same as {@link shutdownMetrics}). */
   shutdown(): Promise<void>;
+  /** Alias of {@link shutdown} for parity with Express. */
+  shutdownMetrics(): Promise<void>;
+  /** Prometheus exposition middleware when `metrics.prometheus.enabled`; otherwise `undefined` (Express-style; use `metricsManager` for raw text in Hono). */
+  metricsEndpoint?: (req: Request, res: Response, next: NextFunction) => void;
+  on(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  off(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  once(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  removeListener(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  /** When {@link RateLimitOptionsBase.keyManager} is set, or auto-created from `penaltyBox`. */
+  keyManager?: KeyManager;
+  /** When `inMemoryBlock` wrapped the store with {@link InMemoryShield}. */
+  shield: InMemoryShield | null;
+  /** Present when `metrics.openTelemetry` is enabled with a `meter`. */
+  openTelemetryAdapter?: OpenTelemetryAdapter;
 }
 
 /**
@@ -346,7 +343,7 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
         const failed = status >= 400;
         const success = status < 400;
         if ((shouldDecrementFailed && failed) || (shouldDecrementSuccess && success)) {
-          honoDecrementAfterResponse(resolved, key, c);
+          decrementStoresAfterConsume(resolved, key, c);
         }
       }
       return;
@@ -358,12 +355,42 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
     }
   };
 
-  return Object.assign(middleware, {
-    metricsManager,
-    getMetricsSnapshot: () => metricsManager.getSnapshot(),
-    getMetricsHistory: () => metricsManager.getHistory(),
-    shutdown: async () => {
-      await metricsManager.shutdown();
-    },
-  }) as HonoRateLimiterHandler;
+  const prometheusMw = metricsManager.getPrometheusMiddleware() ?? undefined;
+
+  const handler = middleware as HonoRateLimiterHandler;
+  handler.metricsManager = metricsManager;
+  handler.metricsEndpoint = prometheusMw;
+  handler.getMetricsSnapshot = (): MetricsSnapshot | null => metricsManager.getSnapshot();
+  handler.getMetricsHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.getHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.shutdown = async (): Promise<void> => {
+    await metricsManager.shutdown();
+  };
+  handler.shutdownMetrics = async (): Promise<void> => {
+    await metricsManager.shutdown();
+  };
+  handler.on = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.on('metrics', listener);
+    return handler;
+  };
+  handler.off = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.off('metrics', listener);
+    return handler;
+  };
+  handler.once = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.once('metrics', listener);
+    return handler;
+  };
+  handler.removeListener = (
+    _event: 'metrics',
+    listener: (snapshot: MetricsSnapshot) => void,
+  ): HonoRateLimiterHandler => {
+    metricsManager.removeListener('metrics', listener);
+    return handler;
+  };
+  handler.keyManager = resolved.keyManager;
+  handler.shield = shield;
+  handler.openTelemetryAdapter = metricsManager.getOpenTelemetryAdapter() ?? undefined;
+
+  return handler;
 }

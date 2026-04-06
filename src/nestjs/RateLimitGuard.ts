@@ -27,6 +27,7 @@ import type { WindowRateLimitOptions } from '../types/index.js';
 import { stripNestRateLimitModuleFields } from './strip-nest-module-fields.js';
 import { tryResolveGraphqlRequestResponse } from './resolve-graphql-req-res.js';
 import { fingerprintRouteEngineOptions } from './route-engine-fingerprint.js';
+import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import type { NestRateLimitModuleOptions, RateLimitDecoratorOptions } from './types.js';
 import {
   RATE_LIMIT_KEY_MANAGER,
@@ -168,6 +169,8 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
     );
     const { optionsForEngine } = resolveStoreWithInMemoryShield(merged);
     this.resolved = optionsForEngine;
+    warnIfMemoryStoreInCluster(optionsForEngine.store);
+    warnIfRedisStoreWithoutInsurance(optionsForEngine.store);
     this.engine = this.createEngine(optionsForEngine);
   }
 
@@ -206,6 +209,10 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
     this.metricsCollectorStarted = true;
   }
 
+  /**
+   * Stops the metrics collector. **KeyManager** instances created from `penaltyBox` are torn down by
+   * {@link RateLimitModuleLifecycle} (not here); user-injected `keyManager` must call {@link KeyManager.destroy} yourself.
+   */
   async onModuleDestroy(): Promise<void> {
     await this.metricsManager?.shutdown();
   }

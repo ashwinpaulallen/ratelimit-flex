@@ -30,8 +30,7 @@ describe('RateLimiterQueue timeout-removes-head drain optimization', () => {
     const nextPromise = queue.removeTokens('key-a', 1);
 
     // Manually extend the second entry's timeout to prevent it from timing out
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const secondEntry = (queue as any).queue[1];
+    const secondEntry = queue.getQueueEntriesForTests()[1];
     if (secondEntry && secondEntry.timer) {
       clearTimeout(secondEntry.timer);
       secondEntry.timer = null;
@@ -113,8 +112,7 @@ describe('RateLimiterQueue timeout-removes-head drain optimization', () => {
     const nextPromise = queue.removeTokens('key-a', 1);
 
     // Manually extend the second entry's timeout
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const secondEntry = (queue as any).queue[1];
+    const secondEntry = queue.getQueueEntriesForTests()[1];
     if (secondEntry && secondEntry.timer) {
       clearTimeout(secondEntry.timer);
       secondEntry.timer = null;

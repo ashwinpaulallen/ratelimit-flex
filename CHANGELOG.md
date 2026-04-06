@@ -4,9 +4,50 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+(nothing yet)
+
+## [3.0.2] - 2026-04-06
+
+### Added
+
+- **`compose.race([...layers], { raceTimeoutMs })`** — array overload to configure race timeout without `new ComposedStore(...)`.
+- **`HonoRateLimiterHandler`:** parity helpers with Express — **`getHistory`**, **`shutdownMetrics`**, **`metricsEndpoint`**, **`on` / `off` / `once` / `removeListener`** for metrics events, **`keyManager`**, **`shield`**, **`openTelemetryAdapter`**.
+- **`RateLimiterQueue`:** error code **`invalid_cost`** for non-finite or less-than-1 **`cost`**.
+
+### Changed
+
+- **`middleware/decrement-stores-after-consume.ts`:** shared **`decrementStoresAfterConsume`** used by Express, Fastify, and Hono skip-response paths (DRY).
+- **`MetricsManager.shutdown`:** removes **`SIGINT`** / **`SIGTERM`** listeners registered for **`shutdownOnProcessExit`**.
+- **`ComposedStore` `race` mode:** layer **`increment`** rejections no longer reject the whole **`increment()`**; first fulfilled layer wins; all-reject yields **`storeUnavailable`**-style result with per-layer rows.
+- **`RateLimiterQueue`:** **`getTokensRemaining`** undoes the probe increment if **`decrement`** throws; blocked-head retry uses **`MIN_BLOCK_RETRY_DELAY_MS`**.
+
+### Fixed
+
+- **`RateLimitEngine.consumeGroupedWindows`:** on mid-loop exception, best-effort **decrement** rollback for completed slots, then rethrows the original error.
+
+### Documentation
+
+- **NestJS:** **`RateLimitGuard.onModuleDestroy`** JSDoc — metrics shutdown here; auto-**`KeyManager`** from **`penaltyBox`** is destroyed by **`RateLimitModuleLifecycle`**.
+
+## [3.0.1] - 2026-04-06
+
+### Added
+
+- **Metrics:** optional **`metrics.shutdownOnProcessExit`** — registers **`SIGINT`** / **`SIGTERM`** handlers that call **`MetricsManager.shutdown`** (Express and other stacks without a framework `onClose` hook).
+
+### Changed
+
+- **`InMemoryShield.getActiveKeys`:** merges inner **`getActiveKeys()`** with non-expired shield-cache entries (shield row wins on key collision) for accurate admin snapshots.
+- **`RateLimiterQueue`:** FIFO uses an intrusive doubly linked list so queue timeouts **`unlink`** in **O(1)** instead of **`indexOf` + `splice`** (**O(n)**). **`getQueueEntriesForTests()`** replaces tests poking the old internal array.
+- **`RedisStore` (sliding window):** builds unique ZSET member ids with one batched **`randomBytes(cost * 16)`** instead of **`cost`** separate calls.
+
 ### Fixed
 
 - **Hono:** **`skipFailedRequests`** / **`skipSuccessfulRequests`** use **`resolvedHonoRollbackStatus`** so missing **`c.res`**, **`c.res.status`** **0**, non-finite values, or codes outside **100–599** do not mis-trigger rollbacks (defaults to **200**). **`resolvedHonoRollbackStatus`** is exported from **`ratelimit-flex/hono`** for custom middleware.
+
+### Internal
+
+- **`RateLimitEngine`:** shared **`DEFAULT_BLOCK_RESET_FALLBACK_MS`** for block/passthrough reset fallbacks (no behavior change).
 
 ## [3.0.0] - 2026-04-06
 

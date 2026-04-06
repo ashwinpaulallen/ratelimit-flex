@@ -33,6 +33,15 @@ export interface MetricsConfig {
    */
   onMetrics?: (snapshot: MetricsSnapshot) => void;
   /**
+   * When true, register `SIGINT` / `SIGTERM` handlers that call {@link MetricsManager.shutdown}
+   * (stops the collector and adapters). Use when you cannot call `shutdownMetrics()` on teardown
+   * (e.g. Express has no `onClose` like Fastify). Avoid enabling in tests or multiple independent
+   * apps in one process unless each instance should shut down on the same signal.
+   * @default false
+   * @since 3.0.1
+   */
+  shutdownOnProcessExit?: boolean;
+  /**
    * @description Prometheus text exposition (`/metrics`) and optional prom-client registry integration.
    */
   prometheus?: { enabled: boolean; prefix?: string; registry?: unknown };

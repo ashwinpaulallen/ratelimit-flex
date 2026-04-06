@@ -24,6 +24,9 @@ import { getLimit } from '../middleware/merge-options.js';
 import type { MetricsCounters } from '../metrics/counters.js';
 import { createMetricsCountersIfEnabled } from '../metrics/normalize.js';
 
+/** Fallback reset horizon when block metadata omits expiry (Key Manager / policy / passthrough paths). */
+const DEFAULT_BLOCK_RESET_FALLBACK_MS = 60_000;
+
 export type { RateLimitConsumeResult };
 
 /**
@@ -453,6 +456,31 @@ export class RateLimitEngine {
     }
   }
 
+  /**
+   * Removes violation timestamp entries that have expired. Without this, keys that never hit the app again
+   * after many violations would never pass through {@link recordViolation}, so {@link violationTimestamps}
+   * could grow without bound under high-cardinality traffic.
+   */
+  private maybeSweepExpiredViolationEntries(): void {
+    if (this.violationTimestamps.size === 0) {
+      return;
+    }
+    const cfg = this.options.penaltyBox;
+    if (!cfg) {
+      return;
+    }
+    const windowMs = sanitizeWindowMs(cfg.violationWindowMs ?? 3_600_000, 3_600_000);
+    const now = Date.now();
+    for (const [k, timestamps] of this.violationTimestamps) {
+      const trimmed = timestamps.filter((t) => t > now - windowMs);
+      if (trimmed.length === 0) {
+        this.violationTimestamps.delete(k);
+      } else if (trimmed.length < timestamps.length) {
+        this.violationTimestamps.set(k, trimmed);
+      }
+    }
+  }
+
   private isPenaltyActive(key: string): boolean {
     const until = this.penaltyUntil.get(key);
     if (until === undefined) {
@@ -488,6 +516,8 @@ export class RateLimitEngine {
           /* ignore */
         });
       }
+    } else if (this.violationTimestamps.size > 10_000) {
+      this.maybeSweepExpiredViolationEntries();
     }
   }
 
@@ -571,31 +601,41 @@ export class RateLimitEngine {
   ): Promise<{ result: RateLimitResult; blockedAtIndex?: number; bindingSlotIndex?: number }> {
     const decOpts = matchingDecrementOptions(incOpts);
     const done: RateLimitResult[] = [];
-    for (let i = 0; i < grouped.length; i++) {
-      const g = grouped[i]!;
-      const ts = metrics ? performance.now() : 0;
-      const r = await g.store.increment(key, {
-        maxRequests: g.maxRequests,
-        ...(incOpts?.cost !== undefined ? { cost: incOpts.cost } : {}),
-      });
-      if (metrics) metrics.recordStoreLatency(ts);
-      done.push(r);
-      if (r.isBlocked) {
-        const deferRollbackToDraft = draft && !r.storeUnavailable;
-        if (!deferRollbackToDraft) {
-          for (let j = 0; j < i; j++) {
-            const prev = grouped[j]!;
-            await prev.store.decrement(key, decOpts).catch(() => {
-              /* ignore */
-            });
+    try {
+      for (let i = 0; i < grouped.length; i++) {
+        const g = grouped[i]!;
+        const ts = metrics ? performance.now() : 0;
+        const r = await g.store.increment(key, {
+          maxRequests: g.maxRequests,
+          ...(incOpts?.cost !== undefined ? { cost: incOpts.cost } : {}),
+        });
+        if (metrics) metrics.recordStoreLatency(ts);
+        done.push(r);
+        if (r.isBlocked) {
+          const deferRollbackToDraft = draft && !r.storeUnavailable;
+          if (!deferRollbackToDraft) {
+            for (let j = 0; j < i; j++) {
+              const prev = grouped[j]!;
+              await prev.store.decrement(key, decOpts).catch(() => {
+                /* ignore */
+              });
+            }
           }
+          return {
+            result: this.mergeGroupedResults(done),
+            blockedAtIndex: i,
+            bindingSlotIndex: this.computeBindingSlotIndex(done),
+          };
         }
-        return {
-          result: this.mergeGroupedResults(done),
-          blockedAtIndex: i,
-          bindingSlotIndex: this.computeBindingSlotIndex(done),
-        };
       }
+    } catch (err) {
+      for (let j = 0; j < done.length; j++) {
+        const prev = grouped[j]!;
+        await prev.store.decrement(key, decOpts).catch(() => {
+          /* ignore */
+        });
+      }
+      throw err;
     }
     return {
       result: this.mergeGroupedResults(done),
@@ -668,13 +708,25 @@ export class RateLimitEngine {
         isBlocked: true,
       };
     }
-    const remaining = Math.min(...results.map((r) => r.remaining));
-    const resetTime = new Date(Math.max(...results.map((r) => r.resetTime.getTime())));
-    const totalHits = Math.max(...results.map((r) => r.totalHits));
+    let minRemaining = Number.POSITIVE_INFINITY;
+    let maxResetTime = 0;
+    let maxTotalHits = 0;
+    for (const r of results) {
+      if (r.remaining < minRemaining) {
+        minRemaining = r.remaining;
+      }
+      const rt = r.resetTime.getTime();
+      if (rt > maxResetTime) {
+        maxResetTime = rt;
+      }
+      if (r.totalHits > maxTotalHits) {
+        maxTotalHits = r.totalHits;
+      }
+    }
     return {
-      totalHits,
-      remaining,
-      resetTime,
+      totalHits: maxTotalHits,
+      remaining: minRemaining,
+      resetTime: new Date(maxResetTime),
       isBlocked: false,
     };
   }
@@ -685,7 +737,7 @@ export class RateLimitEngine {
     const resetTime =
       info?.expiresAt !== undefined && info.expiresAt !== null
         ? info.expiresAt
-        : new Date(Date.now() + 60_000);
+        : new Date(Date.now() + DEFAULT_BLOCK_RESET_FALLBACK_MS);
     const base: RateLimitResult = {
       totalHits: limit,
       remaining: 0,
@@ -708,9 +760,10 @@ export class RateLimitEngine {
     let resetTime: Date;
     if (reason === 'penalty' && penaltyKey !== undefined) {
       const until = this.penaltyUntil.get(penaltyKey);
-      resetTime = until !== undefined ? new Date(until) : new Date(Date.now() + 60_000);
+      resetTime =
+        until !== undefined ? new Date(until) : new Date(Date.now() + DEFAULT_BLOCK_RESET_FALLBACK_MS);
     } else {
-      resetTime = new Date(Date.now() + 60_000);
+      resetTime = new Date(Date.now() + DEFAULT_BLOCK_RESET_FALLBACK_MS);
     }
     const base: RateLimitResult = {
       totalHits: limit,
@@ -731,7 +784,7 @@ export class RateLimitEngine {
 
   private buildPassthroughResult(req: unknown): RateLimitConsumeResult {
     const limit = this.getLimit(req);
-    const resetTime = new Date(Date.now() + 60_000);
+    const resetTime = new Date(Date.now() + DEFAULT_BLOCK_RESET_FALLBACK_MS);
     const base: RateLimitResult = {
       totalHits: 0,
       remaining: limit,

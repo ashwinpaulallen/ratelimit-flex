@@ -4,6 +4,22 @@ import type { RateLimitStore } from '../types/index.js';
 import { ComposedStore } from './ComposedStore.js';
 import type { CompositionLayer } from './types.js';
 
+function raceCompose(
+  first: CompositionLayer | CompositionLayer[],
+  ...rest: (CompositionLayer | { raceTimeoutMs?: number } | undefined)[]
+): ComposedStore {
+  if (Array.isArray(first)) {
+    const opts = rest[0] as { raceTimeoutMs?: number } | undefined;
+    return new ComposedStore({
+      mode: 'race',
+      layers: first,
+      raceTimeoutMs: opts?.raceTimeoutMs ?? 5000,
+    });
+  }
+  const layers = [first, ...(rest as CompositionLayer[])];
+  return new ComposedStore({ mode: 'race', layers, raceTimeoutMs: 5000 });
+}
+
 /**
  * Fluent builder for composing rate limit stores.
  *
@@ -65,9 +81,13 @@ export const compose = {
   /**
    * Fire all layers in parallel. Use the fastest response.
    * Use case: multi-region latency optimization.
+   *
+   * - **Spread:** `compose.race(a, b)` — default `raceTimeoutMs` **5000** ms.
+   * - **Array + options:** `compose.race([a, b], { raceTimeoutMs: 8000 })`.
    */
-  race(...layers: CompositionLayer[]): ComposedStore {
-    return new ComposedStore({ mode: 'race', layers, raceTimeoutMs: 5000 });
+  race: raceCompose as {
+    (...layers: CompositionLayer[]): ComposedStore;
+    (layers: CompositionLayer[], options?: { raceTimeoutMs?: number }): ComposedStore;
   },
 
   /**

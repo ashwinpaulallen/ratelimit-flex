@@ -319,12 +319,29 @@ export class InMemoryShield implements RateLimitStore {
     this.cache.clear();
   }
 
-  /** Proxy getActiveKeys to inner store if supported */
+  /**
+   * Active keys from the inner store merged with non-expired shield-cache entries.
+   * Shield rows override the same key so monitoring reflects in-memory blocked state.
+   */
   getActiveKeys(): Map<string, { totalHits: number; resetTime: Date }> {
+    const merged = new Map<string, { totalHits: number; resetTime: Date }>();
     if (this.inner.getActiveKeys) {
-      return this.inner.getActiveKeys();
+      for (const [k, v] of this.inner.getActiveKeys()) {
+        merged.set(k, { totalHits: v.totalHits, resetTime: new Date(v.resetTime.getTime()) });
+      }
     }
-    return new Map();
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now >= entry.expiresAt) {
+        continue;
+      }
+      const cr = entry.cachedResult;
+      merged.set(key, {
+        totalHits: cr.totalHits,
+        resetTime: new Date(cr.resetTime.getTime()),
+      });
+    }
+    return merged;
   }
 
   /** Proxy resetAll to inner store if supported, and clear shield cache */

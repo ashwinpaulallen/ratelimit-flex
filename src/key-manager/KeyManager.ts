@@ -547,6 +547,7 @@ export class KeyManager {
       if (v.expiresAt !== null && v.expiresAt.getTime() <= now) {
         const wasReason = v.reason;
         this.blocks.delete(key);
+        this.invalidateRateLimitShield(key);
         const ts = new Date();
         this.emitTyped('unblocked', {
           key,

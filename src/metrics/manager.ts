@@ -29,6 +29,9 @@ export class MetricsManager {
 
   private readonly openTelemetryAdapter: OpenTelemetryAdapter | null;
 
+  /** When {@link MetricsConfig.shutdownOnProcessExit} is true: same handler for SIGINT/SIGTERM, removed in {@link shutdown}. */
+  private processExitHandler: (() => void) | null = null;
+
   /**
    * @param shield — Same {@link InMemoryShield} reference the engine uses as `store` after
    *   {@link resolveStoreWithInMemoryShield} (or `null` / omitted). {@link MetricsCollector} fills
@@ -82,6 +85,14 @@ export class MetricsManager {
       });
     } else {
       this.openTelemetryAdapter = null;
+    }
+
+    if (normalized.shutdownOnProcessExit === true) {
+      this.processExitHandler = (): void => {
+        void this.shutdown();
+      };
+      process.once('SIGINT', this.processExitHandler);
+      process.once('SIGTERM', this.processExitHandler);
     }
   }
 
@@ -156,6 +167,11 @@ export class MetricsManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.processExitHandler !== null) {
+      process.off('SIGINT', this.processExitHandler);
+      process.off('SIGTERM', this.processExitHandler);
+      this.processExitHandler = null;
+    }
     this.stop();
     this.prometheusAdapter?.destroy();
     this.openTelemetryAdapter?.shutdown();

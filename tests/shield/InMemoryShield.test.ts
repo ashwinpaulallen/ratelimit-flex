@@ -390,13 +390,21 @@ describe('InMemoryShield', () => {
       await shield.shutdown();
     });
 
-    it('getActiveKeys proxies to inner store', async () => {
+    it('getActiveKeys merges inner snapshot with shield-cache rows', async () => {
       const inner = createWindowStore(2);
       const spy = vi.spyOn(inner, 'getActiveKeys');
       const shield = new InMemoryShield(inner, { blockOnConsumed: 2 });
 
-      shield.getActiveKeys();
+      await shield.increment('a');
+      await shield.increment('a');
+      expect(shield.isShielded('a')).toBe(true);
+
+      const keys = shield.getActiveKeys();
       expect(spy).toHaveBeenCalled();
+      expect(keys.has('a')).toBe(true);
+      const row = keys.get('a');
+      expect(row?.totalHits).toBeGreaterThanOrEqual(2);
+      expect(row?.resetTime).toBeInstanceOf(Date);
 
       await shield.shutdown();
     });

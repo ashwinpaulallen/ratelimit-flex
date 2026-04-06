@@ -8,9 +8,9 @@ Maintainer-facing **residual ideas** and **design tradeoffs**. Not end-user docu
 
 ## 1. Executive summary
 
-**Recent releases (see `CHANGELOG.md`):** **v3.0.0** removed Nest **`global`**, added **`KeyedRateLimiterQueue`**, and added Hono **`skipFailedRequests` / `skipSuccessfulRequests`** (post-**`await next()`**, status via **`resolvedHonoRollbackStatus`** — not raw **`c.res.status`** alone). Earlier backlog items (composed-store branding, Nest guard/fingerprint/strategy, cluster IPC versioning, docs, tests, etc.) are documented in the changelog and git history.
+**Current release (see `CHANGELOG.md`):** **v3.0.2** implements the backlog from the 2026-04-06 review: **grouped-window exception rollback**, **`ComposedStore` race** rejection handling aligned with **`all`**, **`RateLimiterQueue`** probe/cost/drain polish, **`MetricsManager`** signal cleanup on **`shutdown`**, **Hono** handler parity with Express where sensible, **`compose.race`** timeout overload, shared **`decrementStoresAfterConsume`**, and Nest **JSDoc** for **KeyManager** lifecycle (**`RateLimitModuleLifecycle`** already calls **`destroy`** for auto-created managers).
 
-**Residual notes:** **Hono** — non‑HTTP rollback rules still need a custom middleware (README **Hono → Limitations**). **Queues** — **`KeyedRateLimiterQueue`** uses simple LRU; exotic fairness stays in app code.
+**Still intentional (not bugs):** **Hono** — non-HTTP rollback rules need app middleware (README **Hono → Limitations**). **`KeyedRateLimiterQueue`** — simple LRU. **MemoryStore sliding** — **O(window)** work per request is a strategy tradeoff. **`ComposedStore` rollback** after success — sequential by design.
 
 ---
 
@@ -44,6 +44,7 @@ Maintainer-facing **residual ideas** and **design tradeoffs**. Not end-user docu
 | **Hono skip** via **`await next()`** + **`resolvedHonoRollbackStatus`** | Parity with Express/Fastify; missing/invalid **`c.res`** / status → **200** | Non‑HTTP rollback rules (body shape, etc.) need app middleware |
 | **Single FIFO** in `RateLimiterQueue` | Simple semantics | Cross-key head-of-line blocking |
 | **Lua in Redis** | Atomic fairness | Redis-specific; pure REST caches differ |
+| **`metrics.shutdownOnProcessExit`** | Graceful metrics shutdown without Express `onClose` | **SIGINT**/**SIGTERM** listeners; removed on **`shutdown()`** |
 
 ---
 
@@ -51,7 +52,7 @@ Maintainer-facing **residual ideas** and **design tradeoffs**. Not end-user docu
 
 | Tier | Item |
 |------|------|
-| — | *No P0/P1 backlog items at this time.* |
+| — | *No P0/P1 backlog at this time.* |
 
 ---
 
@@ -73,5 +74,12 @@ Maintainer-facing **residual ideas** and **design tradeoffs**. Not end-user docu
 | 2026-04-06 | **v3.0.0 shipped:** `global` removed, **`KeyedRateLimiterQueue`**, Hono **`skipFailed*`**; open backlog cleared. |
 | 2026-04-06 | Hono **`resolvedHonoRollbackStatus`** — normalize **`0`** / invalid **`c.res.status`** for skip rollback (see §1 / §4). |
 | 2026-04-06 | §1 / §4: align exec summary with **`resolvedHonoRollbackStatus`**; optional **`c.res`**; JSDoc public; tradeoff row clarified. |
+| 2026-04-06 | **§3.1 Efficiency improvements:** grouped-window merge single-pass, ComposedStore eviction threshold, violation sweep, KeyManager shield invalidation on expiry, NestJS deployment warnings. |
+| 2026-04-06 | **§3.2 Integration gaps:** documented shield `getActiveKeys` omission, queue `indexOf` O(n), Express manual metrics shutdown. |
+| 2026-04-06 | **§3.3 Performance notes:** documented Redis sliding `randomBytes` cost, MemoryStore sliding filter, ComposedStore sequential rollback. |
+| 2026-04-06 | **§3.4 Code quality:** reviewed centralized helpers, brand detection, metrics hot path, lifecycle separation, deployment warnings. |
+| 2026-04-06 | **v3.0.1:** Implemented §3.2 (shield merge, queue DLL + **`getQueueEntriesForTests`**, **`metrics.shutdownOnProcessExit`**), §3.3 Redis batching, §3.4 **`DEFAULT_BLOCK_RESET_FALLBACK_MS`**. |
+| 2026-04-06 | **Fresh review:** P0/P1/P2 backlog (grouped exception, race rejections, queue/metrics/Nest/Hono/compose/DRY/constants). |
+| 2026-04-06 | **v3.0.2:** Implemented that backlog; doc reset to “open: none”. |
 
 When an item ships, **delete or shrink** its subsection here and record it in **`CHANGELOG.md`**.

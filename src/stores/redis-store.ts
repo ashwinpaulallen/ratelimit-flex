@@ -12,6 +12,22 @@ import { RateLimitStrategy } from '../types/index.js';
 import { sanitizeIncrementCost, sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /**
+ * Unique ZSET member ids for sliding-window Lua scripts. One `randomBytes` call when `cost > 1`
+ * reduces syscall overhead vs per-member `randomBytes(16)`.
+ */
+function slidingWindowUniqueMembers(cost: number): string[] {
+  if (cost <= 0) {
+    return [];
+  }
+  const buf = randomBytes(cost * 16);
+  const members: string[] = new Array(cost);
+  for (let i = 0; i < cost; i++) {
+    members[i] = buf.subarray(i * 16, (i + 1) * 16).toString('hex');
+  }
+  return members;
+}
+
+/**
  * Strategy options for sliding or fixed window when using {@link RedisStore}.
  *
  * @since 1.0.0
@@ -993,7 +1009,7 @@ export class RedisStore implements RateLimitStore {
           return;
         }
         // Members all scored at `now` — restores ZCARD; does not reconstruct spread timestamps from MemoryStore.
-        const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
+        const members = slidingWindowUniqueMembers(cost);
         const rk = this.redisKey('sw', key);
         const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
           now,
@@ -1048,7 +1064,7 @@ export class RedisStore implements RateLimitStore {
   ): Promise<RateLimitResult | null> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
-    const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
+    const members = slidingWindowUniqueMembers(cost);
     const rk = this.redisKey('sw', key);
     const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
       now,
@@ -1426,7 +1442,7 @@ export class RedisStore implements RateLimitStore {
     const n = Math.max(0, Math.floor(totalHits));
     const rk = this.redisKey('sw', key);
     const expireArg = expiresAt !== undefined ? expiresAt.getTime() : -1;
-    const members = Array.from({ length: n }, () => randomBytes(16).toString('hex'));
+    const members = slidingWindowUniqueMembers(n);
     const raw = await this.evalScript(LUA_SLIDING_SET, [rk], [
       now,
       this.windowMs,
