@@ -2,12 +2,13 @@ import { DynamicModule, Module, ModuleMetadata, Provider, Type } from '@nestjs/c
 import { APP_GUARD } from '@nestjs/core';
 import { mergeRateLimiterOptions, resolveStoreWithInMemoryShield } from '../middleware/merge-options.js';
 import { MetricsManager } from '../metrics/manager.js';
-import type { KeyManager } from '../key-manager/KeyManager.js';
-import type { InMemoryShield } from '../shield/InMemoryShield.js';
-import type { RateLimitOptions, RateLimitStore } from '../types/index.js';
+import type { RateLimitOptions } from '../types/index.js';
 import { RateLimitGuard } from './RateLimitGuard.js';
 import { stripNestRateLimitModuleFields } from './strip-nest-module-fields.js';
 import type { NestRateLimitModuleOptions } from './types.js';
+import type { RateLimitModuleInit } from './rate-limit-module-init.js';
+import { RATE_LIMIT_MODULE_INIT } from './rate-limit-module-init.js';
+import { RateLimitModuleLifecycle } from './rate-limit-module-lifecycle.js';
 import {
   RATE_LIMIT_KEY_MANAGER,
   RATE_LIMIT_METRICS,
@@ -16,16 +17,7 @@ import {
   RATE_LIMIT_STORE,
 } from './types.js';
 
-/** Internal token: merged init payload for async registration. */
-export const RATE_LIMIT_MODULE_INIT = Symbol('RATE_LIMIT_MODULE_INIT');
-
-export interface RateLimitModuleInit {
-  moduleOptions: NestRateLimitModuleOptions;
-  store: RateLimitStore;
-  keyManager: KeyManager | null;
-  shield: InMemoryShield | null;
-  metricsManager: MetricsManager;
-}
+export { RATE_LIMIT_MODULE_INIT, type RateLimitModuleInit } from './rate-limit-module-init.js';
 
 @Module({})
 export class RateLimitModule {
@@ -94,7 +86,9 @@ export class RateLimitModule {
      * {@link NestRateLimitModuleOptions.globalGuard} on {@link forRoot}). Default: true.
      */
     globalGuard?: boolean;
-    /** @deprecated Use `globalGuard` instead. */
+    /**
+     * @deprecated Use `globalGuard` instead. Removed in v3.0.0 — same codemod as {@link NestRateLimitModuleOptions.global}.
+     */
     global?: boolean;
   }): DynamicModule {
     const registerGlobal = RateLimitModule.resolveRegisterGlobal(asyncOptions);
@@ -130,6 +124,7 @@ export class RateLimitModule {
         useFactory: (i: RateLimitModuleInit) => i.metricsManager,
         inject: [RATE_LIMIT_MODULE_INIT],
       },
+      RateLimitModuleLifecycle,
     ];
     if (registerGlobal) {
       providers.push({ provide: APP_GUARD, useClass: RateLimitGuard });
@@ -161,6 +156,8 @@ export class RateLimitModule {
     const { shield, optionsForEngine } = resolveStoreWithInMemoryShield(merged);
     const metricsManager = new MetricsManager(optionsForEngine.metrics, shield);
     const keyManager = (options.keyManager ?? merged.keyManager) ?? null;
+    const disposeKeyManagerOnDestroy =
+      keyManager !== null && options.keyManager === undefined;
     const moduleOptions: NestRateLimitModuleOptions = {
       ...options,
       store: merged.store,
@@ -172,16 +169,19 @@ export class RateLimitModule {
       keyManager,
       shield,
       metricsManager,
+      disposeKeyManagerOnDestroy,
     };
   }
 
   private static createProvidersFromInit(init: RateLimitModuleInit, registerAppGuard: boolean): Provider[] {
     const providers: Provider[] = [
+      { provide: RATE_LIMIT_MODULE_INIT, useValue: init },
       { provide: RATE_LIMIT_OPTIONS, useValue: init.moduleOptions },
       { provide: RATE_LIMIT_STORE, useValue: init.store },
       { provide: RATE_LIMIT_KEY_MANAGER, useValue: init.keyManager },
       { provide: RATE_LIMIT_SHIELD, useValue: init.shield },
       { provide: RATE_LIMIT_METRICS, useValue: init.metricsManager },
+      RateLimitModuleLifecycle,
     ];
     if (registerAppGuard) {
       providers.push({ provide: APP_GUARD, useClass: RateLimitGuard });

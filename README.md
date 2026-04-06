@@ -20,6 +20,8 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore` — see [Limiter composition](#limiter-composition)
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API — see [Programmatic key management](#programmatic-key-management)
+- **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes — see [Security and abuse](#security-and-abuse)
+- **Recipes & API HTML:** [docs/recipes.md](docs/recipes.md) (Nest + GraphQL, Express `trust proxy`, Hono on Cloudflare); run **`npm run docs:api`** for TypeDoc output under `docs/api/` (not shipped on npm)
 
 ## Installation
 
@@ -137,11 +139,29 @@ export class AdminService {
 }
 ```
 
+### NestJS: limitations (`@RateLimit`)
+
+`RateLimitGuard` uses the **same** `RateLimitEngine` and backing `store` as `RateLimitModule` for the whole app (or feature module). Per-route **`@RateLimit({ ... })`** can override **`maxRequests`**, **`windowMs`**, **`cost`**, and **`keyGenerator`** only.
+
+- **`strategy` is not supported** on `@RateLimit`. To use a different algorithm (e.g. token bucket vs sliding window), set **`strategy`** on **`RateLimitModule.forRoot` / `forRootAsync`**, register a **second** `RateLimitModule` with different options in another Nest module, or split services.
+- If legacy metadata (or `as any`) sets a **`strategy` that differs** from the module default, the guard **throws** when **`NODE_ENV !== 'production'`** on the first request to that route. In **production**, the invalid `strategy` is **ignored** (limits still apply).
+- **Per-route engine cache:** Decorator metadata is **static** in normal Nest apps (`@RateLimit` is fixed at bootstrap). The guard caches one **RateLimitEngine** per **handler** and **invalidates** that entry when the merged options **fingerprint** changes (e.g. if effective limits for that handler ever change). Prefer static limits; avoid mutating reflected metadata at runtime.
+
+More context: `docs/IMPROVEMENTS.md` (§3.2, §3.3).
+
+### NestJS: KeyManager shutdown
+
+- **`RateLimitModule`** registers **`RateLimitModuleLifecycle`**, which calls **`keyManager.destroy()`** on **`onModuleDestroy`** only when the **`KeyManager` was auto-created** from **`penaltyBox`** (you did **not** pass **`keyManager`** in `forRoot` / `forRootAsync`). Shared or manually constructed instances passed via **`keyManager`** are **not** destroyed by the module — call **`destroy()`** (or **`dispose()`**) yourself when shutting down or in your own `OnModuleDestroy` hook.
+- **`await app.close()`** (or closing the testing module) runs lifecycle teardown and clears Key Manager intervals in the auto-created case.
+- For non-Nest apps, call **`keyManager.destroy()`** when tearing down the process or before hot reload in development.
+
 ### NestJS: `globalGuard`, `global`, and module scope (2.4+)
 
 Use **`globalGuard`** (preferred); **`global`** is deprecated but behaves the same. When **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
 
 When **`globalGuard: false`** (or **`global: false`**), the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
+
+**Deprecation:** The **`global`** option is scheduled for **removal in v3.0.0**. **Codemod:** in every `RateLimitModule.forRoot({ ... })` and `RateLimitModule.forRootAsync({ ... })` configuration object, rename the property **`global`** to **`globalGuard`** (keep the same boolean value). Example: `global: false` → `globalGuard: false`. If you build options in a variable, rename the field there too.
 
 **Upgrading:** If you previously used **`global: false`** only to disable automatic **`APP_GUARD`** while still relying on the module being **global** for `RATE_LIMIT_*` tokens app-wide, that combination is no longer available—`false` now means both “no `APP_GUARD`” and “not a global module.” See the **Breaking changes** entry for 2.4.0 in `CHANGELOG.md`.
 
@@ -241,7 +261,65 @@ app.get(
 
 ### Hono Limitations
 
-**`skipFailedRequests` / `skipSuccessfulRequests` not supported:** Unlike Express and Fastify adapters, the Hono adapter does not support decrementing counters based on response status codes. This is due to Hono's lack of stable response lifecycle hooks (equivalent to Express's response events or Fastify's `onResponse` hook). If you need this feature, consider using Express or Fastify adapters instead.
+**`skipFailedRequests` / `skipSuccessfulRequests` are not built in.** Express and Fastify run rollback after the response is finalized (`res` `finish` / `onResponse`). Hono has no portable, first-class equivalent that behaves the same on Node servers and edge runtimes, so this adapter does not implement those flags. If you need them unchanged, use the Express or Fastify adapters.
+
+**App-specific recipe (rollback after `await next()`):** Register middleware **after** `rateLimiter` that awaits downstream work, then matches the final status to Express semantics:
+
+- **`skipFailedRequests: true`** → decrement when **`status >= 400`** (failed responses do not consume quota).
+- **`skipSuccessfulRequests: true`** → decrement when **`status < 400`** (successful responses do not consume quota).
+
+Use the **same** `store`, `keyGenerator`, and limiter options as the limiter. Match the increment **`cost`** with `resolveIncrementOpts` / `matchingDecrementOptions` (same helpers Express uses). For weighted limits, read the per-request cost from **`HONO_RATE_LIMIT_INCREMENT_COST`** on the Hono `Context` (exported from `ratelimit-flex/hono`).
+
+```typescript
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import {
+  MemoryStore,
+  RateLimitStrategy,
+  resolveIncrementOpts,
+  matchingDecrementOptions,
+} from 'ratelimit-flex';
+import { rateLimiter, HONO_RATE_LIMIT_INCREMENT_COST } from 'ratelimit-flex/hono';
+import type { RateLimitOptions } from 'ratelimit-flex';
+
+const app = new Hono();
+
+const store = new MemoryStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+});
+const windowMs = 60_000;
+const maxRequests = 100;
+
+const keyGenerator = (c: Context) =>
+  c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+
+/** Same shape the engine uses (including cost mirror for Hono `cost`). */
+const engineLikeOptions: RateLimitOptions = {
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs,
+  maxRequests,
+  store,
+  incrementCost: (req) => {
+    const v = (req as Context).get(HONO_RATE_LIMIT_INCREMENT_COST);
+    return typeof v === 'number' && Number.isFinite(v) ? v : 1;
+  },
+};
+
+app.use('*', rateLimiter({ store, windowMs, maxRequests, keyGenerator }));
+
+// Like skipFailedRequests: undo increment when the handler returns an error status
+app.use('*', async (c, next) => {
+  await next();
+  if (c.res.status < 400) return;
+  const key = await Promise.resolve(keyGenerator(c));
+  const inc = resolveIncrementOpts(engineLikeOptions, c);
+  void store.decrement(key, matchingDecrementOptions(inc)).catch(() => {});
+});
+```
+
+**Caveats:** `compose.windows`, grouped stores, and draft rollback need the same multi-store path as the Express adapter’s internal `decrementStores` — copy that logic or prefer Express/Fastify for those modes. On **Cloudflare Workers**, you may offload `decrement` to **`executionCtx.waitUntil`** so slow stores do not block the response; that remains runtime-specific.
 
 ## In-memory block shielding
 
@@ -284,6 +362,8 @@ const metrics = limiter.shield?.getMetrics();
 //   storeCalls: 684             // actual store calls made
 // }
 ```
+
+**`MetricsManager` and periodic snapshots:** When metrics are enabled, middleware passes the **same** `InMemoryShield` instance used as the engine `store` into `MetricsManager`. Each `onMetrics` snapshot may include **`shield`** — that object is `shield.getMetrics()` for **that** instance (blocked-key counts, hit rate, store calls avoided, etc.). Request, block, and latency totals still describe traffic through the engine, which calls `increment` on the outer `store`. If you pass an `InMemoryShield` as `store` **and** set `inMemoryBlock: true`, a second shield wraps the first; **`snapshot.shield` reflects the outer layer only**, and in non-production a **one-time** `console.warn` flags possible double-shielding (intentional stacking is supported).
 
 ### How it works
 
@@ -389,45 +469,100 @@ await keyManager.block('abusive-ip', 3600_000, { type: 'manual', message: 'Spam'
 
 ### Migrating from `penaltyBox`
 
-The `penaltyBox` option is now powered by `KeyManager` internally. For full control, migrate to `KeyManager`:
+**Why you cannot set `penaltyBox` and `keyManager` together:** `mergeRateLimiterOptions` throws if both appear in the same options object. `penaltyBox` uses the engine’s built-in violation counter and `penaltyUntil` map. A **user-supplied** `KeyManager` adds a separate blocking and penalty-point system (`penalty()`, escalation, audit). Allowing both would pit two policies against each other for the same keys.
 
-**Before (penaltyBox):**
+**Option A — keep `penaltyBox`:** If you only need “**N** real rate-limit blocks within **`violationWindowMs`**, then ban for **`penaltyDurationMs`**, keep `penaltyBox` and **do not** pass your own `keyManager`. (Frameworks may still synthesize an internal `KeyManager` for Nest lifecycle or related wiring when you only use `penaltyBox`; that is not the same as configuring both options yourself.)
+
+**Option B — migrate to an explicit `KeyManager`:** Drop `penaltyBox` and drive bans through `KeyManager`. Map fields roughly like this:
+
+| `penaltyBox` | `KeyManager` |
+|--------------|----------------|
+| `violationsThreshold` | `penaltyBlockThreshold` (penalty points before an automatic block) |
+| `penaltyDurationMs` | `penaltyBlockDurationMs` (base duration), or replace with `penaltyEscalation` for longer blocks on repeat offenses |
+| `onPenalty` | `keyManager.on('blocked', …)` (and/or audit entries) |
+
+The engine **does not** call `keyManager.penalty()` when a request hits the rate limit — you wire that yourself, typically from **`onLimitReached`**, so each limit hit adds a penalty point toward the threshold:
+
+**Before (`penaltyBox`):**
 
 ```typescript
-app.use(expressRateLimiter({
-  store,
-  penaltyBox: {
-    violationsThreshold: 3,
-    penaltyDurationMs: 60_000,
-  },
-}));
+app.use(
+  expressRateLimiter({
+    store,
+    maxRequests: 100,
+    windowMs: 60_000,
+    penaltyBox: {
+      violationsThreshold: 3,
+      violationWindowMs: 3_600_000,
+      penaltyDurationMs: 60_000,
+    },
+  }),
+);
 ```
 
-**After (KeyManager):**
+**After (`KeyManager` + `onLimitReached` + escalation):**
 
 ```typescript
+import { expressRateLimiter, KeyManager, exponentialEscalation } from 'ratelimit-flex';
+
+const keyGenerator = (req: import('express').Request) =>
+  /* same key you use for rate limiting, e.g. forwarded IP */ String(req.ip ?? '');
+
 const keyManager = new KeyManager({
   store,
   maxRequests: 100,
   windowMs: 60_000,
   penaltyBlockThreshold: 3,
-  penaltyBlockDurationMs: 60_000,
+  penaltyEscalation: exponentialEscalation(60_000), // 1m, 2m, 4m, … after each threshold breach
 });
 
-app.use(expressRateLimiter({ store, keyManager }));
+app.use(
+  expressRateLimiter({
+    store,
+    maxRequests: 100,
+    windowMs: 60_000,
+    keyGenerator,
+    keyManager,
+    onLimitReached: async (req) => {
+      await keyManager.penalty(keyGenerator(req), 1);
+    },
+  }),
+);
 
-// Now you have programmatic access:
-await keyManager.block('abusive-ip', 3600_000, { type: 'manual' });
-keyManager.on('blocked', ({ key, reason }) => console.log(`Blocked: ${key}`));
+keyManager.on('blocked', ({ key, reason }) => {
+  console.log(`Blocked: ${key}`, reason);
+});
 ```
 
-**Benefits of migrating:**
+**Semantics note:** `penaltyBox` counts blocks in a sliding **`violationWindowMs`** (default one hour). `KeyManager` penalty points are tracked in an adjustment window tied to the limiter’s **`windowMs`**, not to `violationWindowMs`. If your old config relied on a **long** violation window and a **short** rate-limit window, either keep `penaltyBox` or add your own sliding-window counting before calling `penalty()`.
+
+**Benefits of Option B:**
 - Typed block reasons (`manual`, `penalty-escalation`, `abuse-pattern`, `custom`)
 - Event system for real-time alerting
 - Audit log with filtering
 - Escalation strategies (exponential, fibonacci, etc.)
 - Admin HTTP endpoints
 - Redis-backed block persistence
+
+## Security and abuse
+
+### Key cardinality and `keyGenerator`
+
+Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage.
+
+**Mitigations:** Prefer **stable, low-cardinality** identifiers (user id, tenant id, API key id). **Normalize or hash** untrusted inputs before using them as keys. The library does **not** cap key string length—enforce a maximum or digest in your **`keyGenerator`** if inputs are user-controlled. Use **`InMemoryShieldOptions.maxBlockedKeys`** and related limits where applicable.
+
+### Redis namespace (`keyPrefix`)
+
+`RedisStore` (and **`RedisBlockStore`**) prefix all logical keys. Use a **different** `keyPrefix` (and/or Redis **DB index**) per **application** or **tenant** when multiple services share one Redis so counters and blocks do not **collide**. Document the convention for your org.
+
+### Lua scripts (`RedisStore`)
+
+All Lua in `RedisStore` is **static source** in the package. Quota and key data are passed only as **`KEYS`** / **`ARGV`** to **`EVAL`**—never build Lua by concatenating user input into the script body.
+
+### Key Manager admin HTTP API
+
+**`createAdminRouter`** (Express) and **`createFastifyAdminPlugin`** expose full control over rate limit and block state. In **production**, mount them **only** behind **authentication**, **authorization**, and ideally **network isolation** (VPN, admin-only ingress). The JSDoc on those factories repeats this warning—treat it as mandatory for exposed deployments.
 
 ## Limiter composition
 
@@ -650,9 +785,19 @@ app.use(expressRateLimiter({
 
 ## Request queuing
 
+**Source of truth:** Full FIFO semantics, head-of-line blocking, and multi-key patterns are documented in JSDoc on [`src/queue/RateLimiterQueue.ts`](src/queue/RateLimiterQueue.ts) (`RateLimiterQueueOptions`, `RateLimiterQueue`). That file is the canonical explanation; this section summarizes it for README readers.
+
 **Typical use case:** Outbound API throttling (one queue per external API, single key for all requests).
 
-**Head-of-line blocking:** The queue is a single FIFO array. If you use multiple different keys with the same queue, a blocked request for key "A" will cause requests for key "B" to wait, even if "B" has capacity. For independent keys, create one queue per key instead (see examples below).
+**Head-of-line blocking (by design):** The queue is one **FIFO** array. If you share that queue across **different** keys, a waiting request for key **A** sits in front of a request for key **B** — even when **B** still has rate-limit capacity — because release order follows **enqueue** order, not per-key fairness.
+
+```mermaid
+flowchart LR
+  A["enqueue: key A — over limit, waits first"] --> B["enqueue: key B — has quota but queued after A"]
+  B --> C["B cannot skip ahead — one FIFO per RateLimiterQueue"]
+```
+
+**Advanced: many keys:** A `Map<string, RateLimiterQueue>` is the usual pattern. There is **no** built-in **`KeyedRateLimiterQueue`** in core: an unbounded map of queues can grow without limit. In production, **cap** entries (for example LRU eviction over keys) or accept bounded memory explicitly. A future helper could wrap this; until then, keep queue management in application code.
 
 ```typescript
 // Outbound API rate limiting (non-HTTP)
@@ -696,9 +841,11 @@ await app.register(fastifyQueuedRateLimiter, {
 // Fastify plugin automatically calls queue.shutdown() on server close
 ```
 
-**Multiple independent keys:** Create one queue per key to avoid head-of-line blocking:
+**One queue per key (recommended):**
 
 ```typescript
+import { createRateLimiterQueue, type RateLimiterQueue } from 'ratelimit-flex';
+
 // ❌ Bad: single queue with multiple keys causes head-of-line blocking
 const sharedQueue = createRateLimiterQueue({ maxRequests: 10, windowMs: 1000 });
 await sharedQueue.removeTokens('user:alice'); // Blocks...
@@ -881,6 +1028,8 @@ const app = express();
 app.use(expressRateLimiter(clusterPreset({ maxRequests: 100, windowMs: 60_000 })));
 ```
 
+**IPC protocol version:** Worker `init` and primary `init_ack` carry **`protocolVersion`** (constants **`CLUSTER_IPC_PROTOCOL_VERSION`** and **`MIN_CLUSTER_IPC_PROTOCOL_VERSION`** in [`src/cluster/protocol.ts`](src/cluster/protocol.ts)). During rolling deploys, if a worker’s version is **newer** than the primary, the primary responds with **`init_nack`** so the process fails fast instead of corrupting counters. Legacy peers that omit **`protocolVersion`** are treated as **version 1**.
+
 ### When to use RedisStore
 
 Use **RedisStore** when:
@@ -905,6 +1054,10 @@ app.use(expressRateLimiter({ store, strategy: RateLimitStrategy.SLIDING_WINDOW }
 ```
 
 Prefer passing a **shared Redis URL or client** from every instance. Use a **distinct key prefix** (`keyPrefix`) per app or per limiter if several services share one Redis.
+
+**Clients and adapters:** The default **`url`** path uses optional peer **`ioredis`**. For **`@redis/client`** (node-redis), **`adaptNodeRedisClient`**; for **ioredis**, **`adaptIoRedisClient`**—see **`RedisLikeClient`** in the API reference. **Bun** and **Upstash** need thin wrappers (Lua **`EVAL`** required); copy-paste starters live in **[`examples/redis/README.md`](examples/redis/README.md)** (not published packages—maintain locally).
+
+**Lua `EVAL`, `EVALSHA`, and connections:** **`RedisStore`** always invokes **`eval(fullScript, …)`** on your client. It does **not** embed **`EVALSHA`**. Clients often optimize repeated **`EVAL`** into **`EVALSHA`** after Redis caches the script. **Reuse one long-lived client per process** (or warm serverless instance) where possible—per-request connections add latency and can reduce script-cache hits on the Redis side.
 
 **Multi-window:** The convenience **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) creates one **`MemoryStore` per window**. It does **not** switch those slots to Redis automatically. For the same multi-window policy across horizontally scaled processes, build **`groupedWindowStores`** with one **`RedisStore`** (or other shared `RateLimitStore`) per slot.
 
@@ -1798,6 +1951,10 @@ Use **`increment`’s optional `{ maxRequests }`** for dynamic caps on window st
 Pass your store as **`store`** in middleware options.
 
 ## API reference
+
+**Generated reference (full surface):** From a git checkout, run **`npm run docs:api`** (requires devDependency **`typedoc`**) and open **`docs/api/index.html`**. This complements the table below and the [Configuration reference](#configuration-reference).
+
+**Recipes:** [docs/recipes.md](docs/recipes.md) — NestJS + GraphQL, Express behind a reverse proxy, Hono on Cloudflare Workers.
 
 | Export | Role |
 |--------|------|

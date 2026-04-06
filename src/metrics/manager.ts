@@ -29,7 +29,16 @@ export class MetricsManager {
 
   private readonly openTelemetryAdapter: OpenTelemetryAdapter | null;
 
-  constructor(config: MetricsConfig | boolean | undefined, shield?: InMemoryShield | null) {
+  /**
+   * @param shield — Same {@link InMemoryShield} reference the engine uses as `store` after
+   *   {@link resolveStoreWithInMemoryShield} (or `null` / omitted). {@link MetricsCollector} fills
+   *   `snapshot.shield` from `shield.getMetrics()`; request counters still reflect the path through
+   *   the engine. If multiple shields are stacked, only this instance is observed (usually the outer layer).
+   */
+  constructor(
+    config: MetricsConfig | boolean | undefined,
+    shield?: InMemoryShield | null,
+  ) {
     const normalized = normalizeMetricsConfig(config);
     this.normalized = normalized;
     if (normalized === undefined) {

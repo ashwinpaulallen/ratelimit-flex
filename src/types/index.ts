@@ -306,6 +306,8 @@ export interface RateLimitOptionsBase {
    * @default Framework fallback uses `req.ip`, then `socket.remoteAddress`, else `"unknown"` ({@link defaultKeyGenerator}).
    * @remarks
    * Behind reverse proxies, **`req.ip`** / **`socket.remoteAddress`** may identify the proxy unless the app is configured to trust forwarded client addresses (e.g. Express **`trust proxy`**, Fastify **`trustProxy`**). Otherwise limits can apply to the wrong identity. Prefer a custom **`keyGenerator`** (API key, user id) when IP is not reliable.
+   *
+   * **Abuse / cardinality:** Each distinct return value allocates state in memory stores, shield caches, Redis keys, etc. Avoid unbounded high-cardinality keys from raw user input (e.g. random query strings). Prefer normalized ids; hash or truncate if you must derive keys from untrusted strings. The library does not enforce a maximum key length—impose one in **`keyGenerator`** if needed.
    */
   keyGenerator?: (req: unknown) => string;
 

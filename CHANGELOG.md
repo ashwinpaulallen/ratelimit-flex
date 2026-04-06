@@ -2,6 +2,50 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.4.1] - unreleased
+
+### Added
+
+- **Tests:** Composed-store **minified `constructor.name`** subclass + **`resolveIncrementOpts`**; Nest **`RateLimitGuard`** regression when **`@RateLimit()`** merged options **change** for the same handler (route engine fingerprint / no stale cache); light **property-style** coverage for **`clamp`** sanitizers.
+
+- **Cluster IPC:** Worker **`init`** includes **`protocolVersion`**; primary replies with **`init_ack`** (negotiated version) or **`init_nack`** when the version is invalid, newer than **`CLUSTER_IPC_PROTOCOL_VERSION`**, or older than **`MIN_CLUSTER_IPC_PROTOCOL_VERSION`**. Exported from **`ratelimit-flex`**. README documents rolling-upgrade behavior.
+
+### Documentation
+
+- **NestJS deprecation:** **`NestRateLimitModuleOptions.global`** (alias of **`globalGuard`**) is **scheduled for removal in v3.0.0**. Migrate by renaming **`global`** → **`globalGuard`** in `RateLimitModule.forRoot` / `forRootAsync` options (values unchanged). README **NestJS: `globalGuard`** and **`NestRateLimitModuleOptions`** JSDoc describe the codemod.
+
+- **Discoverability:** **[`docs/recipes.md`](docs/recipes.md)** adds deployment recipes (**Nest + GraphQL**, **Express + reverse proxy**, **Hono on Cloudflare**). **`npm run docs:api`** generates **TypeDoc** HTML under **`docs/api/`** (gitignored). README **API reference** points to both.
+
+- **Security:** README **[Security and abuse](#security-and-abuse)** documents **key cardinality** / **`keyGenerator`**, Redis **`keyPrefix`** namespaces, **Lua** KEYS/ARGV (no user input in script text), and **Key Manager admin** routes behind **auth**. **`keyGenerator`**, **`RedisStore`**, and **`keyPrefix`** JSDoc cross-link the section.
+
+- **Redis:** **[`examples/redis/README.md`](examples/redis/README.md)** adds copy-paste adapter notes for **ioredis**, **`@redis/client`**, **Bun**, and **Upstash** (Lua **`EVAL`**), plus **`EVAL` / `EVALSHA`** and **serverless connection reuse**. README **When to use RedisStore** links to it; **`RedisStore`** JSDoc documents full-script **`eval`**. **`examples/`** is included in published **`files`**.
+
+- **Request queuing:** README **Request queuing** links to **`src/queue/RateLimiterQueue.ts`**, adds a **mermaid** diagram for multi-key head-of-line misuse, and documents why **`KeyedRateLimiterQueue`** is not in core (unbounded memory; use **`Map` + LRU** in app code). **`RateLimiterQueueOptions`** JSDoc references the README section.
+
+- **Hono:** README **Limitations** documents status-based rollback (Express **`skipFailedRequests`** / **`skipSuccessfulRequests`** semantics) via **`await next()`** + **`store.decrement`**, **`resolveIncrementOpts`**, **`HONO_RATE_LIMIT_INCREMENT_COST`**, and edge **`waitUntil`** notes. **`HONO_RATE_LIMIT_INCREMENT_COST`** is exported from **`ratelimit-flex/hono`**.
+
+- **`penaltyBox` vs `KeyManager`:** README explains why **`penaltyBox`** and a user-supplied **`keyManager`** are mutually exclusive, documents mapping to **`penaltyBlockThreshold`** / **`penaltyEscalation`**, and shows an **`onLimitReached` → `keyManager.penalty()`** migration snippet (the engine does not feed penalty points automatically).
+
+### Added
+
+- **In-memory shield:** When **`inMemoryBlock`** wraps a **`store` that is already an `InMemoryShield`**, non-production builds emit a **one-time** `console.warn` per shield instance (double-shielding); wrapping is not blocked. README and **`MetricsManager`** JSDoc clarify that periodic **`snapshot.shield`** metrics refer to the **outer** shield passed to the manager.
+
+- **NestJS:** **`RateLimitModuleLifecycle`** calls **`KeyManager.destroy()`** on module teardown when the key manager was **auto-created** from **`penaltyBox`** (no `keyManager` in `forRoot` / `forRootAsync`). User-supplied **`keyManager`** instances are **not** destroyed. **`KeyManager.dispose()`** is an alias of **`destroy()`**. See README **NestJS: KeyManager shutdown**.
+
+### Breaking changes (NestJS)
+
+- **`RateLimitDecoratorOptions`:** **`strategy` was removed.** Per-route strategy was never applied correctly (shared engine). Migrate: set `strategy` on `RateLimitModule.forRoot` / `forRootAsync`, use another `RateLimitModule`, or remove `strategy` from `@RateLimit(...)`. Legacy metadata with a conflicting `strategy` **throws** when `NODE_ENV !== 'production'`; in production the key is ignored.
+
+### Fixed
+
+- **NestJS:** `RateLimitGuard` re-merge of module options no longer trips the `penaltyBox` + `keyManager` mutual-exclusion check when both come from `forRoot` with `penaltyBox` (auto KeyManager). **`mergeRateLimiterOptions`** accepts optional **`allowPenaltyBoxWithKeyManager`**.
+
+- **NestJS:** Per-route **`RateLimitEngine`** cache is keyed by handler **and** an options **fingerprint** (`fingerprintRouteEngineOptions`), so a changed merged config for the same handler no longer reuses a stale engine.
+
+- **NestJS:** Conflicting per-route `strategy` metadata is **rejected** in development/test instead of silently warned.
+
+- **Composition:** `resolveIncrementOpts` no longer relies on `constructor.name === 'ComposedStore'` (unsafe with minifiers). Detection uses **`COMPOSED_STORE_BRAND`**, **`registerComposedStoreFacade`** / **`unregisterComposedStoreFacade`** (WeakMap, for opaque `Proxy` facades), optional **`COMPOSED_UNWRAP`** (e.g. `InMemoryShield` → inner), and a prototype-chain check (subclasses / forwarding proxies). **`isComposedStoreBrand()`** implements this; **`COMPOSED_UNWRAP`** is exported for custom wrappers.
+
 ## [2.4.0] - 2026-04-06
 
 ### Added

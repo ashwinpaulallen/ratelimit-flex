@@ -2,13 +2,19 @@ import 'reflect-metadata';
 import { Inject, Injectable, Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { KeyManager } from '../../src/key-manager/KeyManager.js';
 import { MemoryStore } from '../../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 import type { RateLimitStore } from '../../src/types/index.js';
 import { MetricsManager } from '../../src/metrics/manager.js';
 import { RateLimitModule } from '../../src/nestjs/RateLimitModule.js';
-import { RATE_LIMIT_METRICS, RATE_LIMIT_OPTIONS, RATE_LIMIT_STORE } from '../../src/nestjs/types.js';
+import {
+  RATE_LIMIT_KEY_MANAGER,
+  RATE_LIMIT_METRICS,
+  RATE_LIMIT_OPTIONS,
+  RATE_LIMIT_STORE,
+} from '../../src/nestjs/types.js';
 
 describe('RateLimitModule', () => {
   it('forRoot creates a working module with default MemoryStore', async () => {
@@ -77,6 +83,56 @@ describe('RateLimitModule', () => {
   it('forRoot defaults to global module and APP_GUARD', () => {
     const dm = RateLimitModule.forRoot({ maxRequests: 1 });
     expect(dm.global).toBe(true);
+  });
+
+  it('calls KeyManager.destroy on module close when KeyManager was auto-created from penaltyBox', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        RateLimitModule.forRoot({
+          maxRequests: 10,
+          windowMs: 60_000,
+          penaltyBox: {
+            violationsThreshold: 3,
+            penaltyDurationMs: 60_000,
+          },
+        }),
+      ],
+    }).compile();
+
+    const km = moduleRef.get(RATE_LIMIT_KEY_MANAGER);
+    expect(km).not.toBeNull();
+    const spy = vi.spyOn(km!, 'destroy');
+    await moduleRef.close();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call KeyManager.destroy on module close when user supplied keyManager', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 10,
+    });
+    const custom = new KeyManager({
+      store,
+      maxRequests: 10,
+      windowMs: 60_000,
+    });
+    const spy = vi.spyOn(custom, 'destroy');
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        RateLimitModule.forRoot({
+          store,
+          keyManager: custom,
+          maxRequests: 10,
+          windowMs: 60_000,
+        }),
+      ],
+    }).compile();
+
+    await moduleRef.close();
+    expect(spy).not.toHaveBeenCalled();
+    custom.destroy();
+    await store.shutdown();
   });
 
   it('forRootAsync resolves options from an async factory', async () => {

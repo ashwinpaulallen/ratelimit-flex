@@ -7,7 +7,7 @@ import type {
   ClusterStoreInitOptions,
   ClusterWorkerMessage,
 } from '../cluster/protocol.js';
-import { isRateLimitFlexMessage } from '../cluster/protocol.js';
+import { CLUSTER_IPC_PROTOCOL_VERSION, isRateLimitFlexMessage } from '../cluster/protocol.js';
 import { isPm2ManagedProcess } from '../utils/environment.js';
 import type {
   RateLimitDecrementOptions,
@@ -131,6 +131,7 @@ export class ClusterStore implements RateLimitStore {
       type: 'init',
       keyPrefix: this.keyPrefix,
       storeOptions,
+      protocolVersion: CLUSTER_IPC_PROTOCOL_VERSION,
     });
   }
 
@@ -169,6 +170,12 @@ export class ClusterStore implements RateLimitStore {
 
   private handleIncomingMessage(msg: unknown): void {
     if (!isRateLimitFlexMessage(msg)) return;
+
+    if (msg.type === 'init_nack') {
+      if (msg.keyPrefix !== this.keyPrefix) return;
+      this.failInit(new Error(msg.error));
+      return;
+    }
 
     if (msg.type === 'init_ack') {
       if (msg.keyPrefix !== this.keyPrefix) return;

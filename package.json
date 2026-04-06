@@ -132,6 +132,9 @@
   },
   "files": [
     "dist/",
+    "docs/recipes.md",
+    "examples/",
+    "typedoc.json",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -139,6 +142,7 @@
   "scripts": {
     "sync-version": "node scripts/sync-version.mjs",
     "build": "npm run sync-version && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "docs:api": "typedoc --options typedoc.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
@@ -168,6 +172,7 @@
     "reflect-metadata": "^0.2.2",
     "supertest": "^7.2.2",
     "tsx": "^4.21.0",
+    "typedoc": "^0.28.18",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
     "vitest": "^4.1.2"

@@ -132,6 +132,7 @@ export type RedisStoreOptions = RedisStoreStrategyOptions & {
   /**
    * @description Prefix for all keys written by this store.
    * @default `"rlf:"`
+   * @remarks Use a **distinct** prefix per application or tenant when several services share one Redis database so namespaces do not collide (see package README **Security and abuse**).
    */
   keyPrefix?: string;
   /**
@@ -538,6 +539,11 @@ type IoRedisInstance = {
  * @description Shares counters across nodes; use when multiple processes must enforce one global limit.
  * Supports {@link RateLimitIncrementOptions.cost} on all strategies; sliding window uses unique ZSET members per unit (crypto randomness from Node) so `ZADD` never merges distinct hits.
  * Pass either `client` (recommended) or `url` (loads optional peer `ioredis` at runtime).
+ *
+ * @remarks
+ * **Lua `EVAL`:** Each quota call uses {@link RedisLikeClient.eval} with the **full script source** every time.
+ * The library does not track `EVALSHA` itself; many Redis clients **cache** scripts server-side and may issue **`EVALSHA`** after the first load—connection reuse helps amortize cold-start cost (important in serverless / short-lived clients).
+ * **Lua safety:** All Lua bodies are **static strings** in this module; user-controlled data is passed only as Redis **KEYS** / **ARGV**, never concatenated into script source (see README **Security and abuse**).
  * @see {@link MemoryStore} — single-process alternative
  * @see {@link RedisErrorMode}
  * @since 1.0.0

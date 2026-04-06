@@ -1,3 +1,4 @@
+import { isComposedStoreBrand } from '../composition/composed-store-brand.js';
 import type { ComposedIncrementResult } from '../composition/types.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import {
@@ -103,7 +104,7 @@ function isWindowOpts(o: RateLimitOptions): o is WindowRateLimitOptions {
  * @param opts - Merged `RateLimitOptions` (including `store`).
  * @param req - Request (or arbitrary value) passed to `incrementCost` / `maxRequests` when they are functions.
  * @returns `undefined` when neither `maxRequests` nor `incrementCost` applies; otherwise `{ maxRequests?, cost? }`.
- * Static numeric {@link WindowRateLimitOptions.maxRequests} is forwarded for **single-window** configs so it overrides the store’s configured cap per increment (e.g. injected store vs merged options). Skipped for multi-slot configs and for composed stores (per-layer caps).
+ * Static numeric {@link WindowRateLimitOptions.maxRequests} is forwarded for **single-window** configs so it overrides the store’s configured cap per increment (e.g. injected store vs merged options). Skipped for multi-slot configs and for composed stores (per-layer caps), detected via {@link isComposedStoreBrand} (not `constructor.name`).
  * @since 1.3.1
  */
 export function resolveIncrementOpts(
@@ -125,16 +126,13 @@ export function resolveIncrementOpts(
   const hasMultiWindow =
     (w.limits !== undefined && w.limits.length > 0) ||
     (w.groupedWindowStores !== undefined && w.groupedWindowStores.length > 0);
-  const isComposedStore =
-    opts.store !== null &&
-    typeof opts.store === 'object' &&
-    (opts.store as { constructor?: { name?: string } }).constructor?.name === 'ComposedStore';
+  const isComposed = isComposedStoreBrand(opts.store);
 
   const mr = opts.maxRequests;
   const maxPart =
     typeof mr === 'function'
       ? { maxRequests: sanitizeRateLimitCap(mr(req), 100) }
-      : typeof mr === 'number' && !hasMultiWindow && !isComposedStore
+      : typeof mr === 'number' && !hasMultiWindow && !isComposed
         ? { maxRequests: sanitizeRateLimitCap(mr, 100) }
         : undefined;
 

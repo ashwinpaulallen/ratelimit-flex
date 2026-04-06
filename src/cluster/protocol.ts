@@ -1,3 +1,21 @@
+/**
+ * Current wire version for worker ↔ primary `init` / `init_ack` handshake.
+ * **Bump** when `init` payload shape or semantics change incompatibly so mixed deployments can reject
+ * unsafe pairings during rolling upgrades.
+ *
+ * @see {@link MIN_CLUSTER_IPC_PROTOCOL_VERSION}
+ * @since 2.4.1
+ */
+export const CLUSTER_IPC_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * Minimum `protocolVersion` on worker `init` that this primary still accepts.
+ * Raise only when older workers can no longer be supported.
+ *
+ * @since 2.4.1
+ */
+export const MIN_CLUSTER_IPC_PROTOCOL_VERSION = 1 as const;
+
 /** Discriminated union for worker → primary messages */
 export type ClusterWorkerMessage =
   | {
@@ -34,6 +52,11 @@ export type ClusterWorkerMessage =
       type: 'init';
       keyPrefix: string;
       storeOptions: ClusterStoreInitOptions;
+      /**
+       * Handshake version. Omit on legacy workers (treated as `1`).
+       * Must satisfy {@link MIN_CLUSTER_IPC_PROTOCOL_VERSION} ≤ v ≤ {@link CLUSTER_IPC_PROTOCOL_VERSION}.
+       */
+      protocolVersion?: number;
     };
 
 /** Primary → worker response */
@@ -69,6 +92,16 @@ export type ClusterPrimaryMessage =
       channel: 'rate_limiter_flex';
       type: 'init_ack';
       keyPrefix: string;
+      /** Negotiated protocol version (echo of worker request when in range). Omitted by legacy primaries. */
+      protocolVersion?: number;
+    }
+  | {
+      channel: 'rate_limiter_flex';
+      type: 'init_nack';
+      keyPrefix: string;
+      error: string;
+      /** Hint for workers: highest version this primary implements. */
+      supportedProtocolVersion?: number;
     };
 
 /** Options sent during init so primary can create the right MemoryStore */

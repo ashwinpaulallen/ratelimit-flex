@@ -47,10 +47,18 @@ declare module 'hono' {
  * Hono rate limiter options.
  *
  * @remarks
- * **Limitation:** `skipFailedRequests` and `skipSuccessfulRequests` (available in Express/Fastify adapters)
- * are not supported in the Hono adapter due to Hono's lack of built-in response lifecycle hooks. Hono does
- * not provide a stable `onResponse` hook equivalent to Express/Fastify, making it impossible to decrement
- * counters based on response status codes without significant complexity or relying on experimental features.
+ * **Limitation — no `skipFailedRequests` / `skipSuccessfulRequests`:** Unlike Express and Fastify, this
+ * adapter has no first-class “after response” hook that works the same on Node and edge. Hono does not
+ * expose a stable global `onResponse` equivalent, so the package cannot implement status-based rollback
+ * inside the middleware without runtime-specific hacks.
+ *
+ * **App-level workaround:** Run a middleware **after** `rateLimiter` that `await next()`s, then inspect
+ * `c.res.status` and call `store.decrement` with the same key and `matchingDecrementOptions` as the
+ * increment (see README **Hono → Limitations**). Use {@link HONO_RATE_LIMIT_INCREMENT_COST} on the
+ * Hono context when mirroring weighted {@link HonoRateLimitOptions.cost}. For Cloudflare Workers,
+ * non-blocking work can use `c.executionCtx.waitUntil(...)` — still app-specific.
+ *
+ * Core stays opinionated: no experimental `onResponse` option until a portable Hono API exists.
  */
 export interface HonoRateLimitOptions {
   /** Max requests per window */

@@ -68,6 +68,7 @@ describe('ClusterStorePrimary', () => {
         channel: 'rate_limiter_flex',
         type: 'init_ack',
         keyPrefix: 'p1',
+        protocolVersion: 1,
       });
     });
 
@@ -315,6 +316,60 @@ describe('ClusterStorePrimary', () => {
     });
 
     expect(worker.send).not.toHaveBeenCalled();
+  });
+
+  it('init with protocolVersion newer than primary sends init_nack', async () => {
+    const primary = ClusterStorePrimary.init();
+    const worker = mockWorker();
+
+    primary.handleMessage(worker, {
+      channel: 'rate_limiter_flex',
+      type: 'init',
+      keyPrefix: 'p-too-new',
+      storeOptions: {
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 1000,
+        maxRequests: 10,
+      },
+      protocolVersion: 2,
+    });
+
+    await vi.waitFor(() => {
+      expect(worker.send).toHaveBeenCalledWith({
+        channel: 'rate_limiter_flex',
+        type: 'init_nack',
+        keyPrefix: 'p-too-new',
+        error: expect.stringContaining('newer than this primary'),
+        supportedProtocolVersion: 1,
+      });
+    });
+  });
+
+  it('init with non-integer protocolVersion sends init_nack', async () => {
+    const primary = ClusterStorePrimary.init();
+    const worker = mockWorker();
+
+    primary.handleMessage(worker, {
+      channel: 'rate_limiter_flex',
+      type: 'init',
+      keyPrefix: 'p-bad',
+      storeOptions: {
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 1000,
+        maxRequests: 10,
+      },
+      protocolVersion: 1.5,
+    });
+
+    await vi.waitFor(() => {
+      expect(worker.send).toHaveBeenCalledWith({
+        channel: 'rate_limiter_flex',
+        type: 'init_nack',
+        keyPrefix: 'p-bad',
+        error: expect.stringContaining('invalid init.protocolVersion'),
+        supportedProtocolVersion: 1,
+      });
+    });
   });
 
   it('destroy() removes the cluster listener and clears singleton state', () => {

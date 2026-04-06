@@ -1,5 +1,6 @@
 import { matchingDecrementOptions } from '../strategies/rate-limit-engine.js';
 import { MemoryStore } from '../stores/memory-store.js';
+import { COMPOSED_STORE_BRAND, registerComposedStoreConstructor } from './composed-store-brand.js';
 import type {
   RateLimitActiveKeyEntry,
   RateLimitDecrementOptions,
@@ -185,6 +186,8 @@ function isIncrementResultStale(result: ComposedIncrementResult, now: number): b
  * @see {@link ComposedStoreOptions}
  */
 export class ComposedStore implements RateLimitStore {
+  readonly [COMPOSED_STORE_BRAND] = true;
+
   readonly mode: CompositionMode;
 
   readonly layers: readonly CompositionLayer[];
@@ -875,3 +878,5 @@ export class ComposedStore implements RateLimitStore {
     }
   }
 }
+
+registerComposedStoreConstructor(ComposedStore);

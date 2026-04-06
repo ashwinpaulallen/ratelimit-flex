@@ -497,7 +497,13 @@ export class KeyManager {
     }
   }
 
-  /** Clean up timers and resources */
+  /**
+   * Clean up timers and resources.
+   *
+   * @remarks Call when shutting down the process or disposing a long-lived app (e.g. Nest `onModuleDestroy`,
+   * tests, hot reload). Nest `RateLimitModule` calls this automatically for a KeyManager created from
+   * `penaltyBox` only; if you pass your own `keyManager` to `forRoot`, you must call `destroy()` yourself.
+   */
   destroy(): void {
     if (this.syncTimer !== null) {
       clearInterval(this.syncTimer);
@@ -511,6 +517,11 @@ export class KeyManager {
     this.adjustments.clear();
     this.auditLog.length = 0;
     this.emitter.removeAllListeners();
+  }
+
+  /** Alias of {@link destroy} for explicit teardown naming. */
+  dispose(): void {
+    this.destroy();
   }
 
   // --- internals -----------------------------------------------------------

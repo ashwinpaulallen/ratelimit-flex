@@ -1,0 +1,19 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "ratelimit-flex",
+  "entryPoints": [
+    "src/index.ts",
+    "src/fastify.ts",
+    "src/nestjs/index.ts",
+    "src/hono/index.ts",
+    "src/cluster/index.ts"
+  ],
+  "out": "docs/api",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "skipErrorChecking": true,
+  "navigation": {
+    "includeCategories": true
+  }
+}

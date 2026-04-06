@@ -26,9 +26,13 @@ import {
   authEndpointPreset,
   burstablePreset,
   clusterPreset,
+  CLUSTER_IPC_PROTOCOL_VERSION,
+  MIN_CLUSTER_IPC_PROTOCOL_VERSION,
   failoverPreset,
   ClusterStore,
   ClusterStorePrimary,
+  COMPOSED_STORE_BRAND,
+  COMPOSED_UNWRAP,
   ComposedStore,
   compose,
   createRateLimiter,
@@ -63,7 +67,10 @@ import {
   shield,
   slidingWindowDefaults,
   tokenBucketDefaults,
+  isComposedStoreBrand,
   isRateLimitFlexMessage,
+  registerComposedStoreFacade,
+  unregisterComposedStoreFacade,
 } from '../src/index.js';
 import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
@@ -171,6 +178,14 @@ describe('package exports', () => {
     }
   });
 
+  it('exports composed-store brand helpers', () => {
+    expect(typeof COMPOSED_STORE_BRAND).toBe('symbol');
+    expect(typeof COMPOSED_UNWRAP).toBe('symbol');
+    expect(typeof isComposedStoreBrand).toBe('function');
+    expect(typeof registerComposedStoreFacade).toBe('function');
+    expect(typeof unregisterComposedStoreFacade).toBe('function');
+  });
+
   it('exports stores and factory', () => {
     expect(MemoryStore).toBeDefined();
     expect(RedisStore).toBeDefined();
@@ -220,6 +235,8 @@ describe('package exports', () => {
 
   it('exports ClusterStore and cluster IPC helpers', () => {
     expect(ClusterStore).toBeDefined();
+    expect(CLUSTER_IPC_PROTOCOL_VERSION).toBe(1);
+    expect(MIN_CLUSTER_IPC_PROTOCOL_VERSION).toBe(1);
     expect(typeof isRateLimitFlexMessage).toBe('function');
     expect(
       isRateLimitFlexMessage({
@@ -244,6 +261,11 @@ describe('package exports', () => {
   it('exports honoDefaultKeyGenerator from Hono subpath', async () => {
     const { honoDefaultKeyGenerator } = await import('../src/hono/index.js');
     expect(typeof honoDefaultKeyGenerator).toBe('function');
+  });
+
+  it('exports HONO_RATE_LIMIT_INCREMENT_COST from Hono subpath', async () => {
+    const { HONO_RATE_LIMIT_INCREMENT_COST } = await import('../src/hono/index.js');
+    expect(HONO_RATE_LIMIT_INCREMENT_COST).toBe('ratelimitFlex:incrementCost');
   });
 
   it('Hono rateLimiter returns HonoRateLimiterHandler with metrics support', () => {

@@ -1,3 +1,4 @@
+import { COMPOSED_UNWRAP } from '../composition/composed-store-brand.js';
 import type {
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
@@ -78,6 +79,13 @@ export class InMemoryShield implements RateLimitStore {
         this.sweepTimer.unref();
       }
     }
+  }
+
+  /**
+   * Lets {@link isComposedStoreBrand} detect a {@link ComposedStore} behind this shield (e.g. `inMemoryBlock` + `limits`).
+   */
+  [COMPOSED_UNWRAP](): RateLimitStore {
+    return this.inner;
   }
 
   /**

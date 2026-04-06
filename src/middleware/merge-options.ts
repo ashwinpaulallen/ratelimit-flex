@@ -21,6 +21,9 @@ import type {
 import { RateLimitStrategy } from '../types/index.js';
 import { validateRateLimitHeaderOptions } from './validate-header-options.js';
 
+/** Dedupe dev warnings when the same shield instance is wrapped again (multiple limiters). */
+const warnedDoubleShieldStores = new WeakSet<object>();
+
 /** Same semantics as {@link resolveWindowMsForHeaders} without `bindingSlotIndex` (middleware setup). */
 function resolveWindowMsForShield(opts: RateLimitOptions): number {
   if (opts.strategy === RateLimitStrategy.TOKEN_BUCKET) {
@@ -174,6 +177,9 @@ function stripInMemoryBlock(resolved: RateLimitOptions): RateLimitOptions {
  * Optionally wraps `resolved.store` with `InMemoryShield` when `inMemoryBlock` is set.
  * Strips `inMemoryBlock` from the object passed to `RateLimitEngine`.
  *
+ * In **non-production**, if `store` is **already** an {@link InMemoryShield}, a **one-time** `console.warn`
+ * is emitted (double-shielding); wrapping still proceeds so intentional stacks remain possible.
+ *
  * @returns `shield` when wrapping applied; `null` when disabled or when the store is already a `MemoryStore`.
  */
 export function resolveStoreWithInMemoryShield(
@@ -191,6 +197,19 @@ export function resolveStoreWithInMemoryShield(
       '[ratelimit-flex] inMemoryBlock: ignoring MemoryStore (already in-memory; no remote store calls to save).',
     );
     return { optionsForEngine: stripped, shield: null };
+  }
+
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    resolved.store instanceof InMemoryShield &&
+    !warnedDoubleShieldStores.has(resolved.store)
+  ) {
+    warnedDoubleShieldStores.add(resolved.store);
+    console.warn(
+      '[ratelimit-flex] inMemoryBlock: `store` is already an InMemoryShield — applying another shield ' +
+        'layer (double-shielding). Usually you want a single shield or `inMemoryBlock` on the inner store only. ' +
+        'MetricsManager observes the outer shield only. Intentional stacking is OK; ignore if deliberate.',
+    );
   }
 
   const resolvedWindowMs = resolveWindowMsForShield(resolved);
@@ -215,9 +234,28 @@ export function resolveStoreWithInMemoryShield(
   };
 }
 
-export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
+/**
+ * Optional context for {@link mergeRateLimiterOptions} (e.g. Nest guard re-merge after
+ * {@link attachKeyManagerFromPenaltyBox} left both fields on module options).
+ */
+export type MergeRateLimiterOptionsContext = {
+  /**
+   * Skip the `penaltyBox` + `keyManager` mutual-exclusion check. Use only when both fields
+   * legitimately coexist (auto KeyManager from penalty box + engine still reads `penaltyBox`).
+   */
+  allowPenaltyBoxWithKeyManager?: boolean;
+};
+
+export function mergeRateLimiterOptions(
+  options: Partial<RateLimitOptions>,
+  ctx?: MergeRateLimiterOptionsContext,
+): RateLimitOptions {
   validateRateLimitHeaderOptions(options);
-  if (options.penaltyBox !== undefined && options.keyManager !== undefined) {
+  if (
+    !ctx?.allowPenaltyBoxWithKeyManager &&
+    options.penaltyBox !== undefined &&
+    options.keyManager !== undefined
+  ) {
     throw new Error(
       "Cannot use both 'penaltyBox' and 'keyManager' — use keyManager with penaltyBlockThreshold instead.",
     );

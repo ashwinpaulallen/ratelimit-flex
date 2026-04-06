@@ -26,6 +26,7 @@ import { RateLimitStrategy } from '../types/index.js';
 import type { WindowRateLimitOptions } from '../types/index.js';
 import { stripNestRateLimitModuleFields } from './strip-nest-module-fields.js';
 import { tryResolveGraphqlRequestResponse } from './resolve-graphql-req-res.js';
+import { fingerprintRouteEngineOptions } from './route-engine-fingerprint.js';
 import type { NestRateLimitModuleOptions, RateLimitDecoratorOptions } from './types.js';
 import {
   RATE_LIMIT_KEY_MANAGER,
@@ -55,6 +56,34 @@ function isPlainRouteLimitOptions(meta: unknown): meta is RateLimitDecoratorOpti
   );
 }
 
+/**
+ * Legacy or `as any` metadata may still include `strategy`. Per-route strategy cannot be honored with a
+ * shared engine; fail fast in development/test.
+ */
+function assertNoConflictingDecoratorStrategy(
+  route: RateLimitDecoratorOptions,
+  merged: RateLimitOptions,
+): void {
+  const raw = route as Record<string, unknown>;
+  if (!('strategy' in raw)) {
+    return;
+  }
+  const attempted = raw.strategy;
+  if (attempted === undefined || attempted === merged.strategy) {
+    return;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return;
+  }
+  throw new Error(
+    '[ratelimit-flex/nestjs] @RateLimit() cannot set `strategy` to a value that differs from the module default ' +
+      '(one shared engine and store per `RateLimitModule`). ' +
+      `Module strategy is ${String(merged.strategy)}; metadata attempted ${String(attempted)}. ` +
+      'Set `strategy` on `RateLimitModule.forRoot` / `forRootAsync`, use a separate feature module with its own ' +
+      '`RateLimitModule`, or remove `strategy` from route metadata. See README: "NestJS: limitations".',
+  );
+}
+
 function mergeRouteIntoOptions(
   base: RateLimitOptions,
   route: RateLimitDecoratorOptions | undefined,
@@ -72,15 +101,7 @@ function mergeRouteIntoOptions(
   if (route.cost !== undefined) {
     merged.incrementCost = route.cost;
   }
-  if (route.strategy !== undefined && route.strategy !== merged.strategy) {
-    // Per-route strategy changes require a compatible store; the guard keeps the module-level engine/strategy.
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        '[ratelimit-flex/nestjs] @RateLimit() `strategy` is ignored when it differs from the module default (store/engine are shared). ' +
-          `Decorator: ${String(route.strategy)}, module: ${String(merged.strategy)}.`,
-      );
-    }
-  }
+  assertNoConflictingDecoratorStrategy(route, merged);
   return merged;
 }
 
@@ -117,10 +138,13 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
 
   private metricsCollectorStarted = false;
 
-  /** Cache per-route engines keyed by handler (avoids new {@link RateLimitEngine} on every `@RateLimit()` request). */
+  /**
+   * Per-handler {@link RateLimitEngine} when `@RateLimit()` is used. Invalidated when
+   * {@link fingerprintRouteEngineOptions} changes (e.g. if merged options ever differ for the same handler).
+   */
   private readonly routeEngineCache = new WeakMap<
     (...args: never[]) => unknown,
-    RateLimitEngine
+    { engine: RateLimitEngine; fingerprint: string }
   >();
 
   constructor(
@@ -134,11 +158,14 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
     void _shield;
     this.metricsCounters = this.metricsManager?.getCounters() ?? undefined;
     const partial = stripNestRateLimitModuleFields(moduleOptions);
-    const merged = mergeRateLimiterOptions({
-      ...partial,
-      store: this.store,
-      keyManager: this.injectedKeyManager ?? partial.keyManager,
-    });
+    const merged = mergeRateLimiterOptions(
+      {
+        ...partial,
+        store: this.store,
+        keyManager: this.injectedKeyManager ?? partial.keyManager,
+      },
+      { allowPenaltyBoxWithKeyManager: true },
+    );
     const { optionsForEngine } = resolveStoreWithInMemoryShield(merged);
     this.resolved = optionsForEngine;
     this.engine = this.createEngine(optionsForEngine);
@@ -161,12 +188,14 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
       return this.createEngine(effectiveOpts);
     }
     const fn = handler as (...args: never[]) => unknown;
-    let cached = this.routeEngineCache.get(fn);
-    if (cached === undefined) {
-      cached = this.createEngine(effectiveOpts);
-      this.routeEngineCache.set(fn, cached);
+    const fingerprint = fingerprintRouteEngineOptions(effectiveOpts);
+    const cached = this.routeEngineCache.get(fn);
+    if (cached !== undefined && cached.fingerprint === fingerprint) {
+      return cached.engine;
     }
-    return cached;
+    const engine = this.createEngine(effectiveOpts);
+    this.routeEngineCache.set(fn, { engine, fingerprint });
+    return engine;
   }
 
   private ensureMetricsStarted(): void {

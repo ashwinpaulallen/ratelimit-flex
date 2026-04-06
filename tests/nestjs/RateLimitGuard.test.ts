@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { HttpException, type ExecutionContext } from '@nestjs/common';
+import { HttpException, SetMetadata, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,9 +9,12 @@ import { RateLimitStrategy } from '../../src/types/index.js';
 import { RateLimitGuard } from '../../src/nestjs/RateLimitGuard.js';
 import { RateLimit, SkipRateLimit } from '../../src/nestjs/decorators.js';
 import {
+  RATE_LIMIT_METADATA,
   RATE_LIMIT_OPTIONS,
+  RATE_LIMIT_SKIP_METADATA,
   RATE_LIMIT_STORE,
   type NestRateLimitModuleOptions,
+  type RateLimitDecoratorOptions,
 } from '../../src/nestjs/types.js';
 
 function createHttpContext(
@@ -82,6 +85,102 @@ describe('RateLimitGuard', () => {
     await expect(guard.canActivate(ctx)).rejects.toSatisfy((e: unknown) => {
       return e instanceof HttpException && e.getStatus() === 429;
     });
+  });
+
+  it('throws when legacy metadata sets a conflicting strategy (non-production)', async () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    try {
+      const guard = await createGuard({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        maxRequests: 10,
+        windowMs: 60_000,
+      });
+      class Bad {
+        x(): void {}
+      }
+      const d = Object.getOwnPropertyDescriptor(Bad.prototype, 'x');
+      if (!d) throw new Error('descriptor');
+      SetMetadata(RATE_LIMIT_METADATA, {
+        maxRequests: 1,
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+      })(Bad.prototype, 'x', d);
+
+      const req = { ip: '10.0.0.99' };
+      const res = { setHeader: vi.fn() };
+      const ctx = createHttpContext(req, res, Bad.prototype.x, Bad);
+
+      await expect(guard.canActivate(ctx)).rejects.toThrow(/strategy/);
+    } finally {
+      process.env.NODE_ENV = prev;
+    }
+  });
+
+  it('does not throw in production when legacy metadata strategy conflicts (strategy ignored)', async () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const guard = await createGuard({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        maxRequests: 2,
+        windowMs: 60_000,
+      });
+      class Ok {
+        x(): void {}
+      }
+      const d = Object.getOwnPropertyDescriptor(Ok.prototype, 'x');
+      if (!d) throw new Error('descriptor');
+      SetMetadata(RATE_LIMIT_METADATA, {
+        maxRequests: 1,
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+      })(Ok.prototype, 'x', d);
+
+      const req = { ip: '10.0.0.100' };
+      const res = { setHeader: vi.fn() };
+      const ctx = createHttpContext(req, res, Ok.prototype.x, Ok);
+
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(HttpException);
+    } finally {
+      process.env.NODE_ENV = prev;
+    }
+  });
+
+  it('does not reuse a stale per-route engine when merged @RateLimit options change (same handler)', async () => {
+    const handler = function dynamicRoute() {};
+    let routeMeta: RateLimitDecoratorOptions = { maxRequests: 1, windowMs: 60_000 };
+    const reflector = {
+      getAllAndOverride: vi.fn((key: unknown) => {
+        if (key === RATE_LIMIT_METADATA) {
+          return routeMeta;
+        }
+        if (key === RATE_LIMIT_SKIP_METADATA) {
+          return undefined;
+        }
+        return undefined;
+      }),
+    } as unknown as Reflector;
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        RateLimitGuard,
+        { provide: Reflector, useValue: reflector },
+        { provide: RATE_LIMIT_OPTIONS, useValue: { maxRequests: 100, windowMs: 60_000 } satisfies NestRateLimitModuleOptions },
+        { provide: RATE_LIMIT_STORE, useValue: store },
+      ],
+    }).compile();
+    const guard = moduleRef.get(RateLimitGuard);
+
+    const req = { ip: '10.0.0.dynamic' };
+    const res = { setHeader: vi.fn() };
+    class C {}
+    const ctx = createHttpContext(req, res, handler, C);
+
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
+    await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(HttpException);
+
+    routeMeta = { maxRequests: 10, windowMs: 60_000 };
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
   });
 
   it('applies @RateLimit decorator overrides (stricter cap)', async () => {

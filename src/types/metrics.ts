@@ -154,7 +154,9 @@ export interface MetricsCollectorOptions {
   readonly windowSize?: number;
   readonly onMetrics?: (snapshot: MetricsSnapshot) => void;
   /**
-   * When set, each snapshot includes {@link MetricsSnapshot.shield} from {@link InMemoryShield.getMetrics}.
+   * When set, each snapshot includes {@link MetricsSnapshot.shield} from {@link InMemoryShield.getMetrics}
+   * on **this** reference (the same instance the engine uses as `store` when middleware applies
+   * `inMemoryBlock`; stacked shields are not merged — observe the outer layer only).
    * @since 2.3.0
    */
   readonly shield?: InMemoryShield | null;
