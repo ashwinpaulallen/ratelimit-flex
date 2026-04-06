@@ -71,13 +71,8 @@ describe('RateLimitModule', () => {
     expect(() => moduleRef.get(APP_GUARD, { strict: true })).toThrow();
   });
 
-  it('forRoot deprecated global: false aliases globalGuard: false', async () => {
-    const dm = RateLimitModule.forRoot({ global: false, maxRequests: 5 });
-    expect(dm.global).toBe(false);
-    const moduleRef = await Test.createTestingModule({
-      imports: [dm],
-    }).compile();
-    expect(() => moduleRef.get(APP_GUARD, { strict: true })).toThrow();
+  it('throws if legacy global option is passed (v3 removal)', () => {
+    expect(() => RateLimitModule.forRoot({ maxRequests: 1, global: false } as never)).toThrow(/global/);
   });
 
   it('forRoot defaults to global module and APP_GUARD', () => {

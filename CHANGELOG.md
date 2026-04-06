@@ -2,37 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
-## [2.4.1] - unreleased
+## [Unreleased]
+
+### Fixed
+
+- **Hono:** **`skipFailedRequests`** / **`skipSuccessfulRequests`** use **`resolvedHonoRollbackStatus`** so missing **`c.res`**, **`c.res.status`** **0**, non-finite values, or codes outside **100–599** do not mis-trigger rollbacks (defaults to **200**). **`resolvedHonoRollbackStatus`** is exported from **`ratelimit-flex/hono`** for custom middleware.
+
+## [3.0.0] - 2026-04-06
+
+### Breaking changes
+
+- **NestJS:** Removed **`NestRateLimitModuleOptions.global`** and **`global`** on **`RateLimitModule.forRootAsync`**. Use **`globalGuard`** only (same boolean semantics). Passing an object that **still has own property `global`** throws a clear error at module registration time.
 
 ### Added
 
-- **Tests:** Composed-store **minified `constructor.name`** subclass + **`resolveIncrementOpts`**; Nest **`RateLimitGuard`** regression when **`@RateLimit()`** merged options **change** for the same handler (route engine fingerprint / no stale cache); light **property-style** coverage for **`clamp`** sanitizers.
+- **`KeyedRateLimiterQueue`** — LRU-bounded pool of **`RateLimiterQueue`** instances for many independent keys (see README **Request queuing**).
 
-- **Cluster IPC:** Worker **`init`** includes **`protocolVersion`**; primary replies with **`init_ack`** (negotiated version) or **`init_nack`** when the version is invalid, newer than **`CLUSTER_IPC_PROTOCOL_VERSION`**, or older than **`MIN_CLUSTER_IPC_PROTOCOL_VERSION`**. Exported from **`ratelimit-flex`**. README documents rolling-upgrade behavior.
+- **Hono:** **`skipFailedRequests`** and **`skipSuccessfulRequests`** on **`rateLimiter()`** — after **`await next()`**, decrements when **`c.res.status`** matches Express semantics. **`pretest`** runs **`sync-version`** so **`VERSION`** matches **`package.json`** before **`vitest`**.
 
-### Documentation
+### Documentation (historical / rolled up)
 
-- **NestJS deprecation:** **`NestRateLimitModuleOptions.global`** (alias of **`globalGuard`**) is **scheduled for removal in v3.0.0**. Migrate by renaming **`global`** → **`globalGuard`** in `RateLimitModule.forRoot` / `forRootAsync` options (values unchanged). README **NestJS: `globalGuard`** and **`NestRateLimitModuleOptions`** JSDoc describe the codemod.
+- **Discoverability:** `docs/recipes.md`, **`npm run docs:api`**, security, Redis examples, queuing notes, **`penaltyBox` vs Key Manager**, In-memory shield warnings — many items landed across **2.4.x**; see **2.4.0** below for the Nest/Hono integration entry points.
 
-- **Discoverability:** **[`docs/recipes.md`](docs/recipes.md)** adds deployment recipes (**Nest + GraphQL**, **Express + reverse proxy**, **Hono on Cloudflare**). **`npm run docs:api`** generates **TypeDoc** HTML under **`docs/api/`** (gitignored). README **API reference** points to both.
+### Tests & fixes (rolled up from planned 2.4.1)
 
-- **Security:** README **[Security and abuse](#security-and-abuse)** documents **key cardinality** / **`keyGenerator`**, Redis **`keyPrefix`** namespaces, **Lua** KEYS/ARGV (no user input in script text), and **Key Manager admin** routes behind **auth**. **`keyGenerator`**, **`RedisStore`**, and **`keyPrefix`** JSDoc cross-link the section.
+- **Tests:** Composed-store **minified `constructor.name`** + **`resolveIncrementOpts`**; Nest **`RateLimitGuard`** route-engine fingerprint regression; **`clamp`** property-style tests.
 
-- **Redis:** **[`examples/redis/README.md`](examples/redis/README.md)** adds copy-paste adapter notes for **ioredis**, **`@redis/client`**, **Bun**, and **Upstash** (Lua **`EVAL`**), plus **`EVAL` / `EVALSHA`** and **serverless connection reuse**. README **When to use RedisStore** links to it; **`RedisStore`** JSDoc documents full-script **`eval`**. **`examples/`** is included in published **`files`**.
+- **Cluster IPC:** **`protocolVersion`** handshake (**`init`** / **`init_ack`** / **`init_nack`**).
 
-- **Request queuing:** README **Request queuing** links to **`src/queue/RateLimiterQueue.ts`**, adds a **mermaid** diagram for multi-key head-of-line misuse, and documents why **`KeyedRateLimiterQueue`** is not in core (unbounded memory; use **`Map` + LRU** in app code). **`RateLimiterQueueOptions`** JSDoc references the README section.
+- **In-memory shield:** Non-production **double-wrap** warning when **`inMemoryBlock`** stacks on an existing **`InMemoryShield`**.
 
-- **Hono:** README **Limitations** documents status-based rollback (Express **`skipFailedRequests`** / **`skipSuccessfulRequests`** semantics) via **`await next()`** + **`store.decrement`**, **`resolveIncrementOpts`**, **`HONO_RATE_LIMIT_INCREMENT_COST`**, and edge **`waitUntil`** notes. **`HONO_RATE_LIMIT_INCREMENT_COST`** is exported from **`ratelimit-flex/hono`**.
-
-- **`penaltyBox` vs `KeyManager`:** README explains why **`penaltyBox`** and a user-supplied **`keyManager`** are mutually exclusive, documents mapping to **`penaltyBlockThreshold`** / **`penaltyEscalation`**, and shows an **`onLimitReached` → `keyManager.penalty()`** migration snippet (the engine does not feed penalty points automatically).
-
-### Added
-
-- **In-memory shield:** When **`inMemoryBlock`** wraps a **`store` that is already an `InMemoryShield`**, non-production builds emit a **one-time** `console.warn` per shield instance (double-shielding); wrapping is not blocked. README and **`MetricsManager`** JSDoc clarify that periodic **`snapshot.shield`** metrics refer to the **outer** shield passed to the manager.
-
-- **NestJS:** **`RateLimitModuleLifecycle`** calls **`KeyManager.destroy()`** on module teardown when the key manager was **auto-created** from **`penaltyBox`** (no `keyManager` in `forRoot` / `forRootAsync`). User-supplied **`keyManager`** instances are **not** destroyed. **`KeyManager.dispose()`** is an alias of **`destroy()`**. See README **NestJS: KeyManager shutdown**.
-
-### Breaking changes (NestJS)
+### Breaking changes (NestJS) — from 2.4.x line
 
 - **`RateLimitDecoratorOptions`:** **`strategy` was removed.** Per-route strategy was never applied correctly (shared engine). Migrate: set `strategy` on `RateLimitModule.forRoot` / `forRootAsync`, use another `RateLimitModule`, or remove `strategy` from `@RateLimit(...)`. Legacy metadata with a conflicting `strategy` **throws** when `NODE_ENV !== 'production'`; in production the key is ignored.
 
@@ -45,6 +45,7 @@ All notable changes to this project are documented in this file.
 - **NestJS:** Conflicting per-route `strategy` metadata is **rejected** in development/test instead of silently warned.
 
 - **Composition:** `resolveIncrementOpts` no longer relies on `constructor.name === 'ComposedStore'` (unsafe with minifiers). Detection uses **`COMPOSED_STORE_BRAND`**, **`registerComposedStoreFacade`** / **`unregisterComposedStoreFacade`** (WeakMap, for opaque `Proxy` facades), optional **`COMPOSED_UNWRAP`** (e.g. `InMemoryShield` → inner), and a prototype-chain check (subclasses / forwarding proxies). **`isComposedStoreBrand()`** implements this; **`COMPOSED_UNWRAP`** is exported for custom wrappers.
+
 
 ## [2.4.0] - 2026-04-06
 
@@ -59,7 +60,7 @@ All notable changes to this project are documented in this file.
   - `honoDefaultKeyGenerator` exported for custom key generator composition
   - `inMemoryBlock` support in both `rateLimiter` and `queuedRateLimiter` for DoS protection
   - Error handling wrapper for graceful failure recovery
-  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` not supported due to Hono's lack of response lifecycle hooks
+  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` were added on **`rateLimiter()`** in **3.0.0** (after **`await next()`**, using **`c.res.status`**).
 
 ### Changed
 
@@ -67,7 +68,7 @@ All notable changes to this project are documented in this file.
 
 ### Breaking changes
 
-- **NestJS (`RateLimitModule.forRoot` / `forRootAsync`):** If you previously passed **`global: false`** (or **`globalGuard: false`**) only to **disable automatic `APP_GUARD` registration** while still relying on the module being a **Nest global module** (so `RATE_LIMIT_*` tokens were available everywhere without importing `RateLimitModule` again), behavior has changed: **`false` now also sets `DynamicModule.global` to `false`**, so those tokens are no longer re-exported app-wide unless you import `RateLimitModule` where needed (or register the guard manually with `@UseGuards(RateLimitGuard)` and import the module for DI). Prefer the new name **`globalGuard`**; **`global`** remains as a deprecated alias. See `NestRateLimitModuleOptions` JSDoc in `types.ts`.
+- **NestJS (`RateLimitModule.forRoot` / `forRootAsync`):** If you previously passed **`globalGuard: false`** only to **disable automatic `APP_GUARD` registration** while still relying on the module being a **Nest global module** (so `RATE_LIMIT_*` tokens were available everywhere without importing `RateLimitModule` again), behavior has changed: **`false` now also sets `DynamicModule.global` to `false`**, so those tokens are no longer re-exported app-wide unless you import `RateLimitModule` where needed (or register the guard manually with `@UseGuards(RateLimitGuard)` and import the module for DI). The deprecated **`global`** option was removed in **3.0.0** — use **`globalGuard`** only.
 
 ## [2.3.0] - 2026-04-07
 

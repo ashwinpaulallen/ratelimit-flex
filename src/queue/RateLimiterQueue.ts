@@ -62,8 +62,8 @@ export class RateLimiterQueueError extends Error {
  * await getQueue('bob').removeTokens('user:bob');     // Independent
  * ```
  *
- * **See also:** Package README — **Request queuing** (diagram, multi-key misuse, LRU / unbounded `Map` note;
- * no built-in `KeyedRateLimiterQueue` in core).
+ * **See also:** Package README — **Request queuing** (diagram, multi-key misuse). For bounded LRU pools of
+ * queues, use {@link KeyedRateLimiterQueue}.
  */
 export interface RateLimiterQueueOptions {
   /** Maximum number of requests waiting in the queue. Default: Infinity */

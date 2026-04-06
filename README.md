@@ -155,15 +155,15 @@ More context: `docs/IMPROVEMENTS.md` (§3.2, §3.3).
 - **`await app.close()`** (or closing the testing module) runs lifecycle teardown and clears Key Manager intervals in the auto-created case.
 - For non-Nest apps, call **`keyManager.destroy()`** when tearing down the process or before hot reload in development.
 
-### NestJS: `globalGuard`, `global`, and module scope (2.4+)
+### NestJS: `globalGuard` and module scope
 
-Use **`globalGuard`** (preferred); **`global`** is deprecated but behaves the same. When **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
+When **`globalGuard`** is **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
 
-When **`globalGuard: false`** (or **`global: false`**), the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
+When **`globalGuard: false`**, the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
 
-**Deprecation:** The **`global`** option is scheduled for **removal in v3.0.0**. **Codemod:** in every `RateLimitModule.forRoot({ ... })` and `RateLimitModule.forRootAsync({ ... })` configuration object, rename the property **`global`** to **`globalGuard`** (keep the same boolean value). Example: `global: false` → `globalGuard: false`. If you build options in a variable, rename the field there too.
+**Migrating from `global`:** **`NestRateLimitModuleOptions.global`** was removed in **v3.0.0**. Rename **`global`** → **`globalGuard`** with the same boolean value everywhere.
 
-**Upgrading:** If you previously used **`global: false`** only to disable automatic **`APP_GUARD`** while still relying on the module being **global** for `RATE_LIMIT_*` tokens app-wide, that combination is no longer available—`false` now means both “no `APP_GUARD`” and “not a global module.” See the **Breaking changes** entry for 2.4.0 in `CHANGELOG.md`.
+**Upgrading from 2.3.x:** If you relied on **`global: false`** only to disable **`APP_GUARD`** while keeping the module **global** for tokens app-wide, that split is not supported—**`false`** means both “no `APP_GUARD`” and “not a global module.” See **`CHANGELOG.md`** (2.4.0 / 3.0.0).
 
 ## Hono
 
@@ -261,14 +261,9 @@ app.get(
 
 ### Hono Limitations
 
-**`skipFailedRequests` / `skipSuccessfulRequests` are not built in.** Express and Fastify run rollback after the response is finalized (`res` `finish` / `onResponse`). Hono has no portable, first-class equivalent that behaves the same on Node servers and edge runtimes, so this adapter does not implement those flags. If you need them unchanged, use the Express or Fastify adapters.
+**`skipFailedRequests` / `skipSuccessfulRequests`:** Pass them to **`rateLimiter({ ... })`** — the middleware **`await`s `next()`** after a successful consume, then uses **`resolvedHonoRollbackStatus`** (exported from **`ratelimit-flex/hono`**) so a missing **`c.res`**, **`0`**, or invalid **`c.res.status`** values are treated as **200** before applying the rollback rule. Decrements use **`resolveIncrementOpts`** / **`matchingDecrementOptions`** (same semantics as Express / Fastify for weighted and grouped windows).
 
-**App-specific recipe (rollback after `await next()`):** Register middleware **after** `rateLimiter` that awaits downstream work, then matches the final status to Express semantics:
-
-- **`skipFailedRequests: true`** → decrement when **`status >= 400`** (failed responses do not consume quota).
-- **`skipSuccessfulRequests: true`** → decrement when **`status < 400`** (successful responses do not consume quota).
-
-Use the **same** `store`, `keyGenerator`, and limiter options as the limiter. Match the increment **`cost`** with `resolveIncrementOpts` / `matchingDecrementOptions` (same helpers Express uses). For weighted limits, read the per-request cost from **`HONO_RATE_LIMIT_INCREMENT_COST`** on the Hono `Context` (exported from `ratelimit-flex/hono`).
+**Advanced / grouped-only recipes:** For unusual setups where status alone is not enough, you can still add middleware **after** `rateLimiter` and call **`store.decrement`** yourself (see below). Use **`HONO_RATE_LIMIT_INCREMENT_COST`** for weighted **`cost`** on the Hono `Context`.
 
 ```typescript
 import { Hono } from 'hono';
@@ -797,7 +792,19 @@ flowchart LR
   B --> C["B cannot skip ahead — one FIFO per RateLimiterQueue"]
 ```
 
-**Advanced: many keys:** A `Map<string, RateLimiterQueue>` is the usual pattern. There is **no** built-in **`KeyedRateLimiterQueue`** in core: an unbounded map of queues can grow without limit. In production, **cap** entries (for example LRU eviction over keys) or accept bounded memory explicitly. A future helper could wrap this; until then, keep queue management in application code.
+**Advanced: many keys:** Use **`KeyedRateLimiterQueue`** for an **LRU-bounded** map of inner queues (same window options as **`createRateLimiterQueue`**, plus **`maxKeys`**). You can still use a plain **`Map<string, RateLimiterQueue>`** if you manage eviction yourself.
+
+```typescript
+// Bounded multi-key queues (LRU eviction)
+import { KeyedRateLimiterQueue } from 'ratelimit-flex';
+
+const keyed = new KeyedRateLimiterQueue({
+  maxRequests: 10,
+  windowMs: 60_000,
+  maxKeys: 2_000,
+});
+await keyed.removeTokens('tenant-a', 'tenant-a');
+```
 
 ```typescript
 // Outbound API rate limiting (non-HTTP)

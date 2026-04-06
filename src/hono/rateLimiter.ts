@@ -13,7 +13,11 @@ import {
   resolveStoreWithInMemoryShield,
   toRateLimitInfo,
 } from '../middleware/merge-options.js';
-import { RateLimitEngine } from '../strategies/rate-limit-engine.js';
+import {
+  RateLimitEngine,
+  matchingDecrementOptions,
+  resolveIncrementOpts,
+} from '../strategies/rate-limit-engine.js';
 import type { InMemoryShieldOptions } from '../shield/types.js';
 import type {
   RateLimitConsumeResult,
@@ -21,13 +25,14 @@ import type {
   RateLimitOptions,
   RateLimitStore,
   RateLimitStrategy,
+  WindowRateLimitOptions,
 } from '../types/index.js';
 import type { StandardHeadersDraft } from '../types/index.js';
 import type { MetricsConfig } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { MetricsManager } from '../metrics/manager.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
-import { applyHeadersToContext, toContentfulStatus } from './utils.js';
+import { applyHeadersToContext, resolvedHonoRollbackStatus, toContentfulStatus } from './utils.js';
 
 /** Internal context key for per-request weighted cost (see {@link HonoRateLimitOptions.cost}). */
 export const HONO_RATE_LIMIT_INCREMENT_COST = 'ratelimitFlex:incrementCost' as const;
@@ -47,18 +52,11 @@ declare module 'hono' {
  * Hono rate limiter options.
  *
  * @remarks
- * **Limitation — no `skipFailedRequests` / `skipSuccessfulRequests`:** Unlike Express and Fastify, this
- * adapter has no first-class “after response” hook that works the same on Node and edge. Hono does not
- * expose a stable global `onResponse` equivalent, so the package cannot implement status-based rollback
- * inside the middleware without runtime-specific hacks.
- *
- * **App-level workaround:** Run a middleware **after** `rateLimiter` that `await next()`s, then inspect
- * `c.res.status` and call `store.decrement` with the same key and `matchingDecrementOptions` as the
- * increment (see README **Hono → Limitations**). Use {@link HONO_RATE_LIMIT_INCREMENT_COST} on the
- * Hono context when mirroring weighted {@link HonoRateLimitOptions.cost}. For Cloudflare Workers,
- * non-blocking work can use `c.executionCtx.waitUntil(...)` — still app-specific.
- *
- * Core stays opinionated: no experimental `onResponse` option until a portable Hono API exists.
+ * **`skipFailedRequests` / `skipSuccessfulRequests`:** When set, the middleware **`await`s `next()`** after a
+ * successful consume, then uses {@link resolvedHonoRollbackStatus} and decrements when the status matches
+ * Express / Fastify semantics (failed ≥ `400` vs successful `< 400`). Uses
+ * {@link resolveIncrementOpts} / {@link matchingDecrementOptions} for weighted / grouped windows.
+ * For modes that need a different rule than HTTP status, add a follow-up middleware (README **Hono → Limitations**).
  */
 export interface HonoRateLimitOptions {
   /** Max requests per window */
@@ -121,6 +119,19 @@ export interface HonoRateLimitOptions {
    * Omit to propagate only; use `app.onError()` for response formatting.
    */
   onError?: (err: unknown, c: Context) => void | Promise<void>;
+
+  /**
+   * After `await next()`, decrement when the resolved status is **≥ 400** (same as Express
+   * {@link RateLimitOptions.skipFailedRequests}). Status is read from **`c.res`** via
+   * {@link resolvedHonoRollbackStatus} (invalid or missing codes default to **200**).
+   */
+  skipFailedRequests?: boolean;
+
+  /**
+   * After `await next()`, decrement when the resolved status is **< 400** (same as Express
+   * {@link RateLimitOptions.skipSuccessfulRequests}). See {@link resolvedHonoRollbackStatus}.
+   */
+  skipSuccessfulRequests?: boolean;
 }
 
 export function honoDefaultKeyGenerator(c: Context): string {
@@ -149,6 +160,8 @@ function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLim
     identifier: h.identifier,
     inMemoryBlock: h.inMemoryBlock,
     metrics: h.metrics,
+    skipFailedRequests: h.skipFailedRequests,
+    skipSuccessfulRequests: h.skipSuccessfulRequests,
     incrementCost: (req: unknown) => {
       const ctx = req as Context;
       const v = ctx.get(HONO_RATE_LIMIT_INCREMENT_COST);
@@ -158,6 +171,23 @@ function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLim
       return 1;
     },
   };
+}
+
+function honoDecrementAfterResponse(resolved: RateLimitOptions, key: string, req: unknown): void {
+  const incOpts = resolveIncrementOpts(resolved, req);
+  const decOpts = matchingDecrementOptions(incOpts);
+  const w = resolved as WindowRateLimitOptions;
+  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
+    for (const g of w.groupedWindowStores) {
+      void g.store.decrement(key, decOpts).catch(() => {
+        /* ignore */
+      });
+    }
+    return;
+  }
+  void resolved.store.decrement(key, decOpts).catch(() => {
+    /* ignore */
+  });
 }
 
 async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<number> {
@@ -307,7 +337,19 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
       c.set('rateLimitResult', result);
       c.set('rateLimit', toRateLimitInfo(resolved, result, c));
 
-      return next();
+      await next();
+
+      const shouldDecrementFailed = resolved.skipFailedRequests === true;
+      const shouldDecrementSuccess = resolved.skipSuccessfulRequests === true;
+      if (shouldDecrementFailed || shouldDecrementSuccess) {
+        const status = resolvedHonoRollbackStatus(c);
+        const failed = status >= 400;
+        const success = status < 400;
+        if ((shouldDecrementFailed && failed) || (shouldDecrementSuccess && success)) {
+          honoDecrementAfterResponse(resolved, key, c);
+        }
+      }
+      return;
     } catch (err: unknown) {
       if (options.onError !== undefined) {
         await Promise.resolve(options.onError(err, c));

@@ -38,6 +38,7 @@ import {
   createRateLimiter,
   createRateLimiterQueue,
   createRateLimitEngine,
+  KeyedRateLimiterQueue,
   expressQueuedRateLimiter,
   createStore,
   defaultKeyGenerator,
@@ -106,6 +107,13 @@ describe('package exports', () => {
     const q = createRateLimiterQueue({ maxRequests: 1, windowMs: 60_000 });
     expect(typeof q.removeTokens).toBe('function');
     q.shutdown();
+  });
+
+  it('exports KeyedRateLimiterQueue', () => {
+    expect(typeof KeyedRateLimiterQueue).toBe('function');
+    const k = new KeyedRateLimiterQueue({ maxRequests: 1, windowMs: 60_000, maxKeys: 2 });
+    expect(typeof k.forKey).toBe('function');
+    k.shutdown();
   });
 
   it('exports expressQueuedRateLimiter and RateLimiterQueue surface', () => {
@@ -266,6 +274,11 @@ describe('package exports', () => {
   it('exports HONO_RATE_LIMIT_INCREMENT_COST from Hono subpath', async () => {
     const { HONO_RATE_LIMIT_INCREMENT_COST } = await import('../src/hono/index.js');
     expect(HONO_RATE_LIMIT_INCREMENT_COST).toBe('ratelimitFlex:incrementCost');
+  });
+
+  it('exports resolvedHonoRollbackStatus from Hono subpath', async () => {
+    const { resolvedHonoRollbackStatus } = await import('../src/hono/index.js');
+    expect(typeof resolvedHonoRollbackStatus).toBe('function');
   });
 
   it('Hono rateLimiter returns HonoRateLimiterHandler with metrics support', () => {

@@ -19,15 +19,19 @@ import {
 
 export { RATE_LIMIT_MODULE_INIT, type RateLimitModuleInit } from './rate-limit-module-init.js';
 
+function assertNoRemovedGlobal(options: object, context: string): void {
+  if (Object.prototype.hasOwnProperty.call(options, 'global')) {
+    throw new Error(
+      `[ratelimit-flex/nestjs] \`global\` was removed in v3.0.0 (${context}). Use \`globalGuard\` instead (same boolean values).`,
+    );
+  }
+}
+
 @Module({})
 export class RateLimitModule {
-  /** `globalGuard ?? global` — default true; `false` disables both APP_GUARD and Nest global module registration. */
-  private static resolveRegisterGlobal(opts: {
-    globalGuard?: boolean;
-    global?: boolean;
-  }): boolean {
-    const v = opts.globalGuard ?? opts.global;
-    return v !== false;
+  /** Default true; `false` disables both APP_GUARD and Nest global module registration. */
+  private static resolveRegisterGlobal(opts: { globalGuard?: boolean }): boolean {
+    return opts.globalGuard !== false;
   }
 
   /**
@@ -46,6 +50,7 @@ export class RateLimitModule {
    * export class AppModule {}
    */
   static forRoot(options: NestRateLimitModuleOptions = {}): DynamicModule {
+    assertNoRemovedGlobal(options, 'RateLimitModule.forRoot');
     const init = RateLimitModule.finalizeOptions(options);
     const registerGlobal = RateLimitModule.resolveRegisterGlobal(options);
     const providers = RateLimitModule.createProvidersFromInit(init, registerGlobal);
@@ -86,11 +91,8 @@ export class RateLimitModule {
      * {@link NestRateLimitModuleOptions.globalGuard} on {@link forRoot}). Default: true.
      */
     globalGuard?: boolean;
-    /**
-     * @deprecated Use `globalGuard` instead. Removed in v3.0.0 — same codemod as {@link NestRateLimitModuleOptions.global}.
-     */
-    global?: boolean;
   }): DynamicModule {
+    assertNoRemovedGlobal(asyncOptions, 'RateLimitModule.forRootAsync');
     const registerGlobal = RateLimitModule.resolveRegisterGlobal(asyncOptions);
     const providers: Provider[] = [
       {

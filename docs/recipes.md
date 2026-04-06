@@ -32,4 +32,4 @@ See [Client IP & reverse proxies](../README.md#client-ip-and-reverse-proxies).
 3. **Redis / I/O:** A TCP **`RedisStore`** is only appropriate if your Worker runtime supports outbound Redis (some do via **Hyperdrive** or similar). Otherwise use **`MemoryStore`** knowing limits are per isolate, or a HTTP-compatible store if you add one.
 4. **Lifecycle:** For non-blocking work after the response (e.g. custom rollback patterns), Cloudflare’s **`executionCtx.waitUntil`** may be available on the execution context — see [Hono limitations](../README.md#hono-limitations) in the README and `HonoRateLimitOptions` JSDoc in the source tree.
 
-`skipFailedRequests` / `skipSuccessfulRequests` are **not** built into the Hono adapter; use the documented **`await next()`** + `store.decrement` pattern if you need status-based rollback.
+**Hono:** Pass **`skipFailedRequests` / `skipSuccessfulRequests`** to **`rateLimiter()`** (v3.0.0+), or use the manual **`await next()`** + **`store.decrement`** pattern from the README if you need extra control.

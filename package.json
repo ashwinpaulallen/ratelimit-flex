@@ -1,6 +1,6 @@
 {
   "name": "ratelimit-flex",
-  "version": "2.4.0",
+  "version": "3.0.0",
   "description": "Flexible rate limiting for Node.js (Express, Fastify, sliding window, token bucket)",
   "license": "MIT",
   "keywords": [
@@ -143,6 +143,7 @@
     "sync-version": "node scripts/sync-version.mjs",
     "build": "npm run sync-version && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "docs:api": "typedoc --options typedoc.json",
+    "pretest": "npm run sync-version",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",

@@ -3,7 +3,7 @@
  *
  * @description
  * - Default export: {@link expressRateLimiter}
- * - Queued limits: {@link expressQueuedRateLimiter}, {@link createRateLimiterQueue}, {@link RateLimiterQueue}
+ * - Queued limits: {@link expressQueuedRateLimiter}, {@link createRateLimiterQueue}, {@link RateLimiterQueue}, {@link KeyedRateLimiterQueue}
  * - Fastify: import `fastifyRateLimiter` / `fastifyQueuedRateLimiter` from `ratelimit-flex/fastify`
  * - Types: re-exported from `./types/index.js`
  * - Resilience: {@link CircuitBreaker}, {@link RedisResilienceOptions}, {@link resilientRedisPreset}, related types
@@ -186,6 +186,10 @@ export {
   type RateLimiterQueueOptions,
   type RateLimiterQueueResult,
 } from './queue/RateLimiterQueue.js';
+export {
+  KeyedRateLimiterQueue,
+  type KeyedRateLimiterQueueOptions,
+} from './queue/KeyedRateLimiterQueue.js';
 
 /**
  * Express middleware that **queues** over-limit requests instead of responding with 429 immediately.

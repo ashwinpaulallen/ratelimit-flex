@@ -15,13 +15,6 @@ export type NestRateLimitModuleOptions = Partial<RateLimitOptions> & {
   globalGuard?: boolean;
 
   /**
-   * @deprecated Use {@link NestRateLimitModuleOptions.globalGuard} instead (same behavior).
-   * Scheduled for removal in **v3.0.0**. Codemod: rename this key to `globalGuard` in `forRoot` / `forRootAsync`
-   * options (values unchanged). See `CHANGELOG.md` and README **NestJS: `globalGuard`**.
-   */
-  global?: boolean;
-
-  /**
    * Custom key generator that receives the NestJS ExecutionContext.
    * More powerful than the base keyGenerator because you have access to
    * the handler, class, and request type (HTTP, WS, RPC, GQL).

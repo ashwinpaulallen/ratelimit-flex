@@ -75,6 +75,7 @@ function createDefaultMemoryStore(
  * ```
  * 
  * @see {@link RateLimiterQueueOptions} for more details on head-of-line blocking
+ * @see {@link KeyedRateLimiterQueue} when you need **many** keys with **LRU-bounded** memory
  */
 export function createRateLimiterQueue(options: CreateRateLimiterQueueOptions): RateLimiterQueue {
   const strategy = options.strategy ?? RateLimitStrategy.SLIDING_WINDOW;

@@ -8,7 +8,6 @@ export function stripNestRateLimitModuleFields(
   nest: NestRateLimitModuleOptions,
 ): Partial<RateLimitOptions> {
   const {
-    global: _g,
     globalGuard: _gg,
     getRequestResponse: _grr,
     errorFactory: _ef,
@@ -16,7 +15,6 @@ export function stripNestRateLimitModuleFields(
     keyGenerator: _kg,
     ...rest
   } = nest;
-  void _g;
   void _gg;
   void _grr;
   void _ef;
