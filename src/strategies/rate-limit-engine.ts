@@ -102,7 +102,8 @@ function isWindowOpts(o: RateLimitOptions): o is WindowRateLimitOptions {
  * @description Used by {@link RateLimitEngine} and framework middleware for weighted increments and matching decrements.
  * @param opts - Merged `RateLimitOptions` (including `store`).
  * @param req - Request (or arbitrary value) passed to `incrementCost` / `maxRequests` when they are functions.
- * @returns `undefined` when neither a dynamic `maxRequests` nor `incrementCost` applies; otherwise `{ maxRequests?, cost? }`.
+ * @returns `undefined` when neither `maxRequests` nor `incrementCost` applies; otherwise `{ maxRequests?, cost? }`.
+ * Static numeric {@link WindowRateLimitOptions.maxRequests} is forwarded for **single-window** configs so it overrides the store’s configured cap per increment (e.g. injected store vs merged options). Skipped for multi-slot configs and for composed stores (per-layer caps).
  * @since 1.3.1
  */
 export function resolveIncrementOpts(
@@ -120,11 +121,22 @@ export function resolveIncrementOpts(
     return costPart ? { ...costPart } : undefined;
   }
 
+  const w = opts as WindowRateLimitOptions;
+  const hasMultiWindow =
+    (w.limits !== undefined && w.limits.length > 0) ||
+    (w.groupedWindowStores !== undefined && w.groupedWindowStores.length > 0);
+  const isComposedStore =
+    opts.store !== null &&
+    typeof opts.store === 'object' &&
+    (opts.store as { constructor?: { name?: string } }).constructor?.name === 'ComposedStore';
+
   const mr = opts.maxRequests;
   const maxPart =
     typeof mr === 'function'
       ? { maxRequests: sanitizeRateLimitCap(mr(req), 100) }
-      : undefined;
+      : typeof mr === 'number' && !hasMultiWindow && !isComposedStore
+        ? { maxRequests: sanitizeRateLimitCap(mr, 100) }
+        : undefined;
 
   if (!maxPart && !costPart) {
     return undefined;
