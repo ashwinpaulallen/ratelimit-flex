@@ -93,6 +93,34 @@ describe('queuedRateLimiter (Hono)', () => {
     expect(rejected.headers.get('retry-after')).toBe('1');
   });
 
+  it('queue rejection uses message function when set (same as rateLimiter)', async () => {
+    const app = new Hono();
+    app.use(
+      '*',
+      queuedRateLimiter({
+        windowMs: 2000,
+        maxRequests: 1,
+        maxQueueSize: 1,
+        standardHeaders: false,
+        message: (c) => c.text('queue-custom', 429),
+        keyGenerator: () => 'queue-fn-test',
+      }),
+    );
+    app.get('/ok', (c) => c.text('ok'));
+
+    await app.request('http://test/ok');
+
+    const p2 = app.request('http://test/ok');
+    await new Promise<void>((r) => setTimeout(r, 0));
+    const p3 = app.request('http://test/ok');
+
+    const [rA, rB] = await Promise.all([p2, p3]);
+    const rejected = rA.status === 429 ? rA : rB;
+    expect(rejected.status).toBe(429);
+    expect(await rejected.text()).toBe('queue-custom');
+    expect(rejected.headers.get('retry-after')).toBe('1');
+  });
+
   it('returns 429 on queue timeout', async () => {
     const app = new Hono();
     app.use(
@@ -128,6 +156,26 @@ describe('queuedRateLimiter (Hono)', () => {
     expect(mw.queue).toBeDefined();
     expect(typeof mw.queue.getQueueSize).toBe('function');
     expect(typeof mw.queue.clear).toBe('function');
+  });
+
+  it('exposes metricsManager and shutdown like rateLimiter', async () => {
+    const mw = queuedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 10,
+      standardHeaders: false,
+      metrics: { enabled: true, intervalMs: 1000 },
+    });
+    expect(mw.metricsManager).toBeDefined();
+    expect(typeof mw.getMetricsSnapshot).toBe('function');
+    expect(typeof mw.getMetricsHistory).toBe('function');
+    expect(typeof mw.shutdown).toBe('function');
+
+    const app = new Hono();
+    app.use('*', mw);
+    app.get('/ok', (c) => c.text('ok'));
+    await app.request('http://test/ok');
+    expect(mw.getMetricsSnapshot()).toBeDefined();
+    await mw.shutdown();
   });
 
   it('supports inMemoryBlock option for DoS protection', async () => {

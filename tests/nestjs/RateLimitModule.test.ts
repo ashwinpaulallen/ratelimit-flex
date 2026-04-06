@@ -55,12 +55,28 @@ describe('RateLimitModule', () => {
     expect(moduleRef.get(RATE_LIMIT_STORE)).toBe(custom);
   });
 
-  it('forRoot with global: false does not register APP_GUARD', async () => {
+  it('forRoot with globalGuard: false does not register APP_GUARD and sets DynamicModule.global false', async () => {
+    const dm = RateLimitModule.forRoot({ globalGuard: false, maxRequests: 5 });
+    expect(dm.global).toBe(false);
     const moduleRef = await Test.createTestingModule({
-      imports: [RateLimitModule.forRoot({ global: false, maxRequests: 5 })],
+      imports: [dm],
     }).compile();
 
     expect(() => moduleRef.get(APP_GUARD, { strict: true })).toThrow();
+  });
+
+  it('forRoot deprecated global: false aliases globalGuard: false', async () => {
+    const dm = RateLimitModule.forRoot({ global: false, maxRequests: 5 });
+    expect(dm.global).toBe(false);
+    const moduleRef = await Test.createTestingModule({
+      imports: [dm],
+    }).compile();
+    expect(() => moduleRef.get(APP_GUARD, { strict: true })).toThrow();
+  });
+
+  it('forRoot defaults to global module and APP_GUARD', () => {
+    const dm = RateLimitModule.forRoot({ maxRequests: 1 });
+    expect(dm.global).toBe(true);
   });
 
   it('forRootAsync resolves options from an async factory', async () => {
@@ -79,6 +95,18 @@ describe('RateLimitModule', () => {
     const opts = moduleRef.get(RATE_LIMIT_OPTIONS) as { maxRequests?: number };
     expect(opts.maxRequests).toBe(7);
     expect(moduleRef.get(RATE_LIMIT_STORE)).toBeInstanceOf(MemoryStore);
+  });
+
+  it('forRootAsync with globalGuard: false omits APP_GUARD and sets DynamicModule.global false', async () => {
+    const dm = RateLimitModule.forRootAsync({
+      globalGuard: false,
+      useFactory: async () => ({ maxRequests: 3, windowMs: 60_000 }),
+    });
+    expect(dm.global).toBe(false);
+    const moduleRef = await Test.createTestingModule({
+      imports: [dm],
+    }).compile();
+    expect(() => moduleRef.get(APP_GUARD, { strict: true })).toThrow();
   });
 
   it('exposes DI tokens to other providers in the same module', async () => {

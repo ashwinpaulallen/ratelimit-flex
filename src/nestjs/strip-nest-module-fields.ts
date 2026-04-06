@@ -9,6 +9,7 @@ export function stripNestRateLimitModuleFields(
 ): Partial<RateLimitOptions> {
   const {
     global: _g,
+    globalGuard: _gg,
     getRequestResponse: _grr,
     errorFactory: _ef,
     skip: _sk,
@@ -16,6 +17,7 @@ export function stripNestRateLimitModuleFields(
     ...rest
   } = nest;
   void _g;
+  void _gg;
   void _grr;
   void _ef;
   void _sk;

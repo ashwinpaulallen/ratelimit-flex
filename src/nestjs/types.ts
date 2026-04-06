@@ -7,8 +7,15 @@ import type { RateLimitOptions, RateLimitStrategy } from '../types/index.js';
  */
 export type NestRateLimitModuleOptions = Partial<RateLimitOptions> & {
   /**
-   * Whether to automatically register the guard globally via APP_GUARD.
-   * Default: true. Set to false if you want to use @UseGuards() manually.
+   * When `true` (default): registers {@link RateLimitGuard} via `APP_GUARD` and registers this module as a
+   * Nest **global module** so `RATE_LIMIT_*` tokens are available in any module without importing `RateLimitModule` again.
+   * When `false`: no automatic guard (use `@UseGuards(RateLimitGuard)` or register the guard yourself) and the module is
+   * **not** global — import `RateLimitModule` wherever you need the tokens.
+   */
+  globalGuard?: boolean;
+
+  /**
+   * @deprecated Use {@link NestRateLimitModuleOptions.globalGuard} instead (same behavior).
    */
   global?: boolean;
 
@@ -53,7 +60,10 @@ export interface RateLimitDecoratorOptions {
   maxRequests?: number;
   /** Window duration for this route. Overrides global windowMs. */
   windowMs?: number;
-  /** Strategy override for this route */
+  /**
+   * Strategy override for this route.
+   * @remarks If this differs from the module’s strategy, {@link RateLimitGuard} ignores it (shared store/engine); a dev warning is emitted when `NODE_ENV !== 'production'`.
+   */
   strategy?: RateLimitStrategy;
   /** Custom key generator for this route */
   keyGenerator?: (context: ExecutionContext) => string | Promise<string>;

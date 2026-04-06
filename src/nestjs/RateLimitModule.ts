@@ -1,4 +1,4 @@
-import { DynamicModule, Module, Provider, Type } from '@nestjs/common';
+import { DynamicModule, Module, ModuleMetadata, Provider, Type } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { mergeRateLimiterOptions, resolveStoreWithInMemoryShield } from '../middleware/merge-options.js';
 import { MetricsManager } from '../metrics/manager.js';
@@ -29,6 +29,15 @@ export interface RateLimitModuleInit {
 
 @Module({})
 export class RateLimitModule {
+  /** `globalGuard ?? global` — default true; `false` disables both APP_GUARD and Nest global module registration. */
+  private static resolveRegisterGlobal(opts: {
+    globalGuard?: boolean;
+    global?: boolean;
+  }): boolean {
+    const v = opts.globalGuard ?? opts.global;
+    return v !== false;
+  }
+
   /**
    * Register the rate limiting module with static options.
    *
@@ -46,10 +55,11 @@ export class RateLimitModule {
    */
   static forRoot(options: NestRateLimitModuleOptions = {}): DynamicModule {
     const init = RateLimitModule.finalizeOptions(options);
-    const providers = RateLimitModule.createProvidersFromInit(init, options.global !== false);
+    const registerGlobal = RateLimitModule.resolveRegisterGlobal(options);
+    const providers = RateLimitModule.createProvidersFromInit(init, registerGlobal);
     return {
       module: RateLimitModule,
-      global: true,
+      global: registerGlobal,
       providers,
       exports: [
         RATE_LIMIT_OPTIONS,
@@ -76,13 +86,18 @@ export class RateLimitModule {
    * })
    */
   static forRootAsync(asyncOptions: {
-    imports?: Type<unknown>[];
+    imports?: ModuleMetadata['imports'];
     inject?: (string | symbol | Type<unknown>)[];
     useFactory: (...args: unknown[]) => NestRateLimitModuleOptions | Promise<NestRateLimitModuleOptions>;
-    /** When false, do not register {@link APP_GUARD}. Default: true. */
+    /**
+     * When false, do not register {@link APP_GUARD} and do not register as a Nest global module (same as
+     * {@link NestRateLimitModuleOptions.globalGuard} on {@link forRoot}). Default: true.
+     */
     globalGuard?: boolean;
+    /** @deprecated Use `globalGuard` instead. */
+    global?: boolean;
   }): DynamicModule {
-    const guard = asyncOptions.globalGuard !== false;
+    const registerGlobal = RateLimitModule.resolveRegisterGlobal(asyncOptions);
     const providers: Provider[] = [
       {
         provide: RATE_LIMIT_MODULE_INIT,
@@ -116,12 +131,12 @@ export class RateLimitModule {
         inject: [RATE_LIMIT_MODULE_INIT],
       },
     ];
-    if (guard) {
+    if (registerGlobal) {
       providers.push({ provide: APP_GUARD, useClass: RateLimitGuard });
     }
     return {
       module: RateLimitModule,
-      global: true,
+      global: registerGlobal,
       imports: asyncOptions.imports ?? [],
       providers,
       exports: [

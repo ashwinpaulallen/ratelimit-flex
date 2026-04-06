@@ -137,6 +137,14 @@ export class AdminService {
 }
 ```
 
+### NestJS: `globalGuard`, `global`, and module scope (2.4+)
+
+Use **`globalGuard`** (preferred); **`global`** is deprecated but behaves the same. When **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
+
+When **`globalGuard: false`** (or **`global: false`**), the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
+
+**Upgrading:** If you previously used **`global: false`** only to disable automatic **`APP_GUARD`** while still relying on the module being **global** for `RATE_LIMIT_*` tokens app-wide, that combination is no longer available—`false` now means both “no `APP_GUARD`” and “not a global module.” See the **Breaking changes** entry for 2.4.0 in `CHANGELOG.md`.
+
 ## Hono
 
 ```typescript
@@ -181,7 +189,7 @@ const limiterWithMetrics = rateLimiter({
   windowMs: 60_000,
   metrics: {
     enabled: true,
-    snapshotIntervalMs: 10_000,
+    intervalMs: 10_000,
   },
 });
 

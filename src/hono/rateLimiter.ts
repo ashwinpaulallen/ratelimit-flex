@@ -1,5 +1,4 @@
 import type { Context, MiddlewareHandler } from 'hono';
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import {
   formatRateLimitHeaders,
   type HeaderFormat,
@@ -24,20 +23,14 @@ import type {
   RateLimitStrategy,
 } from '../types/index.js';
 import type { StandardHeadersDraft } from '../types/index.js';
+import type { MetricsConfig } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import { MetricsManager } from '../metrics/manager.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
+import { applyHeadersToContext, toContentfulStatus } from './utils.js';
 
 /** Internal context key for per-request weighted cost (see {@link HonoRateLimitOptions.cost}). */
 export const HONO_RATE_LIMIT_INCREMENT_COST = 'ratelimitFlex:incrementCost' as const;
-
-/**
- * Helper to cast numeric status codes to Hono's ContentfulStatusCode type.
- * @internal
- */
-function toContentfulStatus(code: number): ContentfulStatusCode {
-  return code as ContentfulStatusCode;
-}
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -105,8 +98,21 @@ export interface HonoRateLimitOptions {
   /** Wrap remote store with {@link InMemoryShield} (same semantics as other adapters). */
   inMemoryBlock?: number | boolean | InMemoryShieldOptions;
 
+  /**
+   * Aggregated metrics / optional Prometheus / OTel (same as {@link RateLimitOptions.metrics}).
+   * Wired into the returned handler’s {@link HonoRateLimiterHandler.metricsManager}.
+   */
+  metrics?: MetricsConfig | boolean;
+
   /** Called when a request is blocked by the **rate limit** (not blocklist / 503). After this runs, the middleware sends the JSON error unless `message` is a function that returns a `Response`. */
   onLimitReached?: (c: Context, key: string) => void | Promise<void>;
+
+  /**
+   * Called when the middleware throws (e.g. store / `keyGenerator` / `consumeWithKey` failure).
+   * After this runs, the error is **re-thrown** so Hono’s error pipeline runs (same idea as Express `next(err)`).
+   * Omit to propagate only; use `app.onError()` for response formatting.
+   */
+  onError?: (err: unknown, c: Context) => void | Promise<void>;
 }
 
 export function honoDefaultKeyGenerator(c: Context): string {
@@ -134,6 +140,7 @@ function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLim
     blocklist: h.blocklist,
     identifier: h.identifier,
     inMemoryBlock: h.inMemoryBlock,
+    metrics: h.metrics,
     incrementCost: (req: unknown) => {
       const ctx = req as Context;
       const v = ctx.get(HONO_RATE_LIMIT_INCREMENT_COST);
@@ -153,12 +160,6 @@ async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<
     return h.cost;
   }
   return await Promise.resolve(h.cost(c));
-}
-
-function applyHeadersToContext(c: Context, headers: Record<string, string>): void {
-  for (const [name, value] of Object.entries(headers)) {
-    c.header(name, value);
-  }
 }
 
 /**
@@ -195,7 +196,7 @@ export interface HonoRateLimiterHandler extends MiddlewareHandler {
  * const limiterWithMetrics = rateLimiter({
  *   maxRequests: 100,
  *   windowMs: 60_000,
- *   metrics: { enabled: true, snapshotIntervalMs: 10_000 }
+ *   metrics: { enabled: true, intervalMs: 10_000 }
  * });
  * app.use('*', limiterWithMetrics);
  *
@@ -237,72 +238,73 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
 
       const result = await engine.consumeWithKey(key, c);
 
-    if (result.storeUnavailable === true) {
-      c.header('X-RateLimit-Store', 'fallback');
-    }
-
-    const headerCfg = resolveHeaderConfig(resolved, c, result.bindingSlotIndex);
-    if (headerCfg.format) {
-      const headerInput: HeaderInput = {
-        limit: headerCfg.resolvedLimit,
-        remaining: result.remaining,
-        resetTime: result.resetTime,
-        isBlocked: result.isBlocked,
-        windowMs: headerCfg.resolvedWindowMs,
-        identifier: headerCfg.identifier,
-      };
-      const { headers, legacyHeaders } = formatRateLimitHeaders(
-        headerInput,
-        headerCfg.format as HeaderFormat,
-        headerCfg.includeLegacy,
-      );
-      applyHeadersToContext(c, headers);
-      if (legacyHeaders) {
-        applyHeadersToContext(c, legacyHeaders);
+      if (result.storeUnavailable === true) {
+        c.header('X-RateLimit-Store', 'fallback');
       }
-    }
 
-    if (result.isBlocked) {
-      if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
-        return c.json(jsonErrorBody('Service temporarily unavailable'), toContentfulStatus(503));
-      }
-      if (result.blockReason === 'key_manager' && resolved.keyManager) {
-        const status = resolved.statusCode ?? 429;
-        const ra = keyManagerRetryAfterSeconds(resolved, key);
-        if (ra !== undefined) {
-          c.header('Retry-After', String(ra));
+      const headerCfg = resolveHeaderConfig(resolved, c, result.bindingSlotIndex);
+      if (headerCfg.format) {
+        const headerInput: HeaderInput = {
+          limit: headerCfg.resolvedLimit,
+          remaining: result.remaining,
+          resetTime: result.resetTime,
+          isBlocked: result.isBlocked,
+          windowMs: headerCfg.resolvedWindowMs,
+          identifier: headerCfg.identifier,
+        };
+        const { headers, legacyHeaders } = formatRateLimitHeaders(
+          headerInput,
+          headerCfg.format as HeaderFormat,
+          headerCfg.includeLegacy,
+        );
+        applyHeadersToContext(c, headers);
+        if (legacyHeaders) {
+          applyHeadersToContext(c, legacyHeaders);
         }
-        return c.json(keyManagerBlockedJson(resolved, key), toContentfulStatus(status));
       }
 
-      if (result.blockReason === 'rate_limit' && options.onLimitReached) {
-        await Promise.resolve(options.onLimitReached(c, key));
+      if (result.isBlocked) {
+        if (result.storeUnavailable || result.blockReason === 'service_unavailable') {
+          return c.json(jsonErrorBody('Service temporarily unavailable'), toContentfulStatus(503));
+        }
+        if (result.blockReason === 'key_manager' && resolved.keyManager) {
+          const status = resolved.statusCode ?? 429;
+          const ra = keyManagerRetryAfterSeconds(resolved, key);
+          if (ra !== undefined) {
+            c.header('Retry-After', String(ra));
+          }
+          return c.json(keyManagerBlockedJson(resolved, key), toContentfulStatus(status));
+        }
+
+        if (result.blockReason === 'rate_limit' && options.onLimitReached) {
+          await Promise.resolve(options.onLimitReached(c, key));
+        }
+
+        const status =
+          result.blockReason === 'blocklist'
+            ? (resolved.blocklistStatusCode ?? 403)
+            : (resolved.statusCode ?? 429);
+
+        if (result.blockReason === 'rate_limit' && typeof options.message === 'function') {
+          return options.message(c);
+        }
+
+        const msg =
+          result.blockReason === 'blocklist'
+            ? (resolved.blocklistMessage ?? 'Forbidden')
+            : (resolved.message ?? 'Too many requests');
+        return c.json(jsonErrorBody(msg), toContentfulStatus(status));
       }
-
-      const status =
-        result.blockReason === 'blocklist'
-          ? (resolved.blocklistStatusCode ?? 403)
-          : (resolved.statusCode ?? 429);
-
-      if (result.blockReason === 'rate_limit' && typeof options.message === 'function') {
-        return options.message(c);
-      }
-
-      const msg =
-        result.blockReason === 'blocklist'
-          ? (resolved.blocklistMessage ?? 'Forbidden')
-          : (resolved.message ?? 'Too many requests');
-      return c.json(jsonErrorBody(msg), toContentfulStatus(status));
-    }
 
       c.set('rateLimitResult', result);
       c.set('rateLimit', toRateLimitInfo(resolved, result, c));
 
       return next();
     } catch (err: unknown) {
-      // Log error for debugging (in production, consider using a logger)
-      console.error('[ratelimit-flex/hono] Unexpected error in rate limiter:', err);
-      return c.json(jsonErrorBody('Internal server error'), toContentfulStatus(500));
+      if (options.onError !== undefined) {
+        await Promise.resolve(options.onError(err, c));
+      }
+      throw err;
     }
   };
 

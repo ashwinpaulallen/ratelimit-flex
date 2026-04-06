@@ -255,6 +255,15 @@ describe('package exports', () => {
     expect(typeof limiter.shutdown).toBe('function');
   });
 
+  it('Hono queuedRateLimiter returns handler with queue and metrics surface', () => {
+    const mw = queuedRateLimiter({ maxRequests: 10, windowMs: 60_000, standardHeaders: false });
+    expect(typeof mw).toBe('function');
+    expect(mw.queue).toBeDefined();
+    expect(mw.metricsManager).toBeDefined();
+    expect(typeof mw.getMetricsSnapshot).toBe('function');
+    expect(typeof mw.shutdown).toBe('function');
+  });
+
   it('exports MetricsManager and metrics types', () => {
     expect(MetricsManager).toBeDefined();
     expect(MetricsCounters).toBeDefined();

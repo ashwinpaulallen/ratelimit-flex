@@ -1,5 +1,4 @@
-import type { MiddlewareHandler } from 'hono';
-import { rateLimiter, type HonoRateLimitOptions } from './rateLimiter.js';
+import { rateLimiter, type HonoRateLimitOptions, type HonoRateLimiterHandler } from './rateLimiter.js';
 
 /**
  * Rate limit **WebSocket upgrade** requests (HTTP GET/HEAD before `upgradeWebSocket`).
@@ -32,6 +31,6 @@ import { rateLimiter, type HonoRateLimitOptions } from './rateLimiter.js';
  * );
  * ```
  */
-export function webSocketLimiter(options: HonoRateLimitOptions = {}): MiddlewareHandler {
+export function webSocketLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiterHandler {
   return rateLimiter(options);
 }

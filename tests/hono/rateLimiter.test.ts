@@ -304,7 +304,7 @@ describe('rateLimiter (Hono)', () => {
       windowMs: 60_000,
       metrics: {
         enabled: true,
-        snapshotIntervalMs: 1000,
+        intervalMs: 1000,
       },
     });
     app.use('*', limiter);
@@ -323,7 +323,7 @@ describe('rateLimiter (Hono)', () => {
     await limiter.shutdown();
   });
 
-  it('handles errors gracefully with error wrapper', async () => {
+  it('rethrows unexpected errors for Hono default error handler (no library 500 JSON)', async () => {
     const app = getApp();
     const mockStore: RateLimitStore = {
       increment: () => {
@@ -346,7 +346,34 @@ describe('rateLimiter (Hono)', () => {
 
     const res = await app.request('http://test/r', { headers: { 'x-forwarded-for': '10.0.0.90' } });
     expect(res.status).toBe(500);
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBe('Internal server error');
+    expect(await res.text()).toBe('Internal Server Error');
+  });
+
+  it('calls onError before rethrowing', async () => {
+    const onError = vi.fn();
+    const mockStore: RateLimitStore = {
+      increment: () => {
+        throw new Error('Store failure');
+      },
+      decrement: () => Promise.resolve({ success: true }),
+      reset: () => Promise.resolve({ success: true }),
+      shutdown: () => Promise.resolve(),
+    };
+
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        store: mockStore,
+        maxRequests: 10,
+        windowMs: 60_000,
+        onError,
+      }),
+    );
+    app.get('/r', (c) => c.text('ok'));
+
+    await app.request('http://test/r', { headers: { 'x-forwarded-for': '10.0.0.91' } });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]?.[0] as Error).message).toBe('Store failure');
   });
 });

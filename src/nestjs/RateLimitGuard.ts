@@ -73,7 +73,13 @@ function mergeRouteIntoOptions(
     merged.incrementCost = route.cost;
   }
   if (route.strategy !== undefined && route.strategy !== merged.strategy) {
-    // Per-route strategy changes require a compatible store; ignore for the guard.
+    // Per-route strategy changes require a compatible store; the guard keeps the module-level engine/strategy.
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(
+        '[ratelimit-flex/nestjs] @RateLimit() `strategy` is ignored when it differs from the module default (store/engine are shared). ' +
+          `Decorator: ${String(route.strategy)}, module: ${String(merged.strategy)}.`,
+      );
+    }
   }
   return merged;
 }
@@ -98,10 +104,8 @@ function applyHeaderMap(res: unknown, headers: Record<string, string>): void {
   }
 }
 
-/** Resolve `createRequire` root for optional peer imports (ESM + CJS builds). */
-function createRequireFromHere(): NodeRequire {
-  return createRequire(import.meta.url);
-}
+/** Cached `createRequire(import.meta.url)` for optional `@nestjs/graphql` resolution (not per-request). */
+const nestModuleRequire = createRequire(import.meta.url);
 
 @Injectable()
 export class RateLimitGuard implements CanActivate, OnModuleDestroy {
@@ -112,6 +116,12 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
   private readonly metricsCounters: MetricsCounters | undefined;
 
   private metricsCollectorStarted = false;
+
+  /** Cache per-route engines keyed by handler (avoids new {@link RateLimitEngine} on every `@RateLimit()` request). */
+  private readonly routeEngineCache = new WeakMap<
+    (...args: never[]) => unknown,
+    RateLimitEngine
+  >();
 
   constructor(
     private readonly reflector: Reflector,
@@ -136,6 +146,27 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
 
   private createEngine(resolved: RateLimitOptions): RateLimitEngine {
     return new RateLimitEngine(resolved, this.metricsCounters);
+  }
+
+  private getEngineForRoute(
+    context: ExecutionContext,
+    routeOverrides: RateLimitDecoratorOptions | undefined,
+    effectiveOpts: RateLimitOptions,
+  ): RateLimitEngine {
+    if (routeOverrides === undefined) {
+      return this.engine;
+    }
+    const handler = context.getHandler();
+    if (typeof handler !== 'function') {
+      return this.createEngine(effectiveOpts);
+    }
+    const fn = handler as (...args: never[]) => unknown;
+    let cached = this.routeEngineCache.get(fn);
+    if (cached === undefined) {
+      cached = this.createEngine(effectiveOpts);
+      this.routeEngineCache.set(fn, cached);
+    }
+    return cached;
   }
 
   private ensureMetricsStarted(): void {
@@ -182,17 +213,13 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
     const routeOverrides = isPlainRouteLimitOptions(rawMeta) ? rawMeta : undefined;
 
     const effectiveOpts = mergeRouteIntoOptions(this.resolved, routeOverrides);
-    const engine = routeOverrides ? this.createEngine(effectiveOpts) : this.engine;
+    const engine = this.getEngineForRoute(context, routeOverrides, effectiveOpts);
 
     const key = await this.resolveKey(context, req, routeOverrides);
 
     const result = await engine.consumeWithKey(key, req);
 
-    const headerCfg = resolveHeaderConfig(
-      mergeRouteIntoOptions(this.resolved, routeOverrides),
-      req,
-      result.bindingSlotIndex,
-    );
+    const headerCfg = resolveHeaderConfig(effectiveOpts, req, result.bindingSlotIndex);
     if (headerCfg.format) {
       const headerInput: HeaderInput = {
         limit: headerCfg.resolvedLimit,
@@ -239,7 +266,7 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
         };
 
       case 'graphql': {
-        const gql = tryResolveGraphqlRequestResponse(context, createRequireFromHere());
+        const gql = tryResolveGraphqlRequestResponse(context, nestModuleRequire);
         if (gql !== null) {
           return gql;
         }

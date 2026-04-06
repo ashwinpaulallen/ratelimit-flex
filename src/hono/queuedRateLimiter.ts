@@ -1,25 +1,22 @@
 import type { Context, MiddlewareHandler } from 'hono';
-import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import {
   formatRateLimitHeaders,
   type HeaderInput,
   resolveHeaderConfig,
   resolveWindowMsForHeaders,
 } from '../headers/index.js';
+import { MetricsManager } from '../metrics/manager.js';
 import { RateLimiterQueue, RateLimiterQueueError } from '../queue/RateLimiterQueue.js';
 import { retryAfterSeconds } from '../queue/queue-middleware-utils.js';
-import { honoDefaultKeyGenerator, type HonoRateLimitOptions } from './rateLimiter.js';
+import {
+  honoDefaultKeyGenerator,
+  type HonoRateLimitOptions,
+  type HonoRateLimiterHandler,
+} from './rateLimiter.js';
 import { RateLimitStrategy, type RateLimitOptions } from '../types/index.js';
 import { getLimit, jsonErrorBody, mergeRateLimiterOptions, resolveStoreWithInMemoryShield } from '../middleware/merge-options.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
-
-/**
- * Helper to cast numeric status codes to Hono's ContentfulStatusCode type.
- * @internal
- */
-function toContentfulStatus(code: number): ContentfulStatusCode {
-  return code as ContentfulStatusCode;
-}
+import { applyHeadersToContext, toContentfulStatus } from './utils.js';
 
 export interface HonoQueuedRateLimitOptions extends HonoRateLimitOptions {
   /** Max waiting requests (default: 100, same as Express queued). */
@@ -30,7 +27,10 @@ export interface HonoQueuedRateLimitOptions extends HonoRateLimitOptions {
   keyPrefix?: string;
 }
 
-export type HonoQueuedRateLimiterHandler = MiddlewareHandler & { queue: RateLimiterQueue };
+/** Queued middleware plus {@link RateLimiterQueue} and the same metrics surface as {@link HonoRateLimiterHandler}. */
+export interface HonoQueuedRateLimiterHandler extends HonoRateLimiterHandler {
+  queue: RateLimiterQueue;
+}
 
 async function resolveHonoCost(c: Context, h: HonoQueuedRateLimitOptions): Promise<number> {
   if (h.cost === undefined) {
@@ -48,6 +48,12 @@ async function resolveHonoCost(c: Context, h: HonoQueuedRateLimitOptions): Promi
  *
  * @remarks
  * Head-of-line blocking applies to the shared FIFO queue — see {@link RateLimiterQueue}.
+ *
+ * @remarks
+ * The returned handler exposes {@link HonoRateLimiterHandler.metricsManager}, snapshots/history, and
+ * {@link HonoRateLimiterHandler.shutdown} (same as {@link rateLimiter}). The queue path does not use
+ * {@link RateLimitEngine}, so request/block counters may not mirror the standard middleware; use metrics for
+ * shield/Prometheus wiring and lifecycle cleanup.
  */
 export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): HonoQueuedRateLimiterHandler {
   const merged = mergeRateLimiterOptions({
@@ -61,11 +67,15 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
     allowlist: options.allowlist,
     blocklist: options.blocklist,
     inMemoryBlock: options.inMemoryBlock,
+    metrics: options.metrics,
   } satisfies Partial<RateLimitOptions>);
 
-  const { optionsForEngine: resolved } = resolveStoreWithInMemoryShield(merged);
+  const { optionsForEngine: resolved, shield } = resolveStoreWithInMemoryShield(merged);
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
+
+  const metricsManager = new MetricsManager(resolved.metrics, shield);
+  let metricsCollectorStarted = false;
 
   const windowMsForQueue =
     resolved.strategy === RateLimitStrategy.TOKEN_BUCKET
@@ -91,6 +101,11 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
   const rejectStatus = options.statusCode ?? 429;
 
   const fn: MiddlewareHandler = async (c, next) => {
+    if (!metricsCollectorStarted && metricsManager.getCounters()) {
+      metricsManager.start();
+      metricsCollectorStarted = true;
+    }
+
     if (options.skip !== undefined) {
       const s = await Promise.resolve(options.skip(c));
       if (s === true) {
@@ -128,13 +143,9 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
           headerCfg.format,
           headerCfg.includeLegacy,
         );
-        for (const [name, value] of Object.entries(headers)) {
-          c.header(name, value);
-        }
+        applyHeadersToContext(c, headers);
         if (legacyHeaders) {
-          for (const [name, value] of Object.entries(legacyHeaders)) {
-            c.header(name, value);
-          }
+          applyHeadersToContext(c, legacyHeaders);
         }
       }
 
@@ -152,13 +163,23 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
         const retrySec = retryAfterSeconds(err, maxQueueTimeMs);
         c.header('Retry-After', String(retrySec));
         const m = options.message;
-        const payload: string | object =
-          m === undefined || typeof m === 'function' ? err.message : m;
+        if (typeof m === 'function') {
+          return m(c);
+        }
+        const payload: string | object = m === undefined ? err.message : m;
         return c.json(jsonErrorBody(payload), toContentfulStatus(rejectStatus));
       }
       throw err;
     }
   };
 
-  return Object.assign(fn, { queue }) as HonoQueuedRateLimiterHandler;
+  return Object.assign(fn, {
+    queue,
+    metricsManager,
+    getMetricsSnapshot: () => metricsManager.getSnapshot(),
+    getMetricsHistory: () => metricsManager.getHistory(),
+    shutdown: async () => {
+      await metricsManager.shutdown();
+    },
+  }) as HonoQueuedRateLimiterHandler;
 }
