@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.4.0] - 2026-04-06
+
+### Added
+
+- NestJS integration (`ratelimit-flex/nestjs`): `RateLimitModule`, `RateLimitGuard`,
+  `@RateLimit()` and `@SkipRateLimit()` decorators, `forRoot` / `forRootAsync`,
+  DI injection tokens, GraphQL/WebSocket/RPC context support, NestJS presets
+- Hono integration (`ratelimit-flex/hono`): `rateLimiter()`, `queuedRateLimiter()`,
+  `webSocketLimiter()` middleware factories, typed Hono Context, edge/serverless compatible
+  - `HonoRateLimiterHandler` with metrics support (`metricsManager`, `getMetricsSnapshot()`, `getMetricsHistory()`, `shutdown()`)
+  - `honoDefaultKeyGenerator` exported for custom key generator composition
+  - `inMemoryBlock` support in both `rateLimiter` and `queuedRateLimiter` for DoS protection
+  - Error handling wrapper for graceful failure recovery
+  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` not supported due to Hono's lack of response lifecycle hooks
+
 ## [2.3.0] - 2026-04-07
 
 ### Added

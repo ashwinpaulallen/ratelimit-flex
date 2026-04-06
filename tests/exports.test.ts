@@ -68,6 +68,7 @@ import {
 import type { MetricsConfig, MetricsSnapshot } from '../src/types/index.js';
 import defaultExport from '../src/index.js';
 import { fastifyQueuedRateLimiter, fastifyRateLimiter } from '../src/fastify.js';
+import { queuedRateLimiter, rateLimiter, webSocketLimiter } from '../src/hono/index.js';
 import { mergeRateLimiterOptions } from '../src/middleware/merge-options.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -232,6 +233,26 @@ describe('package exports', () => {
   it('exports Fastify plugin from subpath entry', () => {
     expect(typeof fastifyRateLimiter).toBe('function');
     expect(typeof fastifyQueuedRateLimiter).toBe('function');
+  });
+
+  it('exports Hono middleware from subpath entry', () => {
+    expect(typeof rateLimiter).toBe('function');
+    expect(typeof queuedRateLimiter).toBe('function');
+    expect(typeof webSocketLimiter).toBe('function');
+  });
+
+  it('exports honoDefaultKeyGenerator from Hono subpath', async () => {
+    const { honoDefaultKeyGenerator } = await import('../src/hono/index.js');
+    expect(typeof honoDefaultKeyGenerator).toBe('function');
+  });
+
+  it('Hono rateLimiter returns HonoRateLimiterHandler with metrics support', () => {
+    const limiter = rateLimiter({ maxRequests: 10, windowMs: 60_000 });
+    expect(typeof limiter).toBe('function');
+    expect(limiter.metricsManager).toBeDefined();
+    expect(typeof limiter.getMetricsSnapshot).toBe('function');
+    expect(typeof limiter.getMetricsHistory).toBe('function');
+    expect(typeof limiter.shutdown).toBe('function');
   });
 
   it('exports MetricsManager and metrics types', () => {

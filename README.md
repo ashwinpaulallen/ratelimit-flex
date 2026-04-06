@@ -1,6 +1,6 @@
 # ratelimit-flex
 
-Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
+Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, NestJS, and Hono.
 
 [![npm version](https://img.shields.io/npm/v/ratelimit-flex.svg)](https://www.npmjs.com/package/ratelimit-flex)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
@@ -9,7 +9,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
 - **Three strategies:** sliding window, token bucket, fixed window
-- **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean)
+- **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean); NestJS (`ratelimit-flex/nestjs`) and Hono (`ratelimit-flex/hono`)
 - **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed), and `ClusterStore` (Node.js native cluster IPC)
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
@@ -41,6 +41,8 @@ pnpm add ratelimit-flex
 |---------|------------------|
 | `express` (+ `@types/express` for TS) | Express middleware |
 | `fastify`, `fastify-plugin` | Fastify plugin (`ratelimit-flex/fastify`) |
+| `@nestjs/common`, `@nestjs/core` (+ optional `@nestjs/graphql` for GraphQL context) | NestJS module (`ratelimit-flex/nestjs`) |
+| `hono` | Hono middleware (`ratelimit-flex/hono`) |
 | `ioredis` | `RedisStore` with `url` (or use your own Redis client adapter) |
 | `prom-client` | Optional: `metrics.prometheus.registry` integration |
 | `@opentelemetry/api` | Optional: `metrics.openTelemetry.meter` integration |
@@ -72,6 +74,166 @@ const app = Fastify();
 await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
 app.get('/health', async () => ({ ok: true }));
 ```
+
+## NestJS
+
+```typescript
+// app.module.ts
+import { Controller, Inject, Injectable, Module, Post } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { KeyManager, RedisStore } from 'ratelimit-flex';
+import { RateLimit, RateLimitModule, SkipRateLimit, RATE_LIMIT_KEY_MANAGER } from 'ratelimit-flex/nestjs';
+
+@Module({
+  imports: [
+    RateLimitModule.forRoot({
+      maxRequests: 100,
+      windowMs: 60_000,
+    }),
+  ],
+})
+export class AppModule {}
+
+// Async config with ConfigService (use in @Module({ imports: [...] }))
+@Module({
+  imports: [
+    RateLimitModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        store: new RedisStore({ url: config.get('REDIS_URL')!, /* ... */ }),
+        maxRequests: config.get('RATE_LIMIT_MAX'),
+      }),
+    }),
+  ],
+})
+export class AppModuleAsync {}
+
+// Per-route override
+import { RateLimit, SkipRateLimit } from 'ratelimit-flex/nestjs';
+
+@Controller('auth')
+export class AuthController {
+  @RateLimit({ maxRequests: 5, windowMs: 60_000 })
+  @Post('login')
+  async login() {
+    // ...
+  }
+}
+
+@SkipRateLimit()
+@Controller('health')
+export class HealthController {
+  // ...
+}
+
+// Inject store/keyManager in services
+@Injectable()
+export class AdminService {
+  constructor(@Inject(RATE_LIMIT_KEY_MANAGER) private km: KeyManager) {}
+  async blockUser(key: string) {
+    await this.km.block(key, 3600_000);
+  }
+}
+```
+
+## Hono
+
+```typescript
+import { Hono } from 'hono';
+import { rateLimiter } from 'ratelimit-flex/hono';
+
+const app = new Hono();
+
+// Basic usage
+const limiter = rateLimiter({
+  maxRequests: 100,
+  windowMs: 60_000,
+  keyGenerator: (c) => c.req.header('x-api-key') ?? 'anon',
+});
+
+app.use('*', limiter);
+
+// Per-route
+app.post('/login', rateLimiter({ maxRequests: 5, windowMs: 60_000 }), async (c) => {
+  return c.json({ ok: true });
+});
+
+// With Redis and in-memory shield
+import { RedisStore } from 'ratelimit-flex';
+
+const REDIS_URL = process.env.REDIS_URL!;
+
+app.use(
+  '*',
+  rateLimiter({
+    store: new RedisStore({ url: REDIS_URL }),
+    maxRequests: 100,
+    windowMs: 60_000,
+    standardHeaders: 'draft-8',
+    inMemoryBlock: true, // Enable DoS protection
+  }),
+);
+
+// With metrics
+const limiterWithMetrics = rateLimiter({
+  maxRequests: 100,
+  windowMs: 60_000,
+  metrics: {
+    enabled: true,
+    snapshotIntervalMs: 10_000,
+  },
+});
+
+app.use('*', limiterWithMetrics);
+
+// Access metrics
+app.get('/metrics', (c) => {
+  const snapshot = limiterWithMetrics.getMetricsSnapshot();
+  return c.json(snapshot);
+});
+
+// Cleanup on shutdown
+process.on('SIGTERM', async () => {
+  await limiterWithMetrics.shutdown();
+  process.exit(0);
+});
+
+// Queued rate limiter (wait instead of reject)
+import { queuedRateLimiter } from 'ratelimit-flex/hono';
+
+app.use(
+  '/api/*',
+  queuedRateLimiter({
+    maxRequests: 10,
+    windowMs: 60_000,
+    maxQueueSize: 50,
+    maxQueueTimeMs: 30_000,
+  }),
+);
+
+// WebSocket rate limiting
+import { webSocketLimiter } from 'ratelimit-flex/hono';
+import { upgradeWebSocket } from 'hono/cloudflare-workers';
+
+app.get(
+  '/ws',
+  webSocketLimiter({
+    maxRequests: 10,
+    windowMs: 60_000,
+    keyGenerator: (c) => c.req.header('x-api-key') ?? 'anon',
+  }),
+  upgradeWebSocket(() => ({
+    onMessage(event, ws) {
+      ws.send('pong');
+    },
+  })),
+);
+```
+
+### Hono Limitations
+
+**`skipFailedRequests` / `skipSuccessfulRequests` not supported:** Unlike Express and Fastify adapters, the Hono adapter does not support decrementing counters based on response status codes. This is due to Hono's lack of stable response lifecycle hooks (equivalent to Express's response events or Fastify's `onResponse` hook). If you need this feature, consider using Express or Fastify adapters instead.
 
 ## In-memory block shielding
 
