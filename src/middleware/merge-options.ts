@@ -8,6 +8,8 @@ import {
   slidingWindowDefaults,
   tokenBucketDefaults,
 } from '../strategies/defaults.js';
+import { InMemoryShield } from '../shield/InMemoryShield.js';
+import type { InMemoryShieldOptions } from '../shield/types.js';
 import type {
   RateLimitInfo,
   RateLimitOptions,
@@ -18,6 +20,21 @@ import type {
 } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 import { validateRateLimitHeaderOptions } from './validate-header-options.js';
+
+/** Same semantics as {@link resolveWindowMsForHeaders} without `bindingSlotIndex` (middleware setup). */
+function resolveWindowMsForShield(opts: RateLimitOptions): number {
+  if (opts.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+    return opts.interval ?? 60_000;
+  }
+  const w = opts as WindowRateLimitOptions;
+  if (w.limits && w.limits.length > 0) {
+    return Math.min(...w.limits.map((e) => sanitizeWindowMs(e.windowMs, 60_000)));
+  }
+  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
+    return Math.min(...w.groupedWindowStores.map((g) => g.windowMs));
+  }
+  return w.windowMs ?? 60_000;
+}
 
 export const baseDefaults = {
   headers: true,
@@ -142,6 +159,62 @@ export function keyManagerRetryAfterSeconds(resolved: RateLimitOptions, key: str
  * @throws {Error} When both `penaltyBox` and `keyManager` are provided (mutually exclusive).
  * @throws {Error} When both `limits` array and `store` are provided (mutually exclusive).
  */
+function stripInMemoryBlock(resolved: RateLimitOptions): RateLimitOptions {
+  if (!('inMemoryBlock' in resolved)) {
+    return resolved;
+  }
+  const { inMemoryBlock, ...rest } = resolved as RateLimitOptions & {
+    inMemoryBlock?: unknown;
+  };
+  void inMemoryBlock;
+  return rest as RateLimitOptions;
+}
+
+/**
+ * Optionally wraps `resolved.store` with `InMemoryShield` when `inMemoryBlock` is set.
+ * Strips `inMemoryBlock` from the object passed to `RateLimitEngine`.
+ *
+ * @returns `shield` when wrapping applied; `null` when disabled or when the store is already a `MemoryStore`.
+ */
+export function resolveStoreWithInMemoryShield(
+  resolved: RateLimitOptions,
+): { optionsForEngine: RateLimitOptions; shield: InMemoryShield | null } {
+  const flag = resolved.inMemoryBlock;
+  const stripped = stripInMemoryBlock(resolved);
+
+  if (flag === undefined || flag === false) {
+    return { optionsForEngine: stripped, shield: null };
+  }
+
+  if (resolved.store instanceof MemoryStore) {
+    console.debug(
+      '[ratelimit-flex] inMemoryBlock: ignoring MemoryStore (already in-memory; no remote store calls to save).',
+    );
+    return { optionsForEngine: stripped, shield: null };
+  }
+
+  const resolvedWindowMs = resolveWindowMsForShield(resolved);
+  const resolvedMaxRequests = getLimit(resolved);
+
+  let shieldOpts: InMemoryShieldOptions;
+  if (typeof flag === 'number') {
+    shieldOpts = { blockOnConsumed: flag, blockDurationMs: resolvedWindowMs };
+  } else if (flag === true) {
+    shieldOpts = { blockOnConsumed: resolvedMaxRequests, blockDurationMs: resolvedWindowMs };
+  } else {
+    shieldOpts = {
+      ...flag,
+      blockDurationMs: flag.blockDurationMs ?? resolvedWindowMs,
+    };
+  }
+
+  const shield = new InMemoryShield(resolved.store, shieldOpts);
+  return {
+    optionsForEngine: { ...stripped, store: shield },
+    shield,
+  };
+}
+
 export function mergeRateLimiterOptions(options: Partial<RateLimitOptions>): RateLimitOptions {
   validateRateLimitHeaderOptions(options);
   if (options.penaltyBox !== undefined && options.keyManager !== undefined) {

@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.3.0] - 2026-04-07
+
+### Added
+
+- `InMemoryShield` — store wrapper that caches blocked keys in memory, eliminating store round-trips under DoS conditions (7x+ speedup, 99%+ fewer store calls)
+- `shield()` helper for easy wrapping
+- `inMemoryBlock` middleware option: `true`, a number, or full `InMemoryShieldOptions`
+- Shield metrics: `getMetrics()`, integrated into Prometheus/OTel adapters
+- Shield inspection: `isShielded()`, `getShieldedKeys()`, `unshield()`, `clearShield()`
+- LRU eviction for bounded memory under distributed attacks (`maxBlockedKeys`)
+- Lazy + proactive expiry (no per-key setTimeout, no Event Loop overload)
+- KeyManager integration: reward/unblock/delete auto-invalidate the shield cache
+- Presets `multiInstancePreset`, `resilientRedisPreset`, `apiGatewayPreset`, `authEndpointPreset` now enable shielding by default
+
 ## [2.2.0] - 2026-04-06
 
 ### Added

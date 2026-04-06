@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { HotKeyIntervalCounts, MetricsCollectorOptions, MetricsSnapshot } from '../types/metrics.js';
 import type { MetricsCounters } from './counters.js';
 import {
@@ -38,6 +39,8 @@ export class MetricsCollector extends EventEmitter {
 
   private readonly onMetricsCb?: (snapshot: MetricsSnapshot) => void;
 
+  private readonly shield: InMemoryShield | null | undefined;
+
   private timer: ReturnType<typeof setInterval> | undefined;
 
   private lastTotalRequests = 0;
@@ -70,6 +73,7 @@ export class MetricsCollector extends EventEmitter {
     this.windowSize = options.windowSize ?? DEFAULT_WINDOW_SIZE;
     this.histogramBuckets = options.histogramBuckets ?? [...DEFAULT_BUCKETS];
     this.onMetricsCb = options.onMetrics;
+    this.shield = options.shield;
   }
 
   start(): void {
@@ -151,6 +155,22 @@ export class MetricsCollector extends EventEmitter {
     const blockRate = sumT > 0 ? sumB / sumT : 0;
     const allowRate = sumT > 0 ? sumA / sumT : 0;
 
+    const shieldSnap =
+      this.shield !== undefined && this.shield !== null
+        ? (() => {
+            const m = this.shield.getMetrics();
+            return Object.freeze({
+              blockedKeyCount: m.blockedKeyCount,
+              storeCallsSaved: m.storeCallsSaved,
+              totalKeysBlocked: m.totalKeysBlocked,
+              totalKeysExpired: m.totalKeysExpired,
+              totalKeysEvicted: m.totalKeysEvicted,
+              hitRate: m.hitRate,
+              storeCalls: m.storeCalls,
+            });
+          })()
+        : undefined;
+
     const snap: MetricsSnapshot = {
       timestamp: new Date(),
       window: {
@@ -199,6 +219,7 @@ export class MetricsCollector extends EventEmitter {
       },
       latencySamplesMs: Object.freeze(lat),
       storeLatencySamplesMs: Object.freeze(st),
+      ...(shieldSnap !== undefined ? { shield: shieldSnap } : {}),
     };
 
     Object.freeze(snap.window);
@@ -207,6 +228,9 @@ export class MetricsCollector extends EventEmitter {
     Object.freeze(snap.latency);
     Object.freeze(snap.storeLatency);
     Object.freeze(snap.trends);
+    if (snap.shield !== undefined) {
+      Object.freeze(snap.shield);
+    }
     this.latest = Object.freeze(snap);
 
     this.history.push(this.latest);

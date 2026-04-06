@@ -6,6 +6,7 @@ import { OpenTelemetryAdapter } from './adapters/opentelemetry-adapter.js';
 import { PrometheusAdapter } from './adapters/prometheus-adapter.js';
 import { MetricsCollector } from './collector.js';
 import { MetricsCounters } from './counters.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { MetricsConfig, MetricsSnapshot } from '../types/metrics.js';
 import { normalizeMetricsConfig } from './normalize.js';
 
@@ -28,7 +29,7 @@ export class MetricsManager {
 
   private readonly openTelemetryAdapter: OpenTelemetryAdapter | null;
 
-  constructor(config: MetricsConfig | boolean | undefined) {
+  constructor(config: MetricsConfig | boolean | undefined, shield?: InMemoryShield | null) {
     const normalized = normalizeMetricsConfig(config);
     this.normalized = normalized;
     if (normalized === undefined) {
@@ -45,6 +46,7 @@ export class MetricsManager {
       intervalMs: normalized.intervalMs,
       topKSize: normalized.topKSize,
       histogramBuckets: normalized.histogramBuckets,
+      shield,
     });
 
     if (normalized.onMetrics) {

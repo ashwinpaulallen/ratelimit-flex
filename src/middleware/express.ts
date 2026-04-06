@@ -21,11 +21,13 @@ import type {
 } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import {
   jsonErrorBody,
   keyManagerBlockedJson,
   keyManagerRetryAfterSeconds,
   mergeRateLimiterOptions,
+  resolveStoreWithInMemoryShield,
   toRateLimitInfo,
 } from './merge-options.js';
 
@@ -98,6 +100,11 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
    * @since 2.2.0
    */
   keyManager?: KeyManager;
+  /**
+   * Present when {@link RateLimitOptionsBase.inMemoryBlock} wrapped the backing store with {@link InMemoryShield}.
+   * @since 2.3.0
+   */
+  shield: InMemoryShield | null;
 }
 
 /**
@@ -124,10 +131,11 @@ export interface ExpressRateLimiterHandler extends RequestHandler {
  * @since 1.0.0
  */
 export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressRateLimiterHandler {
-  const resolved = mergeRateLimiterOptions(options);
+  const merged = mergeRateLimiterOptions(options);
+  const { optionsForEngine: resolved, shield } = resolveStoreWithInMemoryShield(merged);
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
-  const metricsManager = new MetricsManager(resolved.metrics);
+  const metricsManager = new MetricsManager(resolved.metrics, shield);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;
@@ -258,6 +266,7 @@ export function expressRateLimiter(options: Partial<RateLimitOptions>): ExpressR
   };
   handler.openTelemetryAdapter = metricsManager.getOpenTelemetryAdapter() ?? undefined;
   handler.keyManager = resolved.keyManager;
+  handler.shield = shield;
 
   return handler;
 }

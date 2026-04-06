@@ -14,6 +14,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express and Fastify.
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance ([Redis failure handling](#redis-failure-handling), [Redis resilience](#redis-resilience))
+- **In-memory block shielding:** `InMemoryShield` / `inMemoryBlock` — cache blocked keys in process memory so hot keys stop hitting Redis under attack ([In-memory block shielding](#in-memory-block-shielding))
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true`
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
@@ -71,6 +72,54 @@ const app = Fastify();
 await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
 app.get('/health', async () => ({ ok: true }));
 ```
+
+## In-memory block shielding
+
+### Problem statement
+
+Under DoS conditions, every blocked request still hits Redis — 100k req/sec from an attacker means 100k Redis calls/sec **from your own app**. `InMemoryShield` caches blocked keys in local memory so subsequent requests for the same key never touch the store. Result: 7x+ faster under attack, 99%+ fewer store calls.
+
+### Quick start
+
+```typescript
+// Option 1: via middleware options (simplest)
+app.use(expressRateLimiter({
+  store: new RedisStore({ url: REDIS_URL, ... }),
+  maxRequests: 100,
+  windowMs: 60_000,
+  inMemoryBlock: true, // shield kicks in at maxRequests
+}));
+
+// Option 2: explicit shield with custom config
+import { shield, RedisStore } from 'ratelimit-flex';
+const shielded = shield(new RedisStore({ ... }), {
+  blockOnConsumed: 100,
+  maxBlockedKeys: 10_000,
+  onBlock: (key) => console.log(`Shielded: ${key}`),
+});
+app.use(expressRateLimiter({ store: shielded, maxRequests: 100, windowMs: 60_000 }));
+```
+
+### Metrics
+
+```typescript
+const metrics = limiter.shield?.getMetrics();
+// {
+//   blockedKeyCount: 42,        // keys currently blocked in memory
+//   storeCallsSaved: 98721,     // total store calls avoided
+//   totalKeysBlocked: 150,      // total keys blocked since startup
+//   totalKeysExpired: 80,       // keys removed due to window expiry
+//   totalKeysEvicted: 28,       // keys removed due to LRU eviction
+//   hitRate: 0.993,             // cache hit rate
+//   storeCalls: 684             // actual store calls made
+// }
+```
+
+### How it works
+
+Each request first checks an in-memory map for the key: if the key is still “shielded” (blocked and not yet expired), the limiter returns the cached blocked result in about **~0.01ms** — no Redis round-trip. If there is no entry, or it expired, the request takes the slow path: **`increment()` on the backing store** (typically **~2–5ms** for Redis, depending on network and load). When the store shows the key has consumed enough quota, the shield records that state locally and keeps serving blocked responses from RAM until the block window expires or you invalidate the entry (for example via `KeyManager`).
+
+`InMemoryShield` implements **`RateLimitStore`**: wrap Redis, a composed store, or any custom implementation; use it with **`compose.*`** and multi-layer setups; expose shield metrics alongside Prometheus/OpenTelemetry; opt into **`onBlock`**, **`onExpire`**, and **`onShieldHit`** callbacks; and wire **`KeyManager`** so reward, unblock, and delete operations clear stale shield entries.
 
 ## Programmatic key management
 

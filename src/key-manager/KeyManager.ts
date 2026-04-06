@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { RateLimitResult, RateLimitStore } from '../types/index.js';
 import { sanitizeRateLimitCap } from '../utils/clamp.js';
 import type { BlockStore } from './block-store.js';
@@ -60,8 +61,15 @@ export class KeyManager {
 
   private readonly penaltyEscalation: EscalationStrategy;
 
+  /**
+   * When {@link KeyManagerOptions.store} is the raw backing store, optional reference to the
+   * {@link InMemoryShield} wrapping it so manual operations can clear stale shield cache.
+   */
+  private readonly explicitShield: InMemoryShield | undefined;
+
   constructor(options: KeyManagerOptions) {
     this.store = options.store;
+    this.explicitShield = options.shield;
     this.maxRequests = sanitizeRateLimitCap(options.maxRequests, 100);
     this.windowMs = Math.max(1, Math.floor(options.windowMs));
     this.maxAuditLogSize = options.maxAuditLogSize ?? 1000;
@@ -179,6 +187,7 @@ export class KeyManager {
       timestamp: ts,
     });
     this.pushAudit('set', key, { previousHits, newHits: totalHits, expiresAt: expiresAt?.toISOString() }, options?.actor);
+    this.invalidateRateLimitShield(key);
     return state;
   }
 
@@ -215,6 +224,7 @@ export class KeyManager {
       timestamp: ts,
     });
     this.pushAudit('block', key, { reason, expiresAt: expiresAt?.toISOString() ?? null, persistToStore: options?.persistToStore }, options?.actor);
+    this.invalidateRateLimitShield(key);
     return state;
   }
 
@@ -245,6 +255,7 @@ export class KeyManager {
       timestamp: ts,
     });
     this.pushAudit('unblock', key, { wasReason: cloneReason(wasReason) }, options?.actor);
+    this.invalidateRateLimitShield(key);
     return (await this.loadKeyState(key)) ?? this.composeZero(key);
   }
 
@@ -342,6 +353,7 @@ export class KeyManager {
       timestamp: ts,
     });
     this.pushAudit('reward', key, { points: p, totalRewardPoints: adj.rewardPoints }, options?.actor);
+    this.invalidateRateLimitShield(key);
     return state;
   }
 
@@ -378,6 +390,7 @@ export class KeyManager {
       timestamp: ts,
     });
     this.pushAudit('delete', key, { hadBlock, hadAdj, storeExisted }, options?.actor);
+    this.invalidateRateLimitShield(key);
     return existed;
   }
 
@@ -475,6 +488,7 @@ export class KeyManager {
         timestamp: ts,
       });
       this.pushAudit('unblock', key, { wasReason: cloneReason(wasReason), bulk: true }, options?.actor);
+      this.invalidateRateLimitShield(key);
     }
     if (this.blockStore !== undefined) {
       void Promise.all(keys.map((k) => this.blockStore!.removeBlock(k))).catch(() => {
@@ -500,6 +514,17 @@ export class KeyManager {
   }
 
   // --- internals -----------------------------------------------------------
+
+  /**
+   * Clears {@link InMemoryShield} cache for `key` when the shield wraps the store or when
+   * {@link KeyManagerOptions.shield} is set (raw store + explicit shield reference).
+   */
+  private invalidateRateLimitShield(key: string): void {
+    if (this.store instanceof InMemoryShield) {
+      this.store.unshield(key);
+    }
+    this.explicitShield?.unshield(key);
+  }
 
   private emitTyped<K extends keyof KeyManagerEvents>(event: K, payload: EventPayload<K>): boolean {
     return (this.emitter as EventEmitter).emit(event, payload);

@@ -38,15 +38,22 @@ describe('OpenTelemetryAdapter', () => {
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_requests_per_second', expect.any(Object));
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_block_rate', expect.any(Object));
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_hot_key_hits', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_blocked_keys', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_store_calls_saved_total', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_total_keys_blocked', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_total_keys_expired', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_total_keys_evicted', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_hit_rate', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_store_calls_total', expect.any(Object));
 
     expect(rps.addCallback).toHaveBeenCalledTimes(1);
     expect(br.addCallback).toHaveBeenCalledTimes(1);
-    expect(hk.addCallback).toHaveBeenCalledTimes(1);
+    expect(hk.addCallback).toHaveBeenCalledTimes(8);
 
     adapter.shutdown();
     expect(rps.removeCallback).toHaveBeenCalledTimes(1);
     expect(br.removeCallback).toHaveBeenCalledTimes(1);
-    expect(hk.removeCallback).toHaveBeenCalledTimes(1);
+    expect(hk.removeCallback).toHaveBeenCalledTimes(8);
   });
 
   it('applies counter deltas and histogram records when metrics events fire', () => {

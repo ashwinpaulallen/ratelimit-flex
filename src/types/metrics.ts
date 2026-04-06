@@ -1,4 +1,5 @@
 import type { HotKeyIntervalCounts, MetricsCounters } from '../metrics/counters.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 
 export type { HotKeyIntervalCounts };
 
@@ -125,6 +126,19 @@ export interface MetricsSnapshot {
    * @since 1.3.0
    */
   readonly storeLatencySamplesMs?: readonly number[];
+  /**
+   * {@link InMemoryShield} metrics when a shield wraps the backing store.
+   * @since 2.3.0
+   */
+  readonly shield?: {
+    readonly blockedKeyCount: number;
+    readonly storeCallsSaved: number;
+    readonly totalKeysBlocked: number;
+    readonly totalKeysExpired: number;
+    readonly totalKeysEvicted: number;
+    readonly hitRate: number;
+    readonly storeCalls: number;
+  };
 }
 
 /**
@@ -139,4 +153,9 @@ export interface MetricsCollectorOptions {
   readonly topKSize?: number;
   readonly windowSize?: number;
   readonly onMetrics?: (snapshot: MetricsSnapshot) => void;
+  /**
+   * When set, each snapshot includes {@link MetricsSnapshot.shield} from {@link InMemoryShield.getMetrics}.
+   * @since 2.3.0
+   */
+  readonly shield?: InMemoryShield | null;
 }
