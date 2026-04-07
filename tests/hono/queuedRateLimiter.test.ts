@@ -2,7 +2,10 @@ import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryStore } from '../../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
+import { buildHonoMergePartial } from '../../src/hono/rateLimiter.js';
 import { queuedRateLimiter } from '../../src/hono/queuedRateLimiter.js';
+import { mergeRateLimiterOptions } from '../../src/middleware/merge-options.js';
+import { compose } from '../../src/composition/compose.js';
 
 const stores: MemoryStore[] = [];
 
@@ -176,6 +179,42 @@ describe('queuedRateLimiter (Hono)', () => {
     await app.request('http://test/ok');
     expect(mw.getMetricsSnapshot()).toBeDefined();
     await mw.shutdown();
+  });
+
+  it('uses same merge path as rateLimiter (limits array survives merge)', () => {
+    const merged = mergeRateLimiterOptions(
+      buildHonoMergePartial({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        limits: [
+          { windowMs: 60_000, max: 2 },
+          { windowMs: 120_000, max: 5 },
+        ],
+      }),
+    );
+    expect(merged.limits).toHaveLength(2);
+  });
+
+  it('uses composed store from merged options (first requests pass)', async () => {
+    const store = compose.windows(
+      { windowMs: 60_000, maxRequests: 2 },
+      { windowMs: 120_000, maxRequests: 10 },
+    );
+    const app = new Hono();
+    app.use(
+      '*',
+      queuedRateLimiter({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        store,
+        windowMs: 60_000,
+        maxRequests: 2,
+        standardHeaders: false,
+      }),
+    );
+    app.get('/ok', (c) => c.text('ok'));
+
+    const h = { 'x-forwarded-for': '10.0.2.2' };
+    expect((await app.request('http://test/ok', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/ok', { headers: h })).status).toBe(200);
   });
 
   it('supports inMemoryBlock option for DoS protection', async () => {

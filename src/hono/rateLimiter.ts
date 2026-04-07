@@ -15,19 +15,10 @@ import {
   toRateLimitInfo,
 } from '../middleware/merge-options.js';
 import { RateLimitEngine } from '../strategies/rate-limit-engine.js';
-import { decrementStoresAfterConsume } from '../middleware/decrement-stores-after-consume.js';
+import { decrementStoresAfterConsumeAsync } from '../middleware/decrement-stores-after-consume.js';
 import type { InMemoryShield } from '../shield/InMemoryShield.js';
-import type { InMemoryShieldOptions } from '../shield/types.js';
 import type { KeyManager } from '../key-manager/KeyManager.js';
-import type {
-  RateLimitConsumeResult,
-  RateLimitInfo,
-  RateLimitOptions,
-  RateLimitStore,
-  RateLimitStrategy,
-} from '../types/index.js';
-import type { StandardHeadersDraft } from '../types/index.js';
-import type { MetricsConfig } from '../types/metrics.js';
+import type { RateLimitConsumeResult, RateLimitInfo, RateLimitOptions } from '../types/index.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
 import { MetricsManager } from '../metrics/manager.js';
@@ -43,96 +34,57 @@ declare module 'hono' {
     rateLimitResult?: RateLimitConsumeResult;
     /** Snapshot for downstream handlers (same idea as Express `req.rateLimit`). */
     rateLimit?: RateLimitInfo;
+    /** When the backing store is composed, last consume result with `layers` (Express `req.rateLimitComposed`). */
+    rateLimitComposed?: RateLimitConsumeResult;
     /** @internal Per-request cost for {@link HonoRateLimitOptions.cost}. */
     'ratelimitFlex:incrementCost'?: number;
   }
 }
 
 /**
- * Hono rate limiter options.
+ * Hono rate limiter options: full {@link RateLimitOptions} engine surface (including `limits`,
+ * {@link RateLimitOptionsBase.draft}, composed stores, {@link RateLimitOptionsBase.groupedWindowStores},
+ * {@link RateLimitOptionsBase.penaltyBox}, {@link RateLimitOptionsBase.keyManager}) plus Hono-specific fields.
  *
  * @remarks
+ * **`skip` / `onLimitReached`:** Hono-specific signatures; not passed to {@link mergeRateLimiterOptions} — handled
+ * in middleware only (same pattern as Express stripping `onLimitReached` from the engine).
+ *
  * **`skipFailedRequests` / `skipSuccessfulRequests`:** When set, the middleware **`await`s `next()`** after a
  * successful consume, then uses {@link resolvedHonoRollbackStatus} and decrements when the status matches
- * Express / Fastify semantics (failed ≥ `400` vs successful `< 400`). Uses
- * {@link resolveIncrementOpts} / {@link matchingDecrementOptions} for weighted / grouped windows.
- * For modes that need a different rule than HTTP status, add a follow-up middleware (README **Hono → Limitations**).
+ * Express / Fastify semantics. Uses {@link resolveIncrementOpts} / {@link matchingDecrementOptions} for weighted,
+ * grouped, and composed stores. With {@link waitUntil}, decrements run on that hook (Cloudflare Workers).
  */
-export interface HonoRateLimitOptions {
-  /** Max requests per window */
-  maxRequests?: number;
-  /** Window duration in ms */
-  windowMs?: number;
-  /** Rate limiting strategy */
-  strategy?: RateLimitStrategy;
-  /** Backing store. Default: in-memory when omitted (not suitable for multi-instance without Redis, etc.). */
-  store?: RateLimitStore;
-
+export type HonoRateLimitOptions = Omit<
+  Partial<RateLimitOptions>,
+  'keyGenerator' | 'message' | 'skip' | 'onLimitReached' | 'incrementCost'
+> & {
   /**
    * Key generator. Receives the Hono {@link Context}.
-   *
-   * @remarks
    * Default uses `x-forwarded-for` / `x-real-ip`. On edge runtimes, IP may be missing unless the platform
    * sets these headers — prefer an explicit key (API key, session id) in production.
    */
   keyGenerator?: (c: Context) => string | Promise<string>;
-
-  /** Standard headers profile (draft RFC or legacy `X-RateLimit-*`). */
-  standardHeaders?: StandardHeadersDraft | boolean;
-  /** When using a draft profile, also emit legacy `X-RateLimit-*`. */
-  legacyHeaders?: boolean;
-
-  /** Status code when rate limited (default: 429) */
-  statusCode?: number;
   /** Response body when rate limited (not used when `message` is a function returning a `Response`). */
   message?: string | object | ((c: Context) => Response | Promise<Response>);
-
-  /** Cost per request (weighted limiting). Async functions are supported. */
-  cost?: number | ((c: Context) => number | Promise<number>);
-
-  /** Skip rate limiting for this request (async supported). */
+  /** Skip rate limiting for this request (async supported). Handled in middleware only. */
   skip?: (c: Context) => boolean | Promise<boolean>;
-
-  /** Allowlist of keys that bypass rate limiting */
-  allowlist?: readonly string[];
-  /** Blocklist of keys that are always rejected */
-  blocklist?: readonly string[];
-
-  /** Identifier for draft standard headers */
-  identifier?: string;
-
-  /** Wrap remote store with {@link InMemoryShield} (same semantics as other adapters). */
-  inMemoryBlock?: number | boolean | InMemoryShieldOptions;
-
-  /**
-   * Aggregated metrics / optional Prometheus / OTel (same as {@link RateLimitOptions.metrics}).
-   * Wired into the returned handler’s {@link HonoRateLimiterHandler.metricsManager}.
-   */
-  metrics?: MetricsConfig | boolean;
-
-  /** Called when a request is blocked by the **rate limit** (not blocklist / 503). After this runs, the middleware sends the JSON error unless `message` is a function that returns a `Response`. */
+  /** Called when blocked by the rate limit (not blocklist / 503). Handled in middleware only. */
   onLimitReached?: (c: Context, key: string) => void | Promise<void>;
-
   /**
-   * Called when the middleware throws (e.g. store / `keyGenerator` / `consumeWithKey` failure).
-   * After this runs, the error is **re-thrown** so Hono’s error pipeline runs (same idea as Express `next(err)`).
-   * Omit to propagate only; use `app.onError()` for response formatting.
+   * Called when the middleware throws. After this runs, the error is **re-thrown** so Hono’s error pipeline runs.
    */
   onError?: (err: unknown, c: Context) => void | Promise<void>;
-
+  /** Shorthand for weighted quota; overridden by {@link incrementCost} when both are set. */
+  cost?: number | ((c: Context) => number | Promise<number>);
+  /** Same as {@link RateLimitOptionsBase.incrementCost} (`req` is the Hono {@link Context}). */
+  incrementCost?: number | ((req: unknown) => number);
   /**
-   * After `await next()`, decrement when the resolved status is **≥ 400** (same as Express
-   * {@link RateLimitOptions.skipFailedRequests}). Status is read from **`c.res`** via
-   * {@link resolvedHonoRollbackStatus} (invalid or missing codes default to **200**).
+   * Cloudflare Workers: pass `c.executionCtx.waitUntil` so skip-response `decrement` work does not block the
+   * response (optional; local Node ignores it).
    */
-  skipFailedRequests?: boolean;
-
-  /**
-   * After `await next()`, decrement when the resolved status is **< 400** (same as Express
-   * {@link RateLimitOptions.skipSuccessfulRequests}). See {@link resolvedHonoRollbackStatus}.
-   */
-  skipSuccessfulRequests?: boolean;
-}
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
 
 export function honoDefaultKeyGenerator(c: Context): string {
   return (
@@ -142,38 +94,50 @@ export function honoDefaultKeyGenerator(c: Context): string {
   );
 }
 
-function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLimitOptions> {
+/**
+ * Maps Hono options to {@link mergeRateLimiterOptions} input: all engine fields, plus `incrementCost` / `message`
+ * shims. Does not include `skip` / `onLimitReached` (middleware-only).
+ *
+ * @internal Exported for {@link queuedRateLimiter} parity with {@link rateLimiter}.
+ */
+export function buildHonoMergePartial(h: HonoRateLimitOptions): Partial<RateLimitOptions> {
+  const { message, cost, incrementCost: incFromOpts } = h;
+  const raw = { ...h } as Record<string, unknown>;
+  delete raw.keyGenerator;
+  delete raw.message;
+  delete raw.skip;
+  delete raw.onLimitReached;
+  delete raw.onError;
+  delete raw.cost;
+  delete raw.waitUntil;
+  const engineFields = raw as Partial<RateLimitOptions>;
+
   const messageForMerge =
-    h.message !== undefined && typeof h.message !== 'function' ? h.message : undefined;
+    message !== undefined && typeof message !== 'function' ? message : undefined;
+
+  const incrementCost: RateLimitOptions['incrementCost'] | undefined =
+    incFromOpts !== undefined
+      ? incFromOpts
+      : cost !== undefined
+        ? (req: unknown) => {
+            const ctx = req as Context;
+            const v = ctx.get(HONO_RATE_LIMIT_INCREMENT_COST);
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              return v;
+            }
+            return 1;
+          }
+        : undefined;
 
   return {
-    maxRequests: h.maxRequests,
-    windowMs: h.windowMs,
-    strategy: h.strategy,
-    store: h.store,
-    standardHeaders: h.standardHeaders,
-    legacyHeaders: h.legacyHeaders,
-    statusCode: h.statusCode,
+    ...engineFields,
     message: messageForMerge,
-    allowlist: h.allowlist,
-    blocklist: h.blocklist,
-    identifier: h.identifier,
-    inMemoryBlock: h.inMemoryBlock,
-    metrics: h.metrics,
-    skipFailedRequests: h.skipFailedRequests,
-    skipSuccessfulRequests: h.skipSuccessfulRequests,
-    incrementCost: (req: unknown) => {
-      const ctx = req as Context;
-      const v = ctx.get(HONO_RATE_LIMIT_INCREMENT_COST);
-      if (typeof v === 'number' && Number.isFinite(v)) {
-        return v;
-      }
-      return 1;
-    },
+    incrementCost,
   };
 }
 
-async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<number> {
+/** @internal Per-request cost for {@link HonoRateLimitOptions.cost} (also used by {@link queuedRateLimiter}). */
+export async function resolveHonoRequestCost(c: Context, h: HonoRateLimitOptions): Promise<number> {
   if (h.cost === undefined) {
     return 1;
   }
@@ -240,7 +204,7 @@ export interface HonoRateLimiterHandler extends MiddlewareHandler {
  * ```
  */
 export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiterHandler {
-  const merged = mergeRateLimiterOptions(honoOptionsToRateLimitPartial(options));
+  const merged = mergeRateLimiterOptions(buildHonoMergePartial(options));
   const { optionsForEngine: resolved, shield } = resolveStoreWithInMemoryShield(merged);
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
@@ -269,9 +233,13 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
 
       const key = await Promise.resolve(keyFromContext(c));
 
-      c.set(HONO_RATE_LIMIT_INCREMENT_COST, await resolveRequestCost(c, options));
+      c.set(HONO_RATE_LIMIT_INCREMENT_COST, await resolveHonoRequestCost(c, options));
 
       const result = await engine.consumeWithKey(key, c);
+
+      if (result.layers) {
+        c.set('rateLimitComposed', result);
+      }
 
       if (result.storeUnavailable === true) {
         c.header('X-RateLimit-Store', 'fallback');
@@ -343,7 +311,12 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
         const failed = status >= 400;
         const success = status < 400;
         if ((shouldDecrementFailed && failed) || (shouldDecrementSuccess && success)) {
-          decrementStoresAfterConsume(resolved, key, c);
+          const p = decrementStoresAfterConsumeAsync(resolved, key, c);
+          if (options.waitUntil !== undefined) {
+            options.waitUntil(p);
+          } else {
+            void p;
+          }
         }
       }
       return;

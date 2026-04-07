@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.1.0] - 2026-04-07
+
+### Added
+
+- **Hono:** **`queuedRateLimiter`** now uses the same **`buildHonoMergePartial`** / **`mergeRateLimiterOptions`** / **`resolveStoreWithInMemoryShield`** chain as **`rateLimiter`**, so the full merged engine surface applies (**`limits`**, composed **`store`**, **`inMemoryBlock`**, **`metrics`**, **`cost`** / **`incrementCost`**, allowlist/blocklist, standard headers, etc.). Per-request cost uses **`resolveIncrementOpts`** / **`sanitizeIncrementCost`** and **`HONO_RATE_LIMIT_INCREMENT_COST`** like **`rateLimiter`**. The returned handler matches **`HonoRateLimiterHandler`** (metrics, **`shield`**, **`keyManager`**, **`openTelemetryAdapter`**, event hooks, **`shutdown`**, …) and adds **`queue`**. It still calls **`RateLimiterQueue`** + **`store.increment`** only — no **`RateLimitEngine`** — so **`draft`**, pre-increment **`keyManager`** / **`penaltyBox`**, and **`c.get('rateLimitComposed')`** are not applied (same trade-off as **`expressQueuedRateLimiter`**).
+- **Hono:** **`buildHonoMergePartial`** and **`resolveHonoRequestCost`** exported from **`ratelimit-flex/hono`** (shared merge/cost helpers for **`rateLimiter`** and **`queuedRateLimiter`**).
+
+### Documentation
+
+- **README:** **“Hono: engine parity”** — documents **`queuedRateLimiter`** options parity vs **`rateLimiter`**, observability on the handler, and engine-only limitations (aligned with **`expressQueuedRateLimiter`**).
+
 ## [3.0.0] - 2026-04-06
 
 ### Documentation
