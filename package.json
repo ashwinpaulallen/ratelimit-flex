@@ -132,7 +132,7 @@
   },
   "files": [
     "dist/",
-    "docs/recipes.md",
+    "docs/",
     "examples/",
     "typedoc.json",
     "README.md",
