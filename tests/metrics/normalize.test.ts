@@ -104,4 +104,18 @@ describe('normalizeMetricsConfig / validateMetricsConfig', () => {
     };
     expect(() => validateMetricsConfig(c)).not.toThrow();
   });
+
+  it('passes through shutdownOnProcessExit', () => {
+    const out = normalizeMetricsConfig({ enabled: true, shutdownOnProcessExit: true });
+    expect(out?.shutdownOnProcessExit).toBe(true);
+  });
+
+  it('throws when shutdownOnProcessExit is not boolean', () => {
+    expect(() =>
+      normalizeMetricsConfig({
+        enabled: true,
+        shutdownOnProcessExit: 1 as unknown as boolean,
+      }),
+    ).toThrow(/shutdownOnProcessExit/);
+  });
 });

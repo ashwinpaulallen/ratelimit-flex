@@ -8,9 +8,9 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
-- **Three strategies:** sliding window, token bucket, fixed window
+- **Three algorithms:** **Sliding window** (default, smooth & accurate), **Token bucket** (allows bursts), **Fixed window** (simplest, lowest memory) — all fully implemented in both `MemoryStore` and `RedisStore` with atomic Lua scripts
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean); NestJS (`ratelimit-flex/nestjs`) and Hono (`ratelimit-flex/hono`)
-- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed), and `ClusterStore` (Node.js native cluster IPC)
+- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed for atomic multi-step operations), and `ClusterStore` (Node.js native cluster IPC)
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance ([Redis failure handling](#redis-failure-handling), [Redis resilience](#redis-resilience))
@@ -20,6 +20,8 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore` — see [Limiter composition](#limiter-composition)
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API — see [Programmatic key management](#programmatic-key-management)
+- **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes — see [Security and abuse](#security-and-abuse)
+- **Recipes & API HTML:** [docs/recipes.md](docs/recipes.md) (Nest + GraphQL, Express `trust proxy`, Hono on Cloudflare); run **`npm run docs:api`** for TypeDoc output under `docs/api/` (not shipped on npm)
 
 ## Installation
 
@@ -53,25 +55,54 @@ All peers are optional at install time; the runtime you choose must be present w
 
 ## Quick Start
 
-**Express (6 lines):**
+**Express (sliding window, the default):**
 
 ```ts
 import express from 'express';
-import rateLimit from 'ratelimit-flex';
+import rateLimit, { RateLimitStrategy } from 'ratelimit-flex';
 
 const app = express();
-app.use(rateLimit({ maxRequests: 100, windowMs: 60_000 }));
+
+// Sliding window (default) - smooth, accurate rate limiting
+app.use(rateLimit({ 
+  strategy: RateLimitStrategy.SLIDING_WINDOW, // optional, this is the default
+  maxRequests: 100, 
+  windowMs: 60_000 
+}));
+
+// Token bucket - allows bursts
+app.use(rateLimit({
+  strategy: RateLimitStrategy.TOKEN_BUCKET,
+  tokensPerInterval: 20,
+  interval: 60_000,
+  bucketSize: 60,
+}));
+
+// Fixed window - simplest, lowest memory
+app.use(rateLimit({
+  strategy: RateLimitStrategy.FIXED_WINDOW,
+  maxRequests: 100,
+  windowMs: 60_000,
+}));
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 ```
 
-**Fastify (6 lines):**
+**Fastify (same strategies):**
 
 ```ts
 import Fastify from 'fastify';
-import { fastifyRateLimiter } from 'ratelimit-flex/fastify';
+import { fastifyRateLimiter, RateLimitStrategy } from 'ratelimit-flex/fastify';
 
 const app = Fastify();
-await app.register(fastifyRateLimiter, { maxRequests: 100, windowMs: 60_000 });
+
+// Sliding window (default)
+await app.register(fastifyRateLimiter, { 
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  maxRequests: 100, 
+  windowMs: 60_000 
+});
+
 app.get('/health', async () => ({ ok: true }));
 ```
 
@@ -137,13 +168,31 @@ export class AdminService {
 }
 ```
 
-### NestJS: `globalGuard`, `global`, and module scope (2.4+)
+### NestJS: limitations (`@RateLimit`)
 
-Use **`globalGuard`** (preferred); **`global`** is deprecated but behaves the same. When **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
+`RateLimitGuard` uses the **same** `RateLimitEngine` and backing `store` as `RateLimitModule` for the whole app (or feature module). Per-route **`@RateLimit({ ... })`** can override **`maxRequests`**, **`windowMs`**, **`cost`**, and **`keyGenerator`** only.
 
-When **`globalGuard: false`** (or **`global: false`**), the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
+- **`strategy` is not supported** on `@RateLimit`. To use a different algorithm (e.g. token bucket vs sliding window), set **`strategy`** on **`RateLimitModule.forRoot` / `forRootAsync`**, register a **second** `RateLimitModule` with different options in another Nest module, or split services.
+- If legacy metadata (or `as any`) sets a **`strategy` that differs** from the module default, the guard **throws** when **`NODE_ENV !== 'production'`** on the first request to that route. In **production**, the invalid `strategy` is **ignored** (limits still apply).
+- **Per-route engine cache:** Decorator metadata is **static** in normal Nest apps (`@RateLimit` is fixed at bootstrap). The guard caches one **RateLimitEngine** per **handler** and **invalidates** that entry when the merged options **fingerprint** changes (e.g. if effective limits for that handler ever change). Prefer static limits; avoid mutating reflected metadata at runtime.
 
-**Upgrading:** If you previously used **`global: false`** only to disable automatic **`APP_GUARD`** while still relying on the module being **global** for `RATE_LIMIT_*` tokens app-wide, that combination is no longer available—`false` now means both “no `APP_GUARD`” and “not a global module.” See the **Breaking changes** entry for 2.4.0 in `CHANGELOG.md`.
+More context: `docs/IMPROVEMENTS.md` (§3.2, §3.3).
+
+### NestJS: KeyManager shutdown
+
+- **`RateLimitModule`** registers **`RateLimitModuleLifecycle`**, which calls **`keyManager.destroy()`** on **`onModuleDestroy`** only when the **`KeyManager` was auto-created** from **`penaltyBox`** (you did **not** pass **`keyManager`** in `forRoot` / `forRootAsync`). Shared or manually constructed instances passed via **`keyManager`** are **not** destroyed by the module — call **`destroy()`** (or **`dispose()`**) yourself when shutting down or in your own `OnModuleDestroy` hook.
+- **`await app.close()`** (or closing the testing module) runs lifecycle teardown and clears Key Manager intervals in the auto-created case.
+- For non-Nest apps, call **`keyManager.destroy()`** when tearing down the process or before hot reload in development.
+
+### NestJS: `globalGuard` and module scope
+
+When **`globalGuard`** is **`true`** (default), `RateLimitModule` registers **`APP_GUARD`** and is a **Nest global module**, so `RATE_LIMIT_*` injection tokens are available in any module without importing `RateLimitModule` again.
+
+When **`globalGuard: false`**, the module **does not** register `APP_GUARD` **and** sets **`DynamicModule.global` to `false`**. Feature modules that need the tokens must **`imports: [RateLimitModule]`** (or your app re-exports those providers), or you register **`RateLimitGuard`** yourself with **`@UseGuards(RateLimitGuard)`** and import the module where you inject `RATE_LIMIT_OPTIONS`, `RATE_LIMIT_STORE`, etc.
+
+**Migrating from `global`:** **`NestRateLimitModuleOptions.global`** was removed in **v3.0.0**. Rename **`global`** → **`globalGuard`** with the same boolean value everywhere.
+
+**Upgrading from 2.3.x:** If you relied on **`global: false`** only to disable **`APP_GUARD`** while keeping the module **global** for tokens app-wide, that split is not supported—**`false`** means both “no `APP_GUARD`” and “not a global module.” See **`CHANGELOG.md`** (2.4.0 / 3.0.0).
 
 ## Hono
 
@@ -241,7 +290,60 @@ app.get(
 
 ### Hono Limitations
 
-**`skipFailedRequests` / `skipSuccessfulRequests` not supported:** Unlike Express and Fastify adapters, the Hono adapter does not support decrementing counters based on response status codes. This is due to Hono's lack of stable response lifecycle hooks (equivalent to Express's response events or Fastify's `onResponse` hook). If you need this feature, consider using Express or Fastify adapters instead.
+**`skipFailedRequests` / `skipSuccessfulRequests`:** Pass them to **`rateLimiter({ ... })`** — the middleware **`await`s `next()`** after a successful consume, then uses **`resolvedHonoRollbackStatus`** (exported from **`ratelimit-flex/hono`**) so a missing **`c.res`**, **`0`**, or invalid **`c.res.status`** values are treated as **200** before applying the rollback rule. Decrements use **`resolveIncrementOpts`** / **`matchingDecrementOptions`** (same semantics as Express / Fastify for weighted and grouped windows).
+
+**Advanced / grouped-only recipes:** For unusual setups where status alone is not enough, you can still add middleware **after** `rateLimiter` and call **`store.decrement`** yourself (see below). Use **`HONO_RATE_LIMIT_INCREMENT_COST`** for weighted **`cost`** on the Hono `Context`.
+
+```typescript
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import {
+  MemoryStore,
+  RateLimitStrategy,
+  resolveIncrementOpts,
+  matchingDecrementOptions,
+} from 'ratelimit-flex';
+import { rateLimiter, HONO_RATE_LIMIT_INCREMENT_COST } from 'ratelimit-flex/hono';
+import type { RateLimitOptions } from 'ratelimit-flex';
+
+const app = new Hono();
+
+const store = new MemoryStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+});
+const windowMs = 60_000;
+const maxRequests = 100;
+
+const keyGenerator = (c: Context) =>
+  c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+
+/** Same shape the engine uses (including cost mirror for Hono `cost`). */
+const engineLikeOptions: RateLimitOptions = {
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs,
+  maxRequests,
+  store,
+  incrementCost: (req) => {
+    const v = (req as Context).get(HONO_RATE_LIMIT_INCREMENT_COST);
+    return typeof v === 'number' && Number.isFinite(v) ? v : 1;
+  },
+};
+
+app.use('*', rateLimiter({ store, windowMs, maxRequests, keyGenerator }));
+
+// Like skipFailedRequests: undo increment when the handler returns an error status
+app.use('*', async (c, next) => {
+  await next();
+  if (c.res.status < 400) return;
+  const key = await Promise.resolve(keyGenerator(c));
+  const inc = resolveIncrementOpts(engineLikeOptions, c);
+  void store.decrement(key, matchingDecrementOptions(inc)).catch(() => {});
+});
+```
+
+**Caveats:** `compose.windows`, grouped stores, and draft rollback need the same multi-store path as the Express adapter’s internal `decrementStores` — copy that logic or prefer Express/Fastify for those modes. On **Cloudflare Workers**, you may offload `decrement` to **`executionCtx.waitUntil`** so slow stores do not block the response; that remains runtime-specific.
 
 ## In-memory block shielding
 
@@ -284,6 +386,8 @@ const metrics = limiter.shield?.getMetrics();
 //   storeCalls: 684             // actual store calls made
 // }
 ```
+
+**`MetricsManager` and periodic snapshots:** When metrics are enabled, middleware passes the **same** `InMemoryShield` instance used as the engine `store` into `MetricsManager`. Each `onMetrics` snapshot may include **`shield`** — that object is `shield.getMetrics()` for **that** instance (blocked-key counts, hit rate, store calls avoided, etc.). Request, block, and latency totals still describe traffic through the engine, which calls `increment` on the outer `store`. If you pass an `InMemoryShield` as `store` **and** set `inMemoryBlock: true`, a second shield wraps the first; **`snapshot.shield` reflects the outer layer only**, and in non-production a **one-time** `console.warn` flags possible double-shielding (intentional stacking is supported).
 
 ### How it works
 
@@ -389,45 +493,140 @@ await keyManager.block('abusive-ip', 3600_000, { type: 'manual', message: 'Spam'
 
 ### Migrating from `penaltyBox`
 
-The `penaltyBox` option is now powered by `KeyManager` internally. For full control, migrate to `KeyManager`:
+**Why you cannot set `penaltyBox` and `keyManager` together:** `mergeRateLimiterOptions` throws if both appear in the same options object. `penaltyBox` uses the engine’s built-in violation counter and `penaltyUntil` map. A **user-supplied** `KeyManager` adds a separate blocking and penalty-point system (`penalty()`, escalation, audit). Allowing both would pit two policies against each other for the same keys.
 
-**Before (penaltyBox):**
+**Option A — keep `penaltyBox`:** If you only need “**N** real rate-limit blocks within **`violationWindowMs`**, then ban for **`penaltyDurationMs`**, keep `penaltyBox` and **do not** pass your own `keyManager`. (Frameworks may still synthesize an internal `KeyManager` for Nest lifecycle or related wiring when you only use `penaltyBox`; that is not the same as configuring both options yourself.)
+
+**Option B — migrate to an explicit `KeyManager`:** Drop `penaltyBox` and drive bans through `KeyManager`. Map fields roughly like this:
+
+| `penaltyBox` | `KeyManager` |
+|--------------|----------------|
+| `violationsThreshold` | `penaltyBlockThreshold` (penalty points before an automatic block) |
+| `penaltyDurationMs` | `penaltyBlockDurationMs` (base duration), or replace with `penaltyEscalation` for longer blocks on repeat offenses |
+| `onPenalty` | `keyManager.on('blocked', …)` (and/or audit entries) |
+
+The engine **does not** call `keyManager.penalty()` when a request hits the rate limit — you wire that yourself, typically from **`onLimitReached`**, so each limit hit adds a penalty point toward the threshold:
+
+**Before (`penaltyBox`):**
 
 ```typescript
-app.use(expressRateLimiter({
-  store,
-  penaltyBox: {
-    violationsThreshold: 3,
-    penaltyDurationMs: 60_000,
-  },
-}));
+app.use(
+  expressRateLimiter({
+    store,
+    maxRequests: 100,
+    windowMs: 60_000,
+    penaltyBox: {
+      violationsThreshold: 3,
+      violationWindowMs: 3_600_000,
+      penaltyDurationMs: 60_000,
+    },
+  }),
+);
 ```
 
-**After (KeyManager):**
+**After (`KeyManager` + `onLimitReached` + escalation):**
 
 ```typescript
+import { expressRateLimiter, KeyManager, exponentialEscalation } from 'ratelimit-flex';
+
+const keyGenerator = (req: import('express').Request) =>
+  /* same key you use for rate limiting, e.g. forwarded IP */ String(req.ip ?? '');
+
 const keyManager = new KeyManager({
   store,
   maxRequests: 100,
   windowMs: 60_000,
   penaltyBlockThreshold: 3,
-  penaltyBlockDurationMs: 60_000,
+  penaltyEscalation: exponentialEscalation(60_000), // 1m, 2m, 4m, … after each threshold breach
 });
 
-app.use(expressRateLimiter({ store, keyManager }));
+app.use(
+  expressRateLimiter({
+    store,
+    maxRequests: 100,
+    windowMs: 60_000,
+    keyGenerator,
+    keyManager,
+    onLimitReached: async (req) => {
+      await keyManager.penalty(keyGenerator(req), 1);
+    },
+  }),
+);
 
-// Now you have programmatic access:
-await keyManager.block('abusive-ip', 3600_000, { type: 'manual' });
-keyManager.on('blocked', ({ key, reason }) => console.log(`Blocked: ${key}`));
+keyManager.on('blocked', ({ key, reason }) => {
+  console.log(`Blocked: ${key}`, reason);
+});
 ```
 
-**Benefits of migrating:**
+**Semantics note:** `penaltyBox` counts blocks in a sliding **`violationWindowMs`** (default one hour). `KeyManager` penalty points are tracked in an adjustment window tied to the limiter’s **`windowMs`**, not to `violationWindowMs`. If your old config relied on a **long** violation window and a **short** rate-limit window, either keep `penaltyBox` or add your own sliding-window counting before calling `penalty()`.
+
+**Benefits of Option B:**
 - Typed block reasons (`manual`, `penalty-escalation`, `abuse-pattern`, `custom`)
 - Event system for real-time alerting
 - Audit log with filtering
 - Escalation strategies (exponential, fibonacci, etc.)
 - Admin HTTP endpoints
 - Redis-backed block persistence
+
+## Security and abuse
+
+### Key cardinality and `keyGenerator`
+
+Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage.
+
+**Mitigations:** Prefer **stable, low-cardinality** identifiers (user id, tenant id, API key id). **Normalize or hash** untrusted inputs before using them as keys. The library does **not** cap key string length—enforce a maximum or digest in your **`keyGenerator`** if inputs are user-controlled. Use **`InMemoryShieldOptions.maxBlockedKeys`** and related limits where applicable.
+
+### Redis namespace (`keyPrefix`)
+
+`RedisStore` (and **`RedisBlockStore`**) prefix all logical keys. Use a **different** `keyPrefix` (and/or Redis **DB index**) per **application** or **tenant** when multiple services share one Redis so counters and blocks do not **collide**. Document the convention for your org.
+
+### Lua scripts (`RedisStore`)
+
+All Lua in `RedisStore` is **static source** in the package. Quota and key data are passed only as **`KEYS`** / **`ARGV`** to **`EVAL`**—never build Lua by concatenating user input into the script body.
+
+### Key Manager admin HTTP API
+
+**`createAdminRouter`** (Express) and **`createFastifyAdminPlugin`** expose full control over rate limit and block state. In **production**, mount them **only** behind **authentication**, **authorization**, and ideally **network isolation** (VPN, admin-only ingress). The JSDoc on those factories repeats this warning—treat it as mandatory for exposed deployments.
+
+## Atomicity & Distributed Systems
+
+### Redis operations are atomic
+
+**All `RedisStore` operations use Lua scripts for atomicity.** Each rate limit check executes as a single atomic operation on the Redis server—no race conditions, no requests slipping through under concurrent load from multiple processes or nodes.
+
+**What this means:**
+
+- **Sliding window:** `ZREMRANGEBYSCORE` (prune expired) + `ZADD` (add entries) + `ZCARD` (count) + `PEXPIRE` — all in one `EVAL`
+- **Fixed window:** `INCRBY` + conditional `PEXPIRE` + `PTTL` — all in one `EVAL`
+- **Token bucket:** `HGET` (read state) + refill calculation + token deduction + `HSET` (write) + `PEXPIRE` — all in one `EVAL`
+
+**No interleaving:** Other Redis clients cannot execute commands between the steps of a rate limit operation. The entire check-and-increment logic runs atomically.
+
+**Why Lua?** Redis `EVAL` executes Lua scripts as atomic blocks. While a script runs, Redis does not process other commands from other clients. This guarantees that:
+
+1. **Concurrent requests** from multiple app instances cannot race
+2. **Distributed systems** get consistent, accurate rate limiting
+3. **Multi-step operations** (read → calculate → write) are safe
+
+**Script caching:** Most Redis clients (including `ioredis` and `node-redis`) automatically cache Lua scripts server-side after the first execution using `EVALSHA`. Subsequent calls reuse the cached script, reducing network overhead. The library passes the full script source on every call; the client handles optimization transparently.
+
+**MemoryStore & ClusterStore:** In-process stores use JavaScript synchronous operations (no atomicity concerns within a single event loop). `ClusterStore` uses IPC message passing with acknowledgments to coordinate across Node.js cluster workers.
+
+### Distributed deployment considerations
+
+When running multiple app instances with `RedisStore`:
+
+- **Shared state:** All instances see the same counters in Redis
+- **Consistent limits:** A user hitting 100 req/min is enforced globally, not per instance
+- **No coordination needed:** Each instance independently calls Redis; Lua atomicity handles races
+- **Network latency:** Redis round-trip adds ~1-5ms per request (use `InMemoryShield` to cache blocked keys and eliminate Redis calls for hot attackers)
+
+**Cluster vs Redis:**
+
+- **`ClusterStore`:** Coordinates rate limits across Node.js `cluster` workers in a **single machine** (IPC, no network)
+- **`RedisStore`:** Coordinates across **multiple machines/containers/regions** (network, shared Redis)
+
+For multi-instance deployments (Kubernetes, serverless, multiple VMs), use **`RedisStore`**. For single-machine concurrency (one server, multiple CPU cores), use **`ClusterStore`**.
 
 ## Limiter composition
 
@@ -650,9 +849,31 @@ app.use(expressRateLimiter({
 
 ## Request queuing
 
+**Source of truth:** Full FIFO semantics, head-of-line blocking, and multi-key patterns are documented in JSDoc on [`src/queue/RateLimiterQueue.ts`](src/queue/RateLimiterQueue.ts) (`RateLimiterQueueOptions`, `RateLimiterQueue`). That file is the canonical explanation; this section summarizes it for README readers.
+
 **Typical use case:** Outbound API throttling (one queue per external API, single key for all requests).
 
-**Head-of-line blocking:** The queue is a single FIFO array. If you use multiple different keys with the same queue, a blocked request for key "A" will cause requests for key "B" to wait, even if "B" has capacity. For independent keys, create one queue per key instead (see examples below).
+**Head-of-line blocking (by design):** The queue is one **FIFO** array. If you share that queue across **different** keys, a waiting request for key **A** sits in front of a request for key **B** — even when **B** still has rate-limit capacity — because release order follows **enqueue** order, not per-key fairness.
+
+```mermaid
+flowchart LR
+  A["enqueue: key A — over limit, waits first"] --> B["enqueue: key B — has quota but queued after A"]
+  B --> C["B cannot skip ahead — one FIFO per RateLimiterQueue"]
+```
+
+**Advanced: many keys:** Use **`KeyedRateLimiterQueue`** for an **LRU-bounded** map of inner queues (same window options as **`createRateLimiterQueue`**, plus **`maxKeys`**). You can still use a plain **`Map<string, RateLimiterQueue>`** if you manage eviction yourself.
+
+```typescript
+// Bounded multi-key queues (LRU eviction)
+import { KeyedRateLimiterQueue } from 'ratelimit-flex';
+
+const keyed = new KeyedRateLimiterQueue({
+  maxRequests: 10,
+  windowMs: 60_000,
+  maxKeys: 2_000,
+});
+await keyed.removeTokens('tenant-a', 'tenant-a');
+```
 
 ```typescript
 // Outbound API rate limiting (non-HTTP)
@@ -696,9 +917,11 @@ await app.register(fastifyQueuedRateLimiter, {
 // Fastify plugin automatically calls queue.shutdown() on server close
 ```
 
-**Multiple independent keys:** Create one queue per key to avoid head-of-line blocking:
+**One queue per key (recommended):**
 
 ```typescript
+import { createRateLimiterQueue, type RateLimiterQueue } from 'ratelimit-flex';
+
 // ❌ Bad: single queue with multiple keys causes head-of-line blocking
 const sharedQueue = createRateLimiterQueue({ maxRequests: 10, windowMs: 1000 });
 await sharedQueue.removeTokens('user:alice'); // Blocks...
@@ -742,27 +965,43 @@ await app.register(fastifyQueuedRateLimiter, {
 
 ## Choosing a strategy
 
-| Strategy       | Best for                     | Accuracy | Memory | Burst handling   |
-|----------------|------------------------------|----------|--------|------------------|
-| Sliding window | General API rate limiting    | High     | Medium | Smooth           |
-| Token bucket   | APIs that allow bursts       | High     | Low    | Allows bursts    |
-| Fixed window   | Simple counting, low memory  | Moderate | Low    | Edge spikes      |
+**All three algorithms are fully implemented** with atomic Lua scripts in `RedisStore` and efficient in-memory tracking in `MemoryStore`:
 
-**Sliding window** — Counts requests in a moving time window. Best default when you care about fairness and boundary behavior (no big “reset line” artifacts).
+| Strategy       | Best for                     | Accuracy | Memory | Burst handling   | Boundary behavior |
+|----------------|------------------------------|----------|--------|------------------|-------------------|
+| **Sliding window** | General API rate limiting    | **High** | Medium | Smooth           | No reset spikes   |
+| **Token bucket**   | APIs that allow bursts       | **High** | Low    | **Allows bursts**    | Controlled bursts |
+| **Fixed window**   | Simple counting, low memory  | Moderate | **Low**    | Edge spikes      | 2x burst at boundaries |
+
+### Sliding window (default, recommended)
+
+Counts requests in a **moving time window**. Most accurate and fair - no "reset line" artifacts.
+
+**Implementation:**
+- **Redis:** `ZSET` with `ZREMRANGEBYSCORE` + `ZADD` + `ZCARD` in atomic Lua
+- **Memory:** Sorted array of timestamps per key
+- **Boundary behavior:** Smooth - no 2x burst at window edges
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
 
 app.use(
   expressRateLimiter({
-    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    strategy: RateLimitStrategy.SLIDING_WINDOW, // default
     windowMs: 60_000,
     maxRequests: 100,
   }),
 );
 ```
 
-**Token bucket** — Refills tokens on a schedule; clients can burst up to `bucketSize`. Good for spiky traffic (mobile, retries, webhooks).
+### Token bucket (for bursty traffic)
+
+Refills tokens on a schedule; clients can **burst** up to `bucketSize`. Best for spiky traffic (mobile apps, retries, webhooks).
+
+**Implementation:**
+- **Redis:** `HASH` with atomic refill calculation + token deduction in Lua
+- **Memory:** Stores `{ tokens, lastRefill }` per key
+- **Burst control:** Allows bursts when bucket is full
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
@@ -770,14 +1009,21 @@ import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
 app.use(
   expressRateLimiter({
     strategy: RateLimitStrategy.TOKEN_BUCKET,
-    tokensPerInterval: 20,
-    interval: 60_000,
-    bucketSize: 60,
+    tokensPerInterval: 20,  // Add 20 tokens per minute
+    interval: 60_000,       // Every 60 seconds
+    bucketSize: 60,         // Max 60 tokens (allows 3x burst)
   }),
 );
 ```
 
-**Fixed window** — One counter per fixed time slice. Simplest and lightest; acceptable when occasional boundary spikes are OK (internal tools, coarse limits).
+### Fixed window (simplest)
+
+One counter per fixed time slice. Simplest and lowest memory; acceptable when occasional boundary spikes are OK.
+
+**Implementation:**
+- **Redis:** `INCRBY` + `PEXPIRE` in atomic Lua script
+- **Memory:** Single counter per key
+- **Warning:** Users can burst 2x limit at boundaries (50 at 11:59:59, 50 at 12:00:00)
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
@@ -881,6 +1127,8 @@ const app = express();
 app.use(expressRateLimiter(clusterPreset({ maxRequests: 100, windowMs: 60_000 })));
 ```
 
+**IPC protocol version:** Worker `init` and primary `init_ack` carry **`protocolVersion`** (constants **`CLUSTER_IPC_PROTOCOL_VERSION`** and **`MIN_CLUSTER_IPC_PROTOCOL_VERSION`** in [`src/cluster/protocol.ts`](src/cluster/protocol.ts)). During rolling deploys, if a worker’s version is **newer** than the primary, the primary responds with **`init_nack`** so the process fails fast instead of corrupting counters. Legacy peers that omit **`protocolVersion`** are treated as **version 1**.
+
 ### When to use RedisStore
 
 Use **RedisStore** when:
@@ -905,6 +1153,10 @@ app.use(expressRateLimiter({ store, strategy: RateLimitStrategy.SLIDING_WINDOW }
 ```
 
 Prefer passing a **shared Redis URL or client** from every instance. Use a **distinct key prefix** (`keyPrefix`) per app or per limiter if several services share one Redis.
+
+**Clients and adapters:** The default **`url`** path uses optional peer **`ioredis`**. For **`@redis/client`** (node-redis), **`adaptNodeRedisClient`**; for **ioredis**, **`adaptIoRedisClient`**—see **`RedisLikeClient`** in the API reference. **Bun** and **Upstash** need thin wrappers (Lua **`EVAL`** required); copy-paste starters live in **[`examples/redis/README.md`](examples/redis/README.md)** (not published packages—maintain locally).
+
+**Lua `EVAL`, `EVALSHA`, and connections:** **`RedisStore`** always invokes **`eval(fullScript, …)`** on your client. It does **not** embed **`EVALSHA`**. Clients often optimize repeated **`EVAL`** into **`EVALSHA`** after Redis caches the script. **Reuse one long-lived client per process** (or warm serverless instance) where possible—per-request connections add latency and can reduce script-cache hits on the Redis side.
 
 **Multi-window:** The convenience **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) creates one **`MemoryStore` per window**. It does **not** switch those slots to Redis automatically. For the same multi-window policy across horizontally scaled processes, build **`groupedWindowStores`** with one **`RedisStore`** (or other shared `RateLimitStore`) per slot.
 
@@ -1798,6 +2050,10 @@ Use **`increment`’s optional `{ maxRequests }`** for dynamic caps on window st
 Pass your store as **`store`** in middleware options.
 
 ## API reference
+
+**Generated reference (full surface):** From a git checkout, run **`npm run docs:api`** (requires devDependency **`typedoc`**) and open **`docs/api/index.html`**. This complements the table below and the [Configuration reference](#configuration-reference).
+
+**Recipes:** [docs/recipes.md](docs/recipes.md) — NestJS + GraphQL, Express behind a reverse proxy, Hono on Cloudflare Workers.
 
 | Export | Role |
 |--------|------|

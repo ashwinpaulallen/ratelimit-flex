@@ -2,6 +2,75 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.0.0] - 2026-04-06
+
+### Documentation
+
+- **README:** Added **"Atomicity & Distributed Systems"** section explaining that all `RedisStore` operations use Lua scripts for atomic multi-step operations, preventing race conditions in distributed deployments. Clarifies that concurrent requests cannot interleave, and provides guidance on `ClusterStore` vs `RedisStore` for different deployment scenarios.
+- **README:** Enhanced **"Choosing a strategy"** section to explicitly state that all three algorithms (sliding window, token bucket, fixed window) are fully implemented with atomic Lua scripts in `RedisStore`. Added implementation details for each strategy showing the specific Redis commands used. Updated Quick Start examples to show all three strategies.
+- **README:** Updated feature list to emphasize "Three algorithms" with explicit mention of atomic Lua script implementation in both stores.
+
+
+### Breaking changes
+
+- **NestJS:** Removed **`NestRateLimitModuleOptions.global`** and **`global`** on **`RateLimitModule.forRootAsync`**. Use **`globalGuard`** only (same boolean semantics). Passing an object that **still has own property `global`** throws a clear error at module registration time.
+
+### Added
+
+- **`KeyedRateLimiterQueue`** — LRU-bounded pool of **`RateLimiterQueue`** instances for many independent keys (see README **Request queuing**).
+- **Hono:** **`skipFailedRequests`** and **`skipSuccessfulRequests`** on **`rateLimiter()`** — after **`await next()`**, decrements when **`c.res.status`** matches Express semantics.
+- **Hono:** **`resolvedHonoRollbackStatus`** exported from **`ratelimit-flex/hono`** — normalizes missing **`c.res`**, **`c.res.status`** **0**, non-finite values, or codes outside **100–599** to **200** for predictable rollback logic.
+- **Metrics:** optional **`metrics.shutdownOnProcessExit`** — registers **`SIGINT`** / **`SIGTERM`** handlers that call **`MetricsManager.shutdown`** (removed on shutdown; useful for Express without `onClose`).
+- **`compose.race([...layers], { raceTimeoutMs })`** — array overload to configure race timeout without `new ComposedStore(...)`.
+- **`HonoRateLimiterHandler`:** parity helpers with Express — **`getHistory`**, **`shutdownMetrics`**, **`metricsEndpoint`**, **`on` / `off` / `once` / `removeListener`** for metrics events, **`keyManager`**, **`shield`**, **`openTelemetryAdapter`**.
+- **`RateLimiterQueue`:** error code **`invalid_cost`** for non-finite or less-than-1 **`cost`**.
+
+### Changed
+
+- **`InMemoryShield.getActiveKeys`:** merges inner **`getActiveKeys()`** with non-expired shield-cache entries (shield row wins on key collision) for accurate admin snapshots.
+- **`RateLimiterQueue`:** FIFO uses an intrusive doubly linked list so queue timeouts **`unlink`** in **O(1)** instead of **`indexOf` + `splice`** (**O(n)**). **`getQueueEntriesForTests()`** replaces tests poking the old internal array.
+- **`RateLimiterQueue`:** **`getTokensRemaining`** undoes the probe increment if **`decrement`** throws; blocked-head retry uses **`MIN_BLOCK_RETRY_DELAY_MS`**.
+- **`RedisStore` (sliding window):** builds unique ZSET member ids with one batched **`randomBytes(cost * 16)`** instead of **`cost`** separate calls.
+- **`MetricsManager.shutdown`:** removes **`SIGINT`** / **`SIGTERM`** listeners registered for **`shutdownOnProcessExit`**.
+- **`ComposedStore` `race` mode:** layer **`increment`** rejections no longer reject the whole **`increment()`**; first fulfilled layer wins; all-reject yields **`storeUnavailable`**-style result with per-layer rows.
+- **`middleware/decrement-stores-after-consume.ts`:** shared **`decrementStoresAfterConsume`** used by Express, Fastify, and Hono skip-response paths (DRY).
+
+### Fixed
+
+- **`RateLimitEngine.consumeGroupedWindows`:** on mid-loop exception, best-effort **decrement** rollback for completed slots, then rethrows the original error.
+
+### Documentation (historical / rolled up)
+
+- **Discoverability:** `docs/recipes.md`, **`npm run docs:api`**, security, Redis examples, queuing notes, **`penaltyBox` vs Key Manager**, In-memory shield warnings — many items landed across **2.4.x**; see **2.4.0** below for the Nest/Hono integration entry points.
+- **NestJS:** **`RateLimitGuard.onModuleDestroy`** JSDoc — metrics shutdown here; auto-**`KeyManager`** from **`penaltyBox`** is destroyed by **`RateLimitModuleLifecycle`**.
+
+### Tests & fixes (rolled up from planned 2.4.1)
+
+- **Tests:** Composed-store **minified `constructor.name`** + **`resolveIncrementOpts`**; Nest **`RateLimitGuard`** route-engine fingerprint regression; **`clamp`** property-style tests.
+
+- **Cluster IPC:** **`protocolVersion`** handshake (**`init`** / **`init_ack`** / **`init_nack`**).
+
+- **In-memory shield:** Non-production **double-wrap** warning when **`inMemoryBlock`** stacks on an existing **`InMemoryShield`**.
+
+### Breaking changes (NestJS) — from 2.4.x line
+
+- **`RateLimitDecoratorOptions`:** **`strategy` was removed.** Per-route strategy was never applied correctly (shared engine). Migrate: set `strategy` on `RateLimitModule.forRoot` / `forRootAsync`, use another `RateLimitModule`, or remove `strategy` from `@RateLimit(...)`. Legacy metadata with a conflicting `strategy` **throws** when `NODE_ENV !== 'production'`; in production the key is ignored.
+
+### Fixed
+
+- **NestJS:** `RateLimitGuard` re-merge of module options no longer trips the `penaltyBox` + `keyManager` mutual-exclusion check when both come from `forRoot` with `penaltyBox` (auto KeyManager). **`mergeRateLimiterOptions`** accepts optional **`allowPenaltyBoxWithKeyManager`**.
+
+- **NestJS:** Per-route **`RateLimitEngine`** cache is keyed by handler **and** an options **fingerprint** (`fingerprintRouteEngineOptions`), so a changed merged config for the same handler no longer reuses a stale engine.
+
+- **NestJS:** Conflicting per-route `strategy` metadata is **rejected** in development/test instead of silently warned.
+
+- **Composition:** `resolveIncrementOpts` no longer relies on `constructor.name === 'ComposedStore'` (unsafe with minifiers). Detection uses **`COMPOSED_STORE_BRAND`**, **`registerComposedStoreFacade`** / **`unregisterComposedStoreFacade`** (WeakMap, for opaque `Proxy` facades), optional **`COMPOSED_UNWRAP`** (e.g. `InMemoryShield` → inner), and a prototype-chain check (subclasses / forwarding proxies). **`isComposedStoreBrand()`** implements this; **`COMPOSED_UNWRAP`** is exported for custom wrappers.
+
+### Internal
+
+- **`RateLimitEngine`:** shared **`DEFAULT_BLOCK_RESET_FALLBACK_MS`** for block/passthrough reset fallbacks (no behavior change).
+- **`pretest`** script runs **`sync-version`** so **`VERSION`** matches **`package.json`** before **`vitest`**.
+
 ## [2.4.0] - 2026-04-06
 
 ### Added
@@ -15,7 +84,7 @@ All notable changes to this project are documented in this file.
   - `honoDefaultKeyGenerator` exported for custom key generator composition
   - `inMemoryBlock` support in both `rateLimiter` and `queuedRateLimiter` for DoS protection
   - Error handling wrapper for graceful failure recovery
-  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` not supported due to Hono's lack of response lifecycle hooks
+  - **Note:** `skipFailedRequests`/`skipSuccessfulRequests` were added on **`rateLimiter()`** in **3.0.0** (after **`await next()`**, using **`c.res.status`**).
 
 ### Changed
 
@@ -23,7 +92,7 @@ All notable changes to this project are documented in this file.
 
 ### Breaking changes
 
-- **NestJS (`RateLimitModule.forRoot` / `forRootAsync`):** If you previously passed **`global: false`** (or **`globalGuard: false`**) only to **disable automatic `APP_GUARD` registration** while still relying on the module being a **Nest global module** (so `RATE_LIMIT_*` tokens were available everywhere without importing `RateLimitModule` again), behavior has changed: **`false` now also sets `DynamicModule.global` to `false`**, so those tokens are no longer re-exported app-wide unless you import `RateLimitModule` where needed (or register the guard manually with `@UseGuards(RateLimitGuard)` and import the module for DI). Prefer the new name **`globalGuard`**; **`global`** remains as a deprecated alias. See `NestRateLimitModuleOptions` JSDoc in `types.ts`.
+- **NestJS (`RateLimitModule.forRoot` / `forRootAsync`):** If you previously passed **`globalGuard: false`** only to **disable automatic `APP_GUARD` registration** while still relying on the module being a **Nest global module** (so `RATE_LIMIT_*` tokens were available everywhere without importing `RateLimitModule` again), behavior has changed: **`false` now also sets `DynamicModule.global` to `false`**, so those tokens are no longer re-exported app-wide unless you import `RateLimitModule` where needed (or register the guard manually with `@UseGuards(RateLimitGuard)` and import the module for DI). The deprecated **`global`** option was removed in **3.0.0** — use **`globalGuard`** only.
 
 ## [2.3.0] - 2026-04-07
 

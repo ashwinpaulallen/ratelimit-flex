@@ -42,6 +42,12 @@ export function validateMetricsConfig(config: MetricsConfig): void {
   if (histogramBuckets !== undefined) {
     assertHistogramBucketBounds(histogramBuckets, 'metrics.histogramBuckets');
   }
+
+  if (config.shutdownOnProcessExit !== undefined && typeof config.shutdownOnProcessExit !== 'boolean') {
+    throw new Error(
+      `ratelimit-flex: metrics.shutdownOnProcessExit must be a boolean (got ${String(config.shutdownOnProcessExit)}).`,
+    );
+  }
 }
 
 /**

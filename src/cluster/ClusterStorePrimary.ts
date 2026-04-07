@@ -7,7 +7,11 @@ import type {
   ClusterStoreInitOptions,
   ClusterWorkerMessage,
 } from './protocol.js';
-import { isRateLimitFlexMessage } from './protocol.js';
+import {
+  CLUSTER_IPC_PROTOCOL_VERSION,
+  MIN_CLUSTER_IPC_PROTOCOL_VERSION,
+  isRateLimitFlexMessage,
+} from './protocol.js';
 
 function isClusterWorkerInboundMessage(
   msg: ClusterWorkerMessage | ClusterPrimaryMessage
@@ -146,12 +150,46 @@ export class ClusterStorePrimary {
   }
 
   private async handleInit(worker: Worker, msg: Extract<ClusterWorkerMessage, { type: 'init' }>): Promise<void> {
+    const negotiated = ClusterStorePrimary.parseInitProtocolVersion(msg.protocolVersion);
+    if (negotiated === null) {
+      worker.send({
+        channel: CHANNEL,
+        type: 'init_nack',
+        keyPrefix: msg.keyPrefix,
+        error:
+          'ClusterStore: invalid init.protocolVersion (expected a positive integer, or omit for version 1).',
+        supportedProtocolVersion: CLUSTER_IPC_PROTOCOL_VERSION,
+      } satisfies ClusterPrimaryMessage);
+      return;
+    }
+    if (negotiated < MIN_CLUSTER_IPC_PROTOCOL_VERSION) {
+      worker.send({
+        channel: CHANNEL,
+        type: 'init_nack',
+        keyPrefix: msg.keyPrefix,
+        error: `Cluster IPC protocol version ${negotiated} is no longer supported by this primary (minimum ${MIN_CLUSTER_IPC_PROTOCOL_VERSION}).`,
+        supportedProtocolVersion: MIN_CLUSTER_IPC_PROTOCOL_VERSION,
+      } satisfies ClusterPrimaryMessage);
+      return;
+    }
+    if (negotiated > CLUSTER_IPC_PROTOCOL_VERSION) {
+      worker.send({
+        channel: CHANNEL,
+        type: 'init_nack',
+        keyPrefix: msg.keyPrefix,
+        error: `Cluster IPC protocol version ${negotiated} is newer than this primary supports (${CLUSTER_IPC_PROTOCOL_VERSION}). Upgrade the primary process first.`,
+        supportedProtocolVersion: CLUSTER_IPC_PROTOCOL_VERSION,
+      } satisfies ClusterPrimaryMessage);
+      return;
+    }
+
     if (this.stores.has(msg.keyPrefix)) {
       // Additional workers for the same limiter share the existing store — do not replace (would reset counters).
       worker.send({
         channel: CHANNEL,
         type: 'init_ack',
         keyPrefix: msg.keyPrefix,
+        protocolVersion: negotiated,
       } satisfies ClusterPrimaryMessage);
       return;
     }
@@ -161,7 +199,23 @@ export class ClusterStorePrimary {
       channel: CHANNEL,
       type: 'init_ack',
       keyPrefix: msg.keyPrefix,
+      protocolVersion: negotiated,
     } satisfies ClusterPrimaryMessage);
+  }
+
+  /** @returns negotiated integer version, or `null` if invalid */
+  private static parseInitProtocolVersion(raw: number | undefined): number | null {
+    if (raw === undefined) {
+      return 1;
+    }
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) {
+      return null;
+    }
+    const v = Math.floor(raw);
+    if (v !== raw) {
+      return null;
+    }
+    return v;
   }
 
   private async handleIncrement(

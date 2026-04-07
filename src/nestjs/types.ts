@@ -1,5 +1,5 @@
 import type { ExecutionContext } from '@nestjs/common';
-import type { RateLimitOptions, RateLimitStrategy } from '../types/index.js';
+import type { RateLimitOptions } from '../types/index.js';
 
 /**
  * Options for RateLimitModule.forRoot().
@@ -13,11 +13,6 @@ export type NestRateLimitModuleOptions = Partial<RateLimitOptions> & {
    * **not** global — import `RateLimitModule` wherever you need the tokens.
    */
   globalGuard?: boolean;
-
-  /**
-   * @deprecated Use {@link NestRateLimitModuleOptions.globalGuard} instead (same behavior).
-   */
-  global?: boolean;
 
   /**
    * Custom key generator that receives the NestJS ExecutionContext.
@@ -53,18 +48,20 @@ export type NestRateLimitModuleOptions = Partial<RateLimitOptions> & {
 };
 
 /**
- * Per-route override via @RateLimit() decorator.
+ * Per-route override via {@link RateLimit}.
+ *
+ * @remarks
+ * The guard shares **one** {@link RateLimitEngine} (and backing `store`) with the module’s
+ * {@link RateLimitModule} configuration. You can tune **limits and keys** per route, but you **cannot**
+ * switch **algorithm** (`strategy`) here — set `strategy` on {@link RateLimitModule.forRoot} / `forRootAsync`,
+ * use a separate feature module with its own `RateLimitModule`, or split apps. Passing a conflicting
+ * `strategy` via legacy metadata throws when `NODE_ENV !== 'production'` (see README: NestJS limitations).
  */
 export interface RateLimitDecoratorOptions {
-  /** Max requests for this route. Overrides global maxRequests. */
+  /** Max requests for this route. Overrides module `maxRequests`. */
   maxRequests?: number;
-  /** Window duration for this route. Overrides global windowMs. */
+  /** Window duration for this route. Overrides module `windowMs`. */
   windowMs?: number;
-  /**
-   * Strategy override for this route.
-   * @remarks If this differs from the module’s strategy, {@link RateLimitGuard} ignores it (shared store/engine); a dev warning is emitted when `NODE_ENV !== 'production'`.
-   */
-  strategy?: RateLimitStrategy;
   /** Custom key generator for this route */
   keyGenerator?: (context: ExecutionContext) => string | Promise<string>;
   /** Cost for this route (weighted limiting) */

@@ -7,20 +7,11 @@ import {
   resolveHeaderConfig,
 } from '../headers/index.js';
 import { MetricsManager } from '../metrics/manager.js';
-import {
-  RateLimitEngine,
-  defaultKeyGenerator,
-  matchingDecrementOptions,
-  resolveIncrementOpts,
-} from '../strategies/rate-limit-engine.js';
+import { RateLimitEngine, defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
+import { decrementStoresAfterConsume } from './decrement-stores-after-consume.js';
 import type { KeyManager } from '../key-manager/KeyManager.js';
 import type { InMemoryShield } from '../shield/InMemoryShield.js';
-import type {
-  RateLimitConsumeResult,
-  RateLimitInfo,
-  RateLimitOptions,
-  WindowRateLimitOptions,
-} from '../types/index.js';
+import type { RateLimitConsumeResult, RateLimitInfo, RateLimitOptions } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
 import {
@@ -107,23 +98,6 @@ function applyHeaderMap(reply: FastifyReply, headers: Record<string, string>): v
   for (const [name, value] of Object.entries(headers)) {
     reply.header(name, value);
   }
-}
-
-function decrementStores(resolved: RateLimitOptions, key: string, req: unknown): void {
-  const incOpts = resolveIncrementOpts(resolved, req);
-  const decOpts = matchingDecrementOptions(incOpts);
-  const w = resolved as WindowRateLimitOptions;
-  if (w.groupedWindowStores && w.groupedWindowStores.length > 0) {
-    for (const g of w.groupedWindowStores) {
-      void g.store.decrement(key, decOpts).catch(() => {
-        /* ignore */
-      });
-    }
-    return;
-  }
-  void resolved.store.decrement(key, decOpts).catch(() => {
-    /* ignore */
-  });
 }
 
 const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, options) => {
@@ -253,7 +227,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
     const success = status < 400;
 
     if ((flags.onFailed && failed) || (flags.onSuccess && success)) {
-      decrementStores(resolved, key, request);
+      decrementStoresAfterConsume(resolved, key, request);
     }
   });
 };

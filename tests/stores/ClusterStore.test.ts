@@ -11,6 +11,7 @@ vi.mock('node:crypto', async (importOriginal) => {
   };
 });
 
+import { CLUSTER_IPC_PROTOCOL_VERSION } from '../../src/cluster/protocol.js';
 import { ClusterStore } from '../../src/stores/ClusterStore.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 
@@ -88,6 +89,7 @@ describe('ClusterStore', () => {
         windowMs: 60_000,
         maxRequests: 100,
       },
+      protocolVersion: CLUSTER_IPC_PROTOCOL_VERSION,
     });
 
     ackInit('my-prefix');
@@ -110,6 +112,18 @@ describe('ClusterStore', () => {
     });
 
     await inc;
+  });
+
+  it('init_nack rejects ready and causes increment to fail', async () => {
+    const store = createStore('nack-kp');
+    msgHandler({
+      channel: 'rate_limiter_flex',
+      type: 'init_nack',
+      keyPrefix: 'nack-kp',
+      error: 'upgrade primary first',
+      supportedProtocolVersion: 1,
+    });
+    await expect(store.increment('k')).rejects.toThrow('upgrade primary first');
   });
 
   it('constructor throws a PM2-specific error when PM2_HOME is set and not a cluster worker', () => {

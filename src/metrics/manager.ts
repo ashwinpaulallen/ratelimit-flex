@@ -29,7 +29,19 @@ export class MetricsManager {
 
   private readonly openTelemetryAdapter: OpenTelemetryAdapter | null;
 
-  constructor(config: MetricsConfig | boolean | undefined, shield?: InMemoryShield | null) {
+  /** When {@link MetricsConfig.shutdownOnProcessExit} is true: same handler for SIGINT/SIGTERM, removed in {@link shutdown}. */
+  private processExitHandler: (() => void) | null = null;
+
+  /**
+   * @param shield — Same {@link InMemoryShield} reference the engine uses as `store` after
+   *   {@link resolveStoreWithInMemoryShield} (or `null` / omitted). {@link MetricsCollector} fills
+   *   `snapshot.shield` from `shield.getMetrics()`; request counters still reflect the path through
+   *   the engine. If multiple shields are stacked, only this instance is observed (usually the outer layer).
+   */
+  constructor(
+    config: MetricsConfig | boolean | undefined,
+    shield?: InMemoryShield | null,
+  ) {
     const normalized = normalizeMetricsConfig(config);
     this.normalized = normalized;
     if (normalized === undefined) {
@@ -73,6 +85,14 @@ export class MetricsManager {
       });
     } else {
       this.openTelemetryAdapter = null;
+    }
+
+    if (normalized.shutdownOnProcessExit === true) {
+      this.processExitHandler = (): void => {
+        void this.shutdown();
+      };
+      process.once('SIGINT', this.processExitHandler);
+      process.once('SIGTERM', this.processExitHandler);
     }
   }
 
@@ -147,6 +167,11 @@ export class MetricsManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.processExitHandler !== null) {
+      process.off('SIGINT', this.processExitHandler);
+      process.off('SIGTERM', this.processExitHandler);
+      this.processExitHandler = null;
+    }
     this.stop();
     this.prometheusAdapter?.destroy();
     this.openTelemetryAdapter?.shutdown();

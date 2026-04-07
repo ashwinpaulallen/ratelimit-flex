@@ -9,8 +9,11 @@ import {
  * Override rate limit settings for a specific controller or route.
  *
  * @remarks
- * Only **single-window** overrides are supported here. For multiple windows (e.g. per-second + per-minute),
- * configure `limits` / a composed `store` on `RateLimitModule.forRoot(...)`.
+ * Only **single-window** tuning (`maxRequests`, `windowMs`, `cost`, `keyGenerator`) is supported.
+ * **`strategy` is not a valid option** — the guard shares the module’s engine; set `strategy` on
+ * `RateLimitModule.forRoot`, use another `RateLimitModule`, or see README (NestJS: limitations).
+ * For multiple windows (e.g. per-second + per-minute), configure `limits` / a composed `store` on
+ * `RateLimitModule.forRoot(...)`.
  *
  * @example
  * // On a controller — all routes get these settings

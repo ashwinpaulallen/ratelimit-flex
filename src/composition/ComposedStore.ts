@@ -1,5 +1,6 @@
 import { matchingDecrementOptions } from '../strategies/rate-limit-engine.js';
 import { MemoryStore } from '../stores/memory-store.js';
+import { COMPOSED_STORE_BRAND, registerComposedStoreConstructor } from './composed-store-brand.js';
 import type {
   RateLimitActiveKeyEntry,
   RateLimitDecrementOptions,
@@ -185,6 +186,8 @@ function isIncrementResultStale(result: ComposedIncrementResult, now: number): b
  * @see {@link ComposedStoreOptions}
  */
 export class ComposedStore implements RateLimitStore {
+  readonly [COMPOSED_STORE_BRAND] = true;
+
   readonly mode: CompositionMode;
 
   readonly layers: readonly CompositionLayer[];
@@ -383,7 +386,9 @@ export class ComposedStore implements RateLimitStore {
   }
 
   private recordLastIncrementResult(key: string, result: ComposedIncrementResult): void {
-    this.evictStaleLastIncrementEntries();
+    if (this.lastIncrementByKey.size > 10_000) {
+      this.evictStaleLastIncrementEntries();
+    }
     this.lastIncrementByKey.set(key, result);
   }
 
@@ -668,13 +673,26 @@ export class ComposedStore implements RateLimitStore {
       timeoutId = setTimeout(() => resolve('timeout'), this.raceTimeoutMs);
     });
 
-    const wrapped = incs.map((p, i) => p.then((r) => ({ kind: 'ok' as const, i, r })));
-    type RaceOutcome =
+    /** Wrappers never reject so `Promise.race` always settles (rejections become structured outcomes). */
+    type RaceFirst =
       | { kind: 'ok'; i: number; r: RateLimitResult }
-      | { kind: 'timeout'; i: -1; r: null };
-    const first: RaceOutcome = await Promise.race([
+      | { kind: 'err'; i: number; message: string }
+      | { kind: 'timeout' };
+
+    const wrapped = incs.map((p, i) =>
+      p.then(
+        (r): RaceFirst => ({ kind: 'ok', i, r }),
+        (e): RaceFirst => ({
+          kind: 'err',
+          i,
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      ),
+    );
+
+    const first: RaceFirst = await Promise.race([
       ...wrapped,
-      timeoutP.then((): RaceOutcome => ({ kind: 'timeout', i: -1, r: null })),
+      timeoutP.then((): RaceFirst => ({ kind: 'timeout' })),
     ]);
 
     if (timeoutId !== undefined) {
@@ -724,8 +742,41 @@ export class ComposedStore implements RateLimitStore {
       }
     }
 
+    let winnerI: number;
+    if (first.kind === 'ok') {
+      winnerI = first.i;
+    } else {
+      winnerI = -1;
+      for (let i = 0; i < settled.length; i++) {
+        if (settled[i]!.status === 'fulfilled') {
+          winnerI = i;
+          break;
+        }
+      }
+      if (winnerI === -1) {
+        const firstLabel = this.layers[0]!.label;
+        return {
+          totalHits: 0,
+          remaining: 0,
+          resetTime: new Date(),
+          isBlocked: true,
+          storeUnavailable: true,
+          mode: 'race',
+          decidingLayer: firstLabel,
+          decidingPath: firstLabel,
+          layers,
+        };
+      }
+    }
+
+    const winSt = settled[winnerI]!;
+    if (winSt.status !== 'fulfilled') {
+      throw new Error('ComposedStore race: winning layer increment is not fulfilled');
+    }
+    const winnerR = winSt.value;
+
     for (let j = 0; j < this.layers.length; j++) {
-      if (j === first.i) {
+      if (j === winnerI) {
         continue;
       }
       const st = settled[j]!;
@@ -736,13 +787,13 @@ export class ComposedStore implements RateLimitStore {
       }
     }
 
-    this.pushFrame(key, [first.i]);
+    this.pushFrame(key, [winnerI]);
 
     return {
-      ...first.r,
+      ...winnerR,
       mode: 'race',
-      decidingLayer: this.layers[first.i]!.label,
-      decidingPath: composeDecidingPath(this.layers[first.i]!.label, first.r),
+      decidingLayer: this.layers[winnerI]!.label,
+      decidingPath: composeDecidingPath(this.layers[winnerI]!.label, winnerR),
       layers,
     };
   }
@@ -875,3 +926,5 @@ export class ComposedStore implements RateLimitStore {
     }
   }
 }
+
+registerComposedStoreConstructor(ComposedStore);

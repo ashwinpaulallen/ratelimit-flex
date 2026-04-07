@@ -12,6 +12,22 @@ import { RateLimitStrategy } from '../types/index.js';
 import { sanitizeIncrementCost, sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 
 /**
+ * Unique ZSET member ids for sliding-window Lua scripts. One `randomBytes` call when `cost > 1`
+ * reduces syscall overhead vs per-member `randomBytes(16)`.
+ */
+function slidingWindowUniqueMembers(cost: number): string[] {
+  if (cost <= 0) {
+    return [];
+  }
+  const buf = randomBytes(cost * 16);
+  const members: string[] = new Array(cost);
+  for (let i = 0; i < cost; i++) {
+    members[i] = buf.subarray(i * 16, (i + 1) * 16).toString('hex');
+  }
+  return members;
+}
+
+/**
  * Strategy options for sliding or fixed window when using {@link RedisStore}.
  *
  * @since 1.0.0
@@ -132,6 +148,7 @@ export type RedisStoreOptions = RedisStoreStrategyOptions & {
   /**
    * @description Prefix for all keys written by this store.
    * @default `"rlf:"`
+   * @remarks Use a **distinct** prefix per application or tenant when several services share one Redis database so namespaces do not collide (see package README **Security and abuse**).
    */
   keyPrefix?: string;
   /**
@@ -538,6 +555,11 @@ type IoRedisInstance = {
  * @description Shares counters across nodes; use when multiple processes must enforce one global limit.
  * Supports {@link RateLimitIncrementOptions.cost} on all strategies; sliding window uses unique ZSET members per unit (crypto randomness from Node) so `ZADD` never merges distinct hits.
  * Pass either `client` (recommended) or `url` (loads optional peer `ioredis` at runtime).
+ *
+ * @remarks
+ * **Lua `EVAL`:** Each quota call uses {@link RedisLikeClient.eval} with the **full script source** every time.
+ * The library does not track `EVALSHA` itself; many Redis clients **cache** scripts server-side and may issue **`EVALSHA`** after the first load—connection reuse helps amortize cold-start cost (important in serverless / short-lived clients).
+ * **Lua safety:** All Lua bodies are **static strings** in this module; user-controlled data is passed only as Redis **KEYS** / **ARGV**, never concatenated into script source (see README **Security and abuse**).
  * @see {@link MemoryStore} — single-process alternative
  * @see {@link RedisErrorMode}
  * @since 1.0.0
@@ -987,7 +1009,7 @@ export class RedisStore implements RateLimitStore {
           return;
         }
         // Members all scored at `now` — restores ZCARD; does not reconstruct spread timestamps from MemoryStore.
-        const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
+        const members = slidingWindowUniqueMembers(cost);
         const rk = this.redisKey('sw', key);
         const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
           now,
@@ -1042,7 +1064,7 @@ export class RedisStore implements RateLimitStore {
   ): Promise<RateLimitResult | null> {
     const maxReq = sanitizeRateLimitCap(maxOverride ?? this.maxRequests, this.maxRequests);
     const now = Date.now();
-    const members = Array.from({ length: cost }, () => randomBytes(16).toString('hex'));
+    const members = slidingWindowUniqueMembers(cost);
     const rk = this.redisKey('sw', key);
     const raw = await this.evalScript(LUA_SLIDING_INCR, [rk], [
       now,
@@ -1420,7 +1442,7 @@ export class RedisStore implements RateLimitStore {
     const n = Math.max(0, Math.floor(totalHits));
     const rk = this.redisKey('sw', key);
     const expireArg = expiresAt !== undefined ? expiresAt.getTime() : -1;
-    const members = Array.from({ length: n }, () => randomBytes(16).toString('hex'));
+    const members = slidingWindowUniqueMembers(n);
     const raw = await this.evalScript(LUA_SLIDING_SET, [rk], [
       now,
       this.windowMs,

@@ -51,6 +51,16 @@ describe('compose', () => {
     expect(c.mode).toBe('race');
   });
 
+  it('race([layers], { raceTimeoutMs }) accepts array form and custom timeout', async () => {
+    const c = compose.race([compose.layer('a', sliding(10)), compose.layer('b', sliding(10))], {
+      raceTimeoutMs: 9999,
+    });
+    expect(c.mode).toBe('race');
+    const r = await c.increment('k');
+    expect(r.mode).toBe('race');
+    await c.shutdown();
+  });
+
   it('windows() creates index-labeled MemoryStore layers (limit-0, limit-1, …)', async () => {
     const c = compose.windows(
       { windowMs: 1000, maxRequests: 10 },

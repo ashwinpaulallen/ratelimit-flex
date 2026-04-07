@@ -3,7 +3,7 @@
  *
  * @description
  * - Default export: {@link expressRateLimiter}
- * - Queued limits: {@link expressQueuedRateLimiter}, {@link createRateLimiterQueue}, {@link RateLimiterQueue}
+ * - Queued limits: {@link expressQueuedRateLimiter}, {@link createRateLimiterQueue}, {@link RateLimiterQueue}, {@link KeyedRateLimiterQueue}
  * - Fastify: import `fastifyRateLimiter` / `fastifyQueuedRateLimiter` from `ratelimit-flex/fastify`
  * - Types: re-exported from `./types/index.js`
  * - Resilience: {@link CircuitBreaker}, {@link RedisResilienceOptions}, {@link resilientRedisPreset}, related types
@@ -92,13 +92,18 @@ export {
  * @since 2.0.0
  */
 export {
+  COMPOSED_STORE_BRAND,
+  COMPOSED_UNWRAP,
   ComposedStore,
   burstablePreset,
   compose,
   extractLayerMetrics,
   failoverPreset,
   isComposedIncrementResult,
+  isComposedStoreBrand,
   multiWindowPreset,
+  registerComposedStoreFacade,
+  unregisterComposedStoreFacade,
 } from './composition/index.js';
 export type {
   BurstableRedisConfig,
@@ -181,6 +186,10 @@ export {
   type RateLimiterQueueOptions,
   type RateLimiterQueueResult,
 } from './queue/RateLimiterQueue.js';
+export {
+  KeyedRateLimiterQueue,
+  type KeyedRateLimiterQueueOptions,
+} from './queue/KeyedRateLimiterQueue.js';
 
 /**
  * Express middleware that **queues** over-limit requests instead of responding with 429 immediately.
@@ -252,6 +261,8 @@ export {
  */
 export { ClusterStore, type ClusterStoreOptions } from './stores/ClusterStore.js';
 export {
+  CLUSTER_IPC_PROTOCOL_VERSION,
+  MIN_CLUSTER_IPC_PROTOCOL_VERSION,
   ClusterStorePrimary,
   type ClusterPrimaryMessage,
   type ClusterStoreInitOptions,

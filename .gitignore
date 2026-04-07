@@ -101,6 +101,9 @@ dist
 # vitepress build output
 **/.vitepress/dist
 
+# TypeDoc HTML (run `npm run docs:api`)
+docs/api/
+
 # vitepress cache directory
 **/.vitepress/cache
 

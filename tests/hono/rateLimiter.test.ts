@@ -14,6 +14,42 @@ function getApp() {
 }
 
 describe('rateLimiter (Hono)', () => {
+  it('supports skipFailedRequests (decrement after 5xx)', async () => {
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 1,
+        skipFailedRequests: true,
+      }),
+    );
+    app.get('/fail', (c) => c.json({ ok: false }, 500));
+
+    const h = { 'x-forwarded-for': '10.9.9.1' };
+    expect((await app.request('http://test/fail', { headers: h })).status).toBe(500);
+    expect((await app.request('http://test/fail', { headers: h })).status).toBe(500);
+  });
+
+  it('supports skipSuccessfulRequests (decrement after 2xx)', async () => {
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 1,
+        skipSuccessfulRequests: true,
+      }),
+    );
+    app.get('/ok', (c) => c.json({ ok: true }));
+
+    const h = { 'x-forwarded-for': '10.9.9.2' };
+    expect((await app.request('http://test/ok', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/ok', { headers: h })).status).toBe(200);
+  });
+
   it('allows requests under the limit', async () => {
     const app = getApp();
     app.use('*', rateLimiter({ maxRequests: 5, windowMs: 60_000 }));

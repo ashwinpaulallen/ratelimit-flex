@@ -14,6 +14,13 @@ export type {
 } from './types.js';
 export { isComposedIncrementResult } from './types.js';
 
+export {
+  COMPOSED_STORE_BRAND,
+  COMPOSED_UNWRAP,
+  isComposedStoreBrand,
+  registerComposedStoreFacade,
+  unregisterComposedStoreFacade,
+} from './composed-store-brand.js';
 export { ComposedStore } from './ComposedStore.js';
 export { compose } from './compose.js';
 export {

@@ -1,3 +1,4 @@
+import type { NextFunction, Request, Response } from 'express';
 import type { Context, MiddlewareHandler } from 'hono';
 import {
   formatRateLimitHeaders,
@@ -14,7 +15,10 @@ import {
   toRateLimitInfo,
 } from '../middleware/merge-options.js';
 import { RateLimitEngine } from '../strategies/rate-limit-engine.js';
+import { decrementStoresAfterConsume } from '../middleware/decrement-stores-after-consume.js';
+import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { InMemoryShieldOptions } from '../shield/types.js';
+import type { KeyManager } from '../key-manager/KeyManager.js';
 import type {
   RateLimitConsumeResult,
   RateLimitInfo,
@@ -25,9 +29,10 @@ import type {
 import type { StandardHeadersDraft } from '../types/index.js';
 import type { MetricsConfig } from '../types/metrics.js';
 import { warnIfMemoryStoreInCluster, warnIfRedisStoreWithoutInsurance } from '../utils/environment.js';
+import type { OpenTelemetryAdapter } from '../metrics/adapters/opentelemetry-adapter.js';
 import { MetricsManager } from '../metrics/manager.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
-import { applyHeadersToContext, toContentfulStatus } from './utils.js';
+import { applyHeadersToContext, resolvedHonoRollbackStatus, toContentfulStatus } from './utils.js';
 
 /** Internal context key for per-request weighted cost (see {@link HonoRateLimitOptions.cost}). */
 export const HONO_RATE_LIMIT_INCREMENT_COST = 'ratelimitFlex:incrementCost' as const;
@@ -47,10 +52,11 @@ declare module 'hono' {
  * Hono rate limiter options.
  *
  * @remarks
- * **Limitation:** `skipFailedRequests` and `skipSuccessfulRequests` (available in Express/Fastify adapters)
- * are not supported in the Hono adapter due to Hono's lack of built-in response lifecycle hooks. Hono does
- * not provide a stable `onResponse` hook equivalent to Express/Fastify, making it impossible to decrement
- * counters based on response status codes without significant complexity or relying on experimental features.
+ * **`skipFailedRequests` / `skipSuccessfulRequests`:** When set, the middleware **`await`s `next()`** after a
+ * successful consume, then uses {@link resolvedHonoRollbackStatus} and decrements when the status matches
+ * Express / Fastify semantics (failed ≥ `400` vs successful `< 400`). Uses
+ * {@link resolveIncrementOpts} / {@link matchingDecrementOptions} for weighted / grouped windows.
+ * For modes that need a different rule than HTTP status, add a follow-up middleware (README **Hono → Limitations**).
  */
 export interface HonoRateLimitOptions {
   /** Max requests per window */
@@ -113,6 +119,19 @@ export interface HonoRateLimitOptions {
    * Omit to propagate only; use `app.onError()` for response formatting.
    */
   onError?: (err: unknown, c: Context) => void | Promise<void>;
+
+  /**
+   * After `await next()`, decrement when the resolved status is **≥ 400** (same as Express
+   * {@link RateLimitOptions.skipFailedRequests}). Status is read from **`c.res`** via
+   * {@link resolvedHonoRollbackStatus} (invalid or missing codes default to **200**).
+   */
+  skipFailedRequests?: boolean;
+
+  /**
+   * After `await next()`, decrement when the resolved status is **< 400** (same as Express
+   * {@link RateLimitOptions.skipSuccessfulRequests}). See {@link resolvedHonoRollbackStatus}.
+   */
+  skipSuccessfulRequests?: boolean;
 }
 
 export function honoDefaultKeyGenerator(c: Context): string {
@@ -141,6 +160,8 @@ function honoOptionsToRateLimitPartial(h: HonoRateLimitOptions): Partial<RateLim
     identifier: h.identifier,
     inMemoryBlock: h.inMemoryBlock,
     metrics: h.metrics,
+    skipFailedRequests: h.skipFailedRequests,
+    skipSuccessfulRequests: h.skipSuccessfulRequests,
     incrementCost: (req: unknown) => {
       const ctx = req as Context;
       const v = ctx.get(HONO_RATE_LIMIT_INCREMENT_COST);
@@ -163,17 +184,31 @@ async function resolveRequestCost(c: Context, h: HonoRateLimitOptions): Promise<
 }
 
 /**
- * Extended middleware handler with metrics support.
+ * Extended middleware handler with metrics support (parity with the Express adapter where applicable).
  */
 export interface HonoRateLimiterHandler extends MiddlewareHandler {
   /** Metrics manager instance (no-op when metrics disabled). */
   metricsManager: MetricsManager;
-  /** Get current metrics snapshot. */
   getMetricsSnapshot(): MetricsSnapshot | null;
-  /** Get metrics history. */
   getMetricsHistory(): MetricsSnapshot[];
-  /** Shutdown the metrics manager and cleanup resources. */
+  /** Alias of {@link getMetricsHistory}. */
+  getHistory(): MetricsSnapshot[];
+  /** Shutdown metrics collector and adapters (same as {@link shutdownMetrics}). */
   shutdown(): Promise<void>;
+  /** Alias of {@link shutdown} for parity with Express. */
+  shutdownMetrics(): Promise<void>;
+  /** Prometheus exposition middleware when `metrics.prometheus.enabled`; otherwise `undefined` (Express-style; use `metricsManager` for raw text in Hono). */
+  metricsEndpoint?: (req: Request, res: Response, next: NextFunction) => void;
+  on(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  off(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  once(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  removeListener(event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler;
+  /** When {@link RateLimitOptionsBase.keyManager} is set, or auto-created from `penaltyBox`. */
+  keyManager?: KeyManager;
+  /** When `inMemoryBlock` wrapped the store with {@link InMemoryShield}. */
+  shield: InMemoryShield | null;
+  /** Present when `metrics.openTelemetry` is enabled with a `meter`. */
+  openTelemetryAdapter?: OpenTelemetryAdapter;
 }
 
 /**
@@ -299,7 +334,19 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
       c.set('rateLimitResult', result);
       c.set('rateLimit', toRateLimitInfo(resolved, result, c));
 
-      return next();
+      await next();
+
+      const shouldDecrementFailed = resolved.skipFailedRequests === true;
+      const shouldDecrementSuccess = resolved.skipSuccessfulRequests === true;
+      if (shouldDecrementFailed || shouldDecrementSuccess) {
+        const status = resolvedHonoRollbackStatus(c);
+        const failed = status >= 400;
+        const success = status < 400;
+        if ((shouldDecrementFailed && failed) || (shouldDecrementSuccess && success)) {
+          decrementStoresAfterConsume(resolved, key, c);
+        }
+      }
+      return;
     } catch (err: unknown) {
       if (options.onError !== undefined) {
         await Promise.resolve(options.onError(err, c));
@@ -308,12 +355,42 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
     }
   };
 
-  return Object.assign(middleware, {
-    metricsManager,
-    getMetricsSnapshot: () => metricsManager.getSnapshot(),
-    getMetricsHistory: () => metricsManager.getHistory(),
-    shutdown: async () => {
-      await metricsManager.shutdown();
-    },
-  }) as HonoRateLimiterHandler;
+  const prometheusMw = metricsManager.getPrometheusMiddleware() ?? undefined;
+
+  const handler = middleware as HonoRateLimiterHandler;
+  handler.metricsManager = metricsManager;
+  handler.metricsEndpoint = prometheusMw;
+  handler.getMetricsSnapshot = (): MetricsSnapshot | null => metricsManager.getSnapshot();
+  handler.getMetricsHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.getHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
+  handler.shutdown = async (): Promise<void> => {
+    await metricsManager.shutdown();
+  };
+  handler.shutdownMetrics = async (): Promise<void> => {
+    await metricsManager.shutdown();
+  };
+  handler.on = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.on('metrics', listener);
+    return handler;
+  };
+  handler.off = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.off('metrics', listener);
+    return handler;
+  };
+  handler.once = (_event: 'metrics', listener: (snapshot: MetricsSnapshot) => void): HonoRateLimiterHandler => {
+    metricsManager.once('metrics', listener);
+    return handler;
+  };
+  handler.removeListener = (
+    _event: 'metrics',
+    listener: (snapshot: MetricsSnapshot) => void,
+  ): HonoRateLimiterHandler => {
+    metricsManager.removeListener('metrics', listener);
+    return handler;
+  };
+  handler.keyManager = resolved.keyManager;
+  handler.shield = shield;
+  handler.openTelemetryAdapter = metricsManager.getOpenTelemetryAdapter() ?? undefined;
+
+  return handler;
 }

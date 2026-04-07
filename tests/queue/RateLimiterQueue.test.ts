@@ -133,6 +133,14 @@ describe('RateLimiterQueue', () => {
     await store.shutdown();
   });
 
+  it('rejects non-finite or sub-1 cost', async () => {
+    const store = slidingStore(3, 60_000);
+    const q = new RateLimiterQueue(store, { windowMs: 60_000, maxRequests: 3 });
+    await expect(q.removeTokens('k', 0)).rejects.toMatchObject({ code: 'invalid_cost' });
+    await expect(q.removeTokens('k', Number.NaN)).rejects.toMatchObject({ code: 'invalid_cost' });
+    await store.shutdown();
+  });
+
   it('clear() rejects all pending with Queue cleared', async () => {
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const store = slidingStore(1, 100_000);
