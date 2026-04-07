@@ -23,7 +23,7 @@ describe('KeyedRateLimiterQueue', () => {
       maxKeys: 2,
     });
     const q1 = keyed.forKey('k1');
-    const q2 = keyed.forKey('k2');
+    keyed.forKey('k2');
     const spy = vi.spyOn(q1, 'shutdown');
     keyed.forKey('k3');
     expect(keyed.getKeyCount()).toBe(2);

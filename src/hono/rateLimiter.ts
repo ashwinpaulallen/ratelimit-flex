@@ -14,7 +14,7 @@ import {
   resolveStoreWithInMemoryShield,
   toRateLimitInfo,
 } from '../middleware/merge-options.js';
-import { RateLimitEngine, resolveIncrementOpts } from '../strategies/rate-limit-engine.js';
+import { RateLimitEngine } from '../strategies/rate-limit-engine.js';
 import { decrementStoresAfterConsume } from '../middleware/decrement-stores-after-consume.js';
 import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { InMemoryShieldOptions } from '../shield/types.js';
