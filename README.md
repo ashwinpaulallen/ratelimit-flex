@@ -176,8 +176,6 @@ export class AdminService {
 - If legacy metadata (or `as any`) sets a **`strategy` that differs** from the module default, the guard **throws** when **`NODE_ENV !== 'production'`** on the first request to that route. In **production**, the invalid `strategy` is **ignored** (limits still apply).
 - **Per-route engine cache:** Decorator metadata is **static** in normal Nest apps (`@RateLimit` is fixed at bootstrap). The guard caches one **RateLimitEngine** per **handler** and **invalidates** that entry when the merged options **fingerprint** changes (e.g. if effective limits for that handler ever change). Prefer static limits; avoid mutating reflected metadata at runtime.
 
-More context: `docs/IMPROVEMENTS.md` (§3.2, §3.3).
-
 ### NestJS: KeyManager shutdown
 
 - **`RateLimitModule`** registers **`RateLimitModuleLifecycle`**, which calls **`keyManager.destroy()`** on **`onModuleDestroy`** only when the **`KeyManager` was auto-created** from **`penaltyBox`** (you did **not** pass **`keyManager`** in `forRoot` / `forRootAsync`). Shared or manually constructed instances passed via **`keyManager`** are **not** destroyed by the module — call **`destroy()`** (or **`dispose()`**) yourself when shutting down or in your own `OnModuleDestroy` hook.
