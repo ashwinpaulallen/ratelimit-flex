@@ -7,6 +7,7 @@ import type {
   RateLimitIncrementOptions,
   RateLimitStore,
 } from '../../src/types/index.js';
+import { compose } from '../../src/composition/compose.js';
 import { rateLimiter, honoDefaultKeyGenerator } from '../../src/hono/rateLimiter.js';
 
 function getApp() {
@@ -383,6 +384,118 @@ describe('rateLimiter (Hono)', () => {
     const res = await app.request('http://test/r', { headers: { 'x-forwarded-for': '10.0.0.90' } });
     expect(res.status).toBe(500);
     expect(await res.text()).toBe('Internal Server Error');
+  });
+
+  it('supports limits array (multi-window) like Express', async () => {
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        limits: [
+          { windowMs: 60_000, max: 2 },
+          { windowMs: 120_000, max: 5 },
+        ],
+      }),
+    );
+    app.get('/r', (c) => c.text('ok'));
+
+    const h = { 'x-forwarded-for': '10.0.1.1' };
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(429);
+  });
+
+  it('supports compose.windows store (composed multi-window)', async () => {
+    const store = compose.windows(
+      { windowMs: 60_000, maxRequests: 2 },
+      { windowMs: 120_000, maxRequests: 10 },
+    );
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        store,
+        windowMs: 60_000,
+        maxRequests: 2,
+      }),
+    );
+    app.get('/r', (c) => c.text('ok'));
+
+    const h = { 'x-forwarded-for': '10.0.1.2' };
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(200);
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(429);
+  });
+
+  it('sets rateLimitComposed on context when store is composed', async () => {
+    const store = compose.windows(
+      { windowMs: 60_000, maxRequests: 5 },
+      { windowMs: 120_000, maxRequests: 20 },
+    );
+    const app = getApp();
+    app.use('*', rateLimiter({ strategy: RateLimitStrategy.SLIDING_WINDOW, store, windowMs: 60_000, maxRequests: 5 }));
+    app.get('/r', (c) => {
+      const composed = c.get('rateLimitComposed');
+      expect(composed?.layers).toBeDefined();
+      return c.text('ok');
+    });
+
+    const res = await app.request('http://test/r', { headers: { 'x-forwarded-for': '10.0.1.3' } });
+    expect(res.status).toBe(200);
+  });
+
+  it('draft mode observes would-block without enforcing', async () => {
+    const app = getApp();
+    let hit = 0;
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 1,
+        draft: true,
+      }),
+    );
+    app.get('/r', (c) => {
+      hit += 1;
+      const r = c.get('rateLimitResult');
+      if (hit === 2) {
+        expect(r?.draftWouldBlock).toBe(true);
+      } else {
+        expect(r?.draftWouldBlock).not.toBe(true);
+      }
+      return c.text('ok');
+    });
+
+    const h = { 'x-forwarded-for': '10.0.1.4' };
+    expect((await app.request('http://test/r', { headers: h })).status).toBe(200);
+    const res = await app.request('http://test/r', { headers: h });
+    expect(res.status).toBe(200);
+  });
+
+  it('invokes waitUntil for skip-response decrements', async () => {
+    const waitUntil = vi.fn((p: Promise<unknown>) => {
+      void p;
+    });
+    const app = getApp();
+    app.use(
+      '*',
+      rateLimiter({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 1,
+        skipFailedRequests: true,
+        waitUntil,
+      }),
+    );
+    app.get('/bad', (c) => c.json({ ok: false }, 500));
+
+    const h = { 'x-forwarded-for': '10.0.1.5' };
+    expect((await app.request('http://test/bad', { headers: h })).status).toBe(500);
+    expect((await app.request('http://test/bad', { headers: h })).status).toBe(500);
+    expect(waitUntil).toHaveBeenCalled();
   });
 
   it('calls onError before rethrowing', async () => {

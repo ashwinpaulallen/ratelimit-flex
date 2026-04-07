@@ -1,4 +1,10 @@
-export { HONO_RATE_LIMIT_INCREMENT_COST, honoDefaultKeyGenerator, rateLimiter } from './rateLimiter.js';
+export {
+  buildHonoMergePartial,
+  HONO_RATE_LIMIT_INCREMENT_COST,
+  honoDefaultKeyGenerator,
+  rateLimiter,
+  resolveHonoRequestCost,
+} from './rateLimiter.js';
 export { resolvedHonoRollbackStatus } from './utils.js';
 export { queuedRateLimiter } from './queuedRateLimiter.js';
 export { webSocketLimiter } from './webSocketLimiter.js';

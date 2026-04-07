@@ -335,62 +335,17 @@ app.get(
 );
 ```
 
-### Hono Limitations
+### Hono: engine parity
 
-**`skipFailedRequests` / `skipSuccessfulRequests`:** Pass them to **`rateLimiter({ ... })`** — the middleware **`await`s `next()`** after a successful consume, then uses **`resolvedHonoRollbackStatus`** (exported from **`ratelimit-flex/hono`**) so a missing **`c.res`**, **`0`**, or invalid **`c.res.status`** values are treated as **200** before applying the rollback rule. Decrements use **`resolveIncrementOpts`** / **`matchingDecrementOptions`** (same semantics as Express / Fastify for weighted and grouped windows).
+**Same options as Express:** `rateLimiter` accepts the full merged **`RateLimitOptions`** surface — including **`limits`**, **`compose.windows`** / **`ComposedStore`**, **`draft`**, **`groupedWindowStores`**, **`penaltyBox`**, **`keyManager`**, **`onLayerBlock`**, and **`incrementCost`**. Composed layers are available as **`c.get('rateLimitComposed')`** (same idea as Express **`req.rateLimitComposed`**).
 
-**Advanced / grouped-only recipes:** For unusual setups where status alone is not enough, you can still add middleware **after** `rateLimiter` and call **`store.decrement`** yourself (see below). Use **`HONO_RATE_LIMIT_INCREMENT_COST`** for weighted **`cost`** on the Hono `Context`.
+**`queuedRateLimiter`:** Uses the **same merge path** as **`rateLimiter`** (full engine options: **`limits`**, composed **`store`**, **`inMemoryBlock`**, **`metrics`**, **`cost`** / **`incrementCost`**, allowlist/blocklist, standard headers, etc.). The returned handler matches **`rateLimiter`** for observability (**`metricsManager`**, **`shield`**, **`keyManager`**, **`openTelemetryAdapter`**, event hooks, **`shutdown`**, …) and adds **`queue`**. It still drives **`RateLimiterQueue`** via **`store.increment`** only — it does **not** run **`RateLimitEngine`**, so engine-only behavior is unavailable: no **`draft`**, no pre-increment **`keyManager`** / **`penaltyBox`** enforcement, and no **`c.get('rateLimitComposed')`**. Same trade-off as Express **`expressQueuedRateLimiter`**.
 
-```typescript
-import { Hono } from 'hono';
-import type { Context } from 'hono';
-import {
-  MemoryStore,
-  RateLimitStrategy,
-  resolveIncrementOpts,
-  matchingDecrementOptions,
-} from 'ratelimit-flex';
-import { rateLimiter, HONO_RATE_LIMIT_INCREMENT_COST } from 'ratelimit-flex/hono';
-import type { RateLimitOptions } from 'ratelimit-flex';
+**`skipFailedRequests` / `skipSuccessfulRequests`:** The middleware **`await`s `next()`** after a successful consume, then uses **`resolvedHonoRollbackStatus`** (exported from **`ratelimit-flex/hono`**) so a missing **`c.res`**, **`0`**, or invalid **`c.res.status`** values are treated as **200** before applying the rollback. Rollbacks use **`resolveIncrementOpts`** / **`matchingDecrementOptions`** for weighted, grouped, and composed stores (same as Express / Fastify).
 
-const app = new Hono();
+**Cloudflare Workers:** Pass **`waitUntil: (p) => c.executionCtx.waitUntil(p)`** so post-response **`decrement`** work for skip-response rules is scheduled on the execution context (optional on Node).
 
-const store = new MemoryStore({
-  strategy: RateLimitStrategy.SLIDING_WINDOW,
-  windowMs: 60_000,
-  maxRequests: 100,
-});
-const windowMs = 60_000;
-const maxRequests = 100;
-
-const keyGenerator = (c: Context) =>
-  c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-
-/** Same shape the engine uses (including cost mirror for Hono `cost`). */
-const engineLikeOptions: RateLimitOptions = {
-  strategy: RateLimitStrategy.SLIDING_WINDOW,
-  windowMs,
-  maxRequests,
-  store,
-  incrementCost: (req) => {
-    const v = (req as Context).get(HONO_RATE_LIMIT_INCREMENT_COST);
-    return typeof v === 'number' && Number.isFinite(v) ? v : 1;
-  },
-};
-
-app.use('*', rateLimiter({ store, windowMs, maxRequests, keyGenerator }));
-
-// Like skipFailedRequests: undo increment when the handler returns an error status
-app.use('*', async (c, next) => {
-  await next();
-  if (c.res.status < 400) return;
-  const key = await Promise.resolve(keyGenerator(c));
-  const inc = resolveIncrementOpts(engineLikeOptions, c);
-  void store.decrement(key, matchingDecrementOptions(inc)).catch(() => {});
-});
-```
-
-**Caveats:** `compose.windows`, grouped stores, and draft rollback need the same multi-store path as the Express adapter’s internal `decrementStores` — copy that logic or prefer Express/Fastify for those modes. On **Cloudflare Workers**, you may offload `decrement` to **`executionCtx.waitUntil`** so slow stores do not block the response; that remains runtime-specific.
+**Custom rollback rules:** If you need logic beyond HTTP status (e.g. body shape), add middleware after `rateLimiter` and call **`store.decrement`** with **`resolveIncrementOpts`** / **`matchingDecrementOptions`**; use **`HONO_RATE_LIMIT_INCREMENT_COST`** with the **`cost`** option for weighted quota.
 
 ## Core Features
 
