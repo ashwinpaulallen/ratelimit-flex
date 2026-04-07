@@ -3,7 +3,7 @@
 Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, NestJS, and Hono.
 
 [![npm version](https://img.shields.io/npm/v/ratelimit-flex.svg)](https://www.npmjs.com/package/ratelimit-flex)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/LICENSE)
 [![Security](https://img.shields.io/badge/security-reviewed-brightgreen)](#security-and-abuse)
 ![Tests](https://img.shields.io/badge/tests-vitest%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
@@ -18,7 +18,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance
 - **In-memory block shielding:** `InMemoryShield` / `inMemoryBlock` — cache blocked keys in process memory so hot keys stop hitting Redis under attack
-- **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true` ([full docs](docs/METRICS.md))
+- **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true` ([full docs][doc-metrics])
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
 - **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore`
@@ -240,7 +240,7 @@ export class AdminService {
 - Module is NOT global — feature modules must `imports: [RateLimitModule]` to access tokens
 - Manually apply `@UseGuards(RateLimitGuard)` where needed
 
-> **Upgrading from v2.x?** See [Migration Guide](docs/MIGRATION.md) for breaking changes in v3.0.0.
+> **Upgrading from v2.x?** See [Migration Guide][doc-migration] for breaking changes in v3.0.0.
 ## Hono
 
 ```typescript
@@ -679,7 +679,7 @@ const store = compose.firstAvailable(
 app.use(expressRateLimiter({ store }));
 ```
 
-**Full documentation:** See [docs/COMPOSITION.md](docs/COMPOSITION.md) for:
+**Full documentation:** See [docs/COMPOSITION.md][doc-composition] for:
 - Nested composition patterns
 - Per-layer observability
 - Redis composition presets
@@ -749,7 +749,7 @@ The queue is one **FIFO** array. If you share that queue across **different** ke
 
 **Solution:** Use one queue per key, or use `KeyedRateLimiterQueue` for automatic per-key queues with LRU eviction.
 
-**Full documentation:** See [docs/QUEUING.md](docs/QUEUING.md) for:
+**Full documentation:** See [docs/QUEUING.md][doc-queuing] for:
 - Multi-key patterns
 - Graceful shutdown
 - Store ownership
@@ -1347,7 +1347,7 @@ app.use(expressRateLimiter(
 
 **Counter Sync:** When Redis recovers, accumulated hits in insurance `MemoryStore` are replayed to Redis (`syncOnRecovery: true` by default).
 
-**Full documentation:** See [docs/REDIS_RESILIENCE.md](docs/REDIS_RESILIENCE.md) for:
+**Full documentation:** See [docs/REDIS_RESILIENCE.md][doc-redis-resilience] for:
 - Circuit breaker configuration
 - Counter synchronization details
 - Observability hooks
@@ -1614,7 +1614,7 @@ Pass your store as **`store`** in middleware options.
 
 **Generated reference (full surface):** From a git checkout, run **`npm run docs:api`** (requires devDependency **`typedoc`**) and open **`docs/api/index.html`**. This complements the table below and the [Configuration reference](#configuration-reference).
 
-**Recipes:** [docs/recipes.md](docs/recipes.md) — NestJS + GraphQL, Express behind a reverse proxy, Hono on Cloudflare Workers.
+**Recipes:** [docs/recipes.md][doc-recipes] — NestJS + GraphQL, Express behind a reverse proxy, Hono on Cloudflare Workers.
 
 | Export | Role |
 |--------|------|
@@ -1635,7 +1635,7 @@ Default export = **`expressRateLimiter`**.
 
 ## Migration Guide
 
-Migrating from another rate limiting library or upgrading from v2.x? See **[docs/MIGRATION.md](docs/MIGRATION.md)** for:
+Migrating from another rate limiting library or upgrading from v2.x? See **[docs/MIGRATION.md][doc-migration]** for:
 
 - **From express-rate-limit**: Option mapping, `fromExpressRateLimitOptions()` helper
 - **From @fastify/rate-limit**: Option mapping, scoped registration patterns
@@ -1663,3 +1663,10 @@ Open a PR with a short description of behavior changes and any new tests.
 ## License
 
 MIT
+
+[doc-metrics]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/METRICS.md
+[doc-migration]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/MIGRATION.md
+[doc-composition]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/COMPOSITION.md
+[doc-queuing]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/QUEUING.md
+[doc-redis-resilience]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/REDIS_RESILIENCE.md
+[doc-recipes]: https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/docs/recipes.md

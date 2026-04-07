@@ -19,6 +19,11 @@
     "histogram"
   ],
   "author": "Ashwin Paul Allen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashwinpaulallen/ratelimit-flex.git"
+  },
+  "homepage": "https://github.com/ashwinpaulallen/ratelimit-flex#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
