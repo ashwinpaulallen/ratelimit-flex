@@ -12,4 +12,3 @@ vitest.config.ts
 coverage/
 .vitest/
 **/*.map
-!dist/**/*.map

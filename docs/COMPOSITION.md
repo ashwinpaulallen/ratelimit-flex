@@ -65,6 +65,28 @@ const store = compose.windows(
 app.use(expressRateLimiter({ store }));
 ```
 
+**Redis template** — pass a sliding/fixed-window `RedisStore` as the first argument; each window gets a sibling store with the same connection options and a distinct key prefix (optional `resilience` is cloned per slot with a per-slot insurance `MemoryStore`). Same behavior as `limits: [...]` + `store: redisTemplate` in `mergeRateLimiterOptions`:
+
+```typescript
+import { compose, expressRateLimiter, RateLimitStrategy, RedisStore } from 'ratelimit-flex';
+
+const template = new RedisStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  url: process.env.REDIS_URL!,
+  keyPrefix: 'myapp:',
+});
+
+const store = compose.windows(
+  template,
+  { windowMs: 1_000, maxRequests: 10 },
+  { windowMs: 60_000, maxRequests: 100 },
+);
+
+app.use(expressRateLimiter({ store }));
+```
+
 ### Burst Allowance
 
 **Steady rate + burst pool:**
@@ -252,6 +274,8 @@ app.use(expressRateLimiter({
   ),
 }));
 ```
+
+For **Redis-backed** multi-window slots (shared counters across processes), pass a **`RedisStore`** template with **`limits`** or use **`compose.windows(redisTemplate, …)`** (see README **Multi-window limits**). For **`resilience`**, use **`multiWindowPreset`** or **`groupedWindowStores`**.
 
 ---
 

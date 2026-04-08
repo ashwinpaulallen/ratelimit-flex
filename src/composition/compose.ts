@@ -1,4 +1,5 @@
 import { MemoryStore } from '../stores/memory-store.js';
+import { RedisStore } from '../stores/redis-store.js';
 import { RateLimitStrategy } from '../types/index.js';
 import type { RateLimitStore } from '../types/index.js';
 import { ComposedStore } from './ComposedStore.js';
@@ -92,15 +93,50 @@ export const compose = {
 
   /**
    * Multi-window composition from simple config objects.
-   * Creates {@link MemoryStore} instances (sliding window unless `strategy` is set).
+   *
+   * - **Spread configs only:** creates one {@link MemoryStore} per window (sliding unless `strategy` is set).
+   * - **Redis template:** `compose.windows(redisTemplate, ...configs)` creates one {@link RedisStore} per window via
+   *   {@link RedisStore.createWindowSiblingForLimitsSlot} (shared connection options, distinct key prefixes). Same
+   *   semantics as `limits: [...]` with a Redis `store` template in {@link mergeRateLimiterOptions}.
    */
-  windows(
-    ...configs: Array<{
+  windows: ((
+    ...args: Array<
+      | RedisStore
+      | {
+          windowMs: number;
+          maxRequests: number;
+          strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+        }
+    >
+  ): ComposedStore => {
+    if (args.length === 0) {
+      throw new Error('compose.windows: expected at least one window config');
+    }
+    const first = args[0];
+    if (first instanceof RedisStore) {
+      const template = first;
+      const rest = args.slice(1) as Array<{
+        windowMs: number;
+        maxRequests: number;
+        strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+      }>;
+      if (rest.length === 0) {
+        throw new Error(
+          'compose.windows: when using a Redis template, pass at least one { windowMs, maxRequests } config',
+        );
+      }
+      const layers: CompositionLayer[] = rest.map((cfg, i) => {
+        const strategy = cfg.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
+        const store = template.createWindowSiblingForLimitsSlot(i, cfg.windowMs, cfg.maxRequests, strategy);
+        return compose.layer(`limit-${i}`, store);
+      });
+      return compose.all(...layers);
+    }
+    const configs = args as Array<{
       windowMs: number;
       maxRequests: number;
       strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
-    }>
-  ): ComposedStore {
+    }>;
     const layers: CompositionLayer[] = configs.map((cfg, i) => {
       const strategy = cfg.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
       const store = new MemoryStore({ strategy, windowMs: cfg.windowMs, maxRequests: cfg.maxRequests });
@@ -108,6 +144,22 @@ export const compose = {
       return compose.layer(`limit-${i}`, store);
     });
     return compose.all(...layers);
+  }) as {
+    (
+      redisTemplate: RedisStore,
+      ...windowConfigs: Array<{
+        windowMs: number;
+        maxRequests: number;
+        strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+      }>
+    ): ComposedStore;
+    (
+      ...configs: Array<{
+        windowMs: number;
+        maxRequests: number;
+        strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+      }>
+    ): ComposedStore;
   },
 
   /**

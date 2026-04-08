@@ -1008,7 +1008,7 @@ Prefer passing a **shared Redis URL or client** from every instance. Use a **dis
 
 **Lua `EVAL`, `EVALSHA`, and connections:** **`RedisStore`** always invokes **`eval(fullScript, …)`** on your client. It does **not** embed **`EVALSHA`**. Clients often optimize repeated **`EVAL`** into **`EVALSHA`** after Redis caches the script. **Reuse one long-lived client per process** (or warm serverless instance) where possible—per-request connections add latency and can reduce script-cache hits on the Redis side.
 
-**Multi-window:** The convenience **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) creates one **`MemoryStore` per window**. It does **not** switch those slots to Redis automatically. For the same multi-window policy across horizontally scaled processes, build **`groupedWindowStores`** with one **`RedisStore`** (or other shared `RateLimitStore`) per slot.
+**Multi-window:** The **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) defaults to one **`MemoryStore` per window**. Pass a sliding/fixed-window **`RedisStore`** as **`store`** together with **`limits`** to reuse connection settings (and optional **`resilience`**, cloned per slot) and get **one Redis-backed slot per window** with distinct key prefixes. A **`MemoryStore`** with **`limits`** is accepted and **ignored** (same as omitting **`store`**). Alternatively use **`compose.windows(redisTemplate, …)`**, **`multiWindowPreset`**, or **`groupedWindowStores`**.
 
 ### Deployment topology
 
@@ -1425,7 +1425,7 @@ On **429** (and other blocked responses where headers are enabled), **`Retry-Aft
 
 **Note:** If the store’s **`resetTime`** is already in the past when headers are formatted (clock skew, slow handling), the seconds-until-reset value is **0**, so you may see **`Retry-After: 0`**. RFC 7231 defines that as “retry immediately” (valid); some clients treat **`0`** as no backoff and may retry aggressively — not a spec violation, but worth knowing for operators.
 
-**Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters. The shorthand **`limits`** array builds **in-memory** stores only; for shared counters across replicas, see [Multi-window limits (`limits`)](#multi-window-limits-limits).
+**Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters. Without a Redis **`store`** template, **`limits`** uses **in-memory** slots; with a Redis template or **`compose.windows(redis, …)`**, counters can be **shared across processes** — see [Multi-window limits (`limits`)](#multi-window-limits-limits).
 
 ### Example
 
@@ -1484,7 +1484,7 @@ app.use('/login', expressRateLimiter({ maxRequests: 5, windowMs: 60_000 }));
 
 ### Multi-window limits (`limits`)
 
-Apply **several** sliding or fixed windows at once: a request is blocked if **any** window is exceeded. Pass **`limits`** as an array of **`{ windowMs, max }`** (merged to **`groupedWindowStores`** internally):
+Apply **several** sliding or fixed windows at once: a request is blocked if **any** window is exceeded. Pass **`limits`** as an array of **`{ windowMs, max }`**:
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
@@ -1500,9 +1500,38 @@ app.use(
 );
 ```
 
-> ⚠️ **Production deployments**: The `limits` shorthand creates **in-memory stores only**. Behind multiple instances (Kubernetes, Docker, PM2), each replica has separate counters — effective limits are **per process**, not global. For shared counters across replicas, use `compose.windows` with `RedisStore` or build `groupedWindowStores` explicitly with shared stores.
+**Redis (multi-instance):** pass a **template** **`RedisStore`** (sliding or fixed window) as **`store`** alongside **`limits`**. Merge builds one **`RedisStore` per slot** with the same **`client`** / **`url`**, **`onRedisError`**, and **`resilience`** shape as the template — each slot gets its **own insurance `MemoryStore`** (and circuit breaker) sized to that window. **`keyPrefix`** is distinct per slot. The template is only used to copy settings; shutdown the template if it owns its own **`url`** and you do not use it elsewhere.
 
-**Single-instance or dev setups** can keep using `limits` as-is — it's the simplest API for multi-window limiting when you don't need cross-process coordination.
+```ts
+import { expressRateLimiter, RateLimitStrategy, RedisStore } from 'ratelimit-flex';
+
+const redisTemplate = new RedisStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  url: process.env.REDIS_URL!,
+  keyPrefix: 'myapp:',
+});
+
+app.use(
+  expressRateLimiter({
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    store: redisTemplate,
+    limits: [
+      { windowMs: 60_000, max: 30 },
+      { windowMs: 3_600_000, max: 500 },
+    ],
+  }),
+);
+```
+
+Equivalent composition: **`compose.windows(redisTemplate, { windowMs, maxRequests }, …)`** (see [docs/COMPOSITION.md][doc-composition]). **`multiWindowPreset`** / **`groupedWindowStores`** remain useful when you want fully custom layers (e.g. different Redis URLs per window) without a single template.
+
+> **In-memory default:** With **no** **`store`**, or with **`store: new MemoryStore(...)`** (ignored), **`limits`** uses one **`MemoryStore` per window** — fine for **single-process** or dev; replicas each get **separate** counters.
+
+> **Composed store:** Do not combine **`limits`** with **`store: compose.all(...)`** — use **`groupedWindowStores`** or a single composed **`store`** without **`limits`**.
+
+**Single-instance or dev setups** can keep using **`limits`** without **`store`** — the smallest API when you do not need cross-process coordination.
 
 **Binding slot:** For headers and **`getLimit`**, the engine picks one **binding** window among grouped slots. If the request is **blocked**, that is the blocking window with the **latest** **`resetTime`** when several windows block at once. If the request is **allowed**, the binding slot is the one with the **lowest absolute** **`remaining`** count — **not** “most exhausted” as a **percentage** of each window’s cap. That matches typical setups (e.g. a tight per-minute cap next to a loose per-hour cap). Unusual mixes where a **higher** limit has **fewer** tokens left in absolute terms could label a different slot as “most constrained” than a **%-of-limit** rule would.
 

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.2.0] - 2026-04-07
+
+### Added
+
+- **Multi-window `limits` + Redis:** When **`limits`** is set and **`store`** is a sliding/fixed-window **`RedisStore`** without **`resilience`**, **`mergeRateLimiterOptions`** builds a **`ComposedStore`** of sibling **`RedisStore`** instances (**`RedisStore.createWindowSiblingForLimitsSlot`**) — same connection (`client` / `url`) and policies as the template, **distinct `keyPrefix` per slot** (shared counters across processes). **`RedisStore.supportsLimitsRedisTemplate()`** documents eligibility.
+- **`limitsToComposedStoreFromRedisTemplate`** (`merge-options`) for callers building composed stores outside middleware merge.
+- **`compose.windows(redisTemplate, …)`** — overload: first argument is a **`RedisStore`**, following args are per-window **`{ windowMs, maxRequests, strategy? }`** (same slots as in-memory **`compose.windows`**).
+- **`limits` + `store`:** **`RedisStore`** templates may include **`resilience`** — each slot gets a cloned **`RedisResilienceOptions`** with a **new insurance `MemoryStore`** for that window’s cap. **`MemoryStore`** + **`limits`** is allowed (template ignored, same as omitting **`store`**). **`ComposedStore`** + **`limits`** is rejected with a clear error.
+
+### Documentation
+
+- **README** / **`docs/COMPOSITION.md`:** Multi-window Redis template **`limits`**, **`compose.windows(redisTemplate, …)`**, and when to use **`multiWindowPreset`** / **`groupedWindowStores`** instead.
+
 ## [3.1.0] - 2026-04-07
 
 ### Added

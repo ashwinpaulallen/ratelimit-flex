@@ -1,7 +1,8 @@
-import type { ComposedStore } from '../composition/ComposedStore.js';
+import { ComposedStore } from '../composition/ComposedStore.js';
 import { compose } from '../composition/compose.js';
 import { KeyManager } from '../key-manager/KeyManager.js';
 import { MemoryStore } from '../stores/memory-store.js';
+import { RedisStore } from '../stores/redis-store.js';
 import { sanitizeRateLimitCap, sanitizeWindowMs } from '../utils/clamp.js';
 import {
   fixedWindowDefaults,
@@ -56,6 +57,25 @@ export function limitsToComposedStore(
   slots: ReadonlyArray<{ windowMs: number; maxRequests: number }>,
 ): ComposedStore {
   return compose.windows(
+    ...slots.map((s) => ({
+      windowMs: s.windowMs,
+      maxRequests: s.maxRequests,
+      strategy,
+    })),
+  );
+}
+
+/**
+ * Builds a multi-window {@link ComposedStore} from `limits` using a Redis **template** store (same connection options,
+ * distinct {@link RedisStore} per slot). See {@link mergeRateLimiterOptions} when both `limits` and `store` are set.
+ */
+export function limitsToComposedStoreFromRedisTemplate(
+  redisTemplate: RedisStore,
+  strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW,
+  slots: ReadonlyArray<{ windowMs: number; maxRequests: number }>,
+): ComposedStore {
+  return compose.windows(
+    redisTemplate,
     ...slots.map((s) => ({
       windowMs: s.windowMs,
       maxRequests: s.maxRequests,
@@ -160,7 +180,7 @@ export function keyManagerRetryAfterSeconds(resolved: RateLimitOptions, key: str
 
 /**
  * @throws {Error} When both `penaltyBox` and `keyManager` are provided (mutually exclusive).
- * @throws {Error} When both `limits` array and `store` are provided (mutually exclusive).
+ * @throws {Error} When both `limits` and a non-template `store` are provided (see {@link mergeRateLimiterOptions}).
  */
 function stripInMemoryBlock(resolved: RateLimitOptions): RateLimitOptions {
   if (!('inMemoryBlock' in resolved)) {
@@ -261,8 +281,20 @@ export function mergeRateLimiterOptions(
     );
   }
   const limitsOpt = (options as WindowRateLimitOptions).limits;
-  if (limitsOpt && limitsOpt.length > 0 && options.store !== undefined) {
-    throw new Error('ratelimit-flex: `limits` and `store` are mutually exclusive');
+  const storeOpt = options.store;
+  if (limitsOpt && limitsOpt.length > 0 && storeOpt !== undefined) {
+    if (storeOpt instanceof ComposedStore) {
+      throw new Error(
+        'ratelimit-flex: `limits` cannot be combined with a composed `store`; use `groupedWindowStores` or pass `store: compose.windows(...)` without `limits`',
+      );
+    }
+    const redisTemplateOk = storeOpt instanceof RedisStore && storeOpt.supportsLimitsRedisTemplate();
+    const memoryIgnoredOk = storeOpt instanceof MemoryStore;
+    if (!redisTemplateOk && !memoryIgnoredOk) {
+      throw new Error(
+        'ratelimit-flex: `limits` and `store` are mutually exclusive unless `store` is a sliding/fixed-window RedisStore (connection template, optional resilience) or MemoryStore (ignored; same as omitting `store`)',
+      );
+    }
   }
   const strategy = options.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
 
@@ -304,10 +336,18 @@ export function mergeRateLimiterOptions(
       merged.strategy === RateLimitStrategy.FIXED_WINDOW
         ? RateLimitStrategy.FIXED_WINDOW
         : RateLimitStrategy.SLIDING_WINDOW;
-    const store = limitsToComposedStore(
-      strategy,
-      sanitized.map((s) => ({ windowMs: s.windowMs, maxRequests: s.max })),
-    );
+    const templateRedis =
+      merged.store instanceof RedisStore && merged.store.supportsLimitsRedisTemplate() ? merged.store : undefined;
+    const store: ComposedStore = templateRedis
+      ? limitsToComposedStoreFromRedisTemplate(
+          templateRedis,
+          strategy,
+          sanitized.map((s) => ({ windowMs: s.windowMs, maxRequests: s.max })),
+        )
+      : limitsToComposedStore(
+          strategy,
+          sanitized.map((s) => ({ windowMs: s.windowMs, maxRequests: s.max })),
+        );
     const minCap = Math.min(...sanitized.map((s) => s.max));
     const minWin = Math.min(...sanitized.map((s) => s.windowMs));
     return attachKeyManagerFromPenaltyBox({
