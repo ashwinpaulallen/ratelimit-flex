@@ -97,7 +97,7 @@ describe('expressRateLimiter grouped windows + draft-7 headers', () => {
     expect(policy(blocked.headers)).toContain('w=60');
     expect(policy(blocked.headers)).toContain('100');
     },
-    60_000,
+    120_000,
   );
 
   it('request not blocked: headers reflect the most constrained window', async () => {

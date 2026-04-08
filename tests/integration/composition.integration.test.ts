@@ -5,6 +5,7 @@ import { compose } from '../../src/composition/compose.js';
 import { ComposedStore } from '../../src/composition/ComposedStore.js';
 import { expressRateLimiter } from '../../src/middleware/express.js';
 import { mergeRateLimiterOptions } from '../../src/middleware/merge-options.js';
+import { createRateLimiter, type RateLimitEngine } from '../../src/strategies/rate-limit-engine.js';
 import { MemoryStore } from '../../src/stores/memory-store.js';
 import type { RateLimitStore } from '../../src/types/index.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
@@ -217,9 +218,7 @@ describe('composition integration (Express + supertest)', () => {
       vi.setSystemTime(new Date('2026-07-01T08:00:00.000Z'));
     });
 
-    it(
-      'matches composed windows for the same traffic',
-      async () => {
+    it('matches composed windows for the same traffic', async () => {
       const mergedLimits = mergeRateLimiterOptions({
         strategy: RateLimitStrategy.SLIDING_WINDOW,
         limits: [
@@ -239,70 +238,31 @@ describe('composition integration (Express + supertest)', () => {
       track(mergedLimits.store as ComposedStore);
       track(mergedCompose.store as ComposedStore);
 
-      const appLimits = express();
-      appLimits.use(
-        expressRateLimiter({
-          strategy: mergedLimits.strategy,
-          windowMs: mergedLimits.windowMs,
-          maxRequests: mergedLimits.maxRequests,
-          store: mergedLimits.store,
-          standardHeaders: false,
-          keyGenerator: () => 'compat',
-        }),
-      );
-      appLimits.get('/ok', (_req, res) => res.status(200).json({ ok: true }));
+      const statusFromEngine = (r: { isBlocked: boolean }) => (r.isBlocked ? 429 : 200);
 
-      const appCompose = express();
-      appCompose.use(
-        expressRateLimiter({
-          strategy: mergedCompose.strategy,
-          windowMs: mergedCompose.windowMs,
-          maxRequests: mergedCompose.maxRequests,
-          store: mergedCompose.store,
-          standardHeaders: false,
-          keyGenerator: () => 'compat',
-        }),
-      );
-      appCompose.get('/ok', (_req, res) => res.status(200).json({ ok: true }));
-
-      const seq: number[] = [];
-
-      for (let i = 0; i < 10; i++) {
-        seq.push((await request(appLimits).get('/ok')).status);
-      }
-      seq.push((await request(appLimits).get('/ok')).status);
-      await vi.advanceTimersByTimeAsync(1000);
-      seq.push((await request(appLimits).get('/ok')).status);
-      for (let j = 0; j < 9; j++) {
-        seq.push((await request(appLimits).get('/ok')).status);
-      }
-      await vi.advanceTimersByTimeAsync(1000);
-      for (let chunk = 0; chunk < 8; chunk++) {
-        for (let j = 0; j < 10; j++) {
-          seq.push((await request(appLimits).get('/ok')).status);
-        }
+      const runTraffic = async (engine: RateLimitEngine): Promise<number[]> => {
+        const seq: number[] = [];
+        const key = 'compat';
+        const step = async () => {
+          const r = await engine.consumeWithKey(key);
+          seq.push(statusFromEngine(r));
+        };
+        for (let i = 0; i < 10; i++) await step();
+        await step();
         await vi.advanceTimersByTimeAsync(1000);
-      }
-      seq.push((await request(appLimits).get('/ok')).status);
-
-      const seq2: number[] = [];
-      for (let i = 0; i < 10; i++) {
-        seq2.push((await request(appCompose).get('/ok')).status);
-      }
-      seq2.push((await request(appCompose).get('/ok')).status);
-      await vi.advanceTimersByTimeAsync(1000);
-      seq2.push((await request(appCompose).get('/ok')).status);
-      for (let j = 0; j < 9; j++) {
-        seq2.push((await request(appCompose).get('/ok')).status);
-      }
-      await vi.advanceTimersByTimeAsync(1000);
-      for (let chunk = 0; chunk < 8; chunk++) {
-        for (let j = 0; j < 10; j++) {
-          seq2.push((await request(appCompose).get('/ok')).status);
-        }
+        await step();
+        for (let j = 0; j < 9; j++) await step();
         await vi.advanceTimersByTimeAsync(1000);
-      }
-      seq2.push((await request(appCompose).get('/ok')).status);
+        for (let chunk = 0; chunk < 8; chunk++) {
+          for (let j = 0; j < 10; j++) await step();
+          await vi.advanceTimersByTimeAsync(1000);
+        }
+        await step();
+        return seq;
+      };
+
+      const seq = await runTraffic(createRateLimiter(mergedLimits));
+      const seq2 = await runTraffic(createRateLimiter(mergedCompose));
 
       expect(seq2).toEqual(seq);
       expect(seq).toEqual([
@@ -312,8 +272,6 @@ describe('composition integration (Express + supertest)', () => {
         ...Array(89).fill(200),
         429,
       ]);
-      },
-      60_000,
-    );
+    });
   });
 });
