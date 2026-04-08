@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { CircuitBreaker } from '../resilience/CircuitBreaker.js';
 import type { RedisResilienceOptions } from '../resilience/types.js';
-import type { MemoryStore } from './memory-store.js';
+import { MemoryStore } from './memory-store.js';
 import type {
   RateLimitDecrementOptions,
   RateLimitIncrementOptions,
@@ -593,6 +593,12 @@ export class RedisStore implements RateLimitStore {
   /** Connection created from `url` — closed on {@link RedisStore.shutdown}. */
   private ownedRedis: IoRedisInstance | null = null;
 
+  /**
+   * Same `client` or `url` as passed to the constructor — used by
+   * {@link RedisStore.createWindowSiblingForLimitsSlot} to build per-slot stores for `limits` + Redis template merges.
+   */
+  private readonly connectionForCloning: { client: RedisLikeClient } | { url: string };
+
   private readonly resilience?: RedisResilienceOptions;
 
   private readonly insuranceStore: MemoryStore | null = null;
@@ -649,8 +655,10 @@ export class RedisStore implements RateLimitStore {
     }
 
     if (options.client) {
+      this.connectionForCloning = { client: options.client };
       this.clientPromise = Promise.resolve(options.client);
     } else {
+      this.connectionForCloning = { url: options.url as string };
       this.clientPromise = this.connectFromUrl(options.url as string);
     }
 
@@ -689,6 +697,100 @@ export class RedisStore implements RateLimitStore {
    */
   hasInsuranceLimiter(): boolean {
     return this.insuranceStore !== null;
+  }
+
+  /**
+   * `true` when this store can be used as a **template** for `limits` + Redis in {@link mergeRateLimiterOptions}
+   * (sliding or fixed window only). Resilience settings are **cloned** to each slot (including a per-slot insurance
+   * {@link MemoryStore}). Token bucket stores cannot be templates.
+   *
+   * @since 3.2.0
+   */
+  supportsLimitsRedisTemplate(): boolean {
+    return (
+      this.strategy === RateLimitStrategy.SLIDING_WINDOW || this.strategy === RateLimitStrategy.FIXED_WINDOW
+    );
+  }
+
+  /**
+   * Clones {@link RedisStoreOptions.resilience} for a multi-window sibling: new {@link MemoryStore} per slot sized to
+   * that window’s cap, shared hooks / circuit-breaker **options** (each sibling still has its own {@link CircuitBreaker} state).
+   */
+  private cloneResilienceForLimitsSibling(
+    windowMs: number,
+    maxRequests: number,
+    strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW,
+  ): RedisResilienceOptions | undefined {
+    if (!this.resilience?.insuranceLimiter) {
+      return undefined;
+    }
+    const base = this.resilience;
+    const insuranceMem = new MemoryStore({
+      strategy,
+      windowMs: sanitizeWindowMs(windowMs, 60_000),
+      maxRequests: sanitizeRateLimitCap(maxRequests, 100),
+    });
+    return {
+      hooks: base.hooks,
+      circuitBreaker: base.circuitBreaker ? { ...base.circuitBreaker } : undefined,
+      insuranceLimiter: {
+        ...base.insuranceLimiter,
+        store: insuranceMem,
+      },
+    };
+  }
+
+  /**
+   * Build another sliding/fixed-window store that **reuses the same Redis connection** (`client` or `url`) and
+   * **`onWarn` / `onRedisError`** as this instance, with a **distinct {@link RedisStoreOptions.keyPrefix}** so
+   * multi-window **`limits`** can use one “template” {@link RedisStore} in {@link mergeRateLimiterOptions}.
+   *
+   * @remarks
+   * - The returned store is a **separate** {@link RedisStore} instance (not a layer in an existing composed store).
+   * - When the template uses {@link RedisStoreOptions.resilience}, each sibling gets a **cloned** config with a **new**
+   *   insurance {@link MemoryStore} for that slot’s window/cap (separate failover counters per window).
+   * - The **template** instance is only used to copy settings; it is **not** automatically part of the composed
+   *   multi-window store. If the template was created with `url` (own connection) and you do not use it elsewhere,
+   *   call {@link RedisStore.shutdown} on it when tearing down.
+   * @param slotIndex - Stable index (0-based), namespaced into `keyPrefix`.
+   * @param windowMs - Window length for this slot.
+   * @param maxRequests - Cap for this slot.
+   * @param strategyOverride - Defaults to the template’s strategy (sliding vs fixed).
+   * @since 3.2.0
+   */
+  createWindowSiblingForLimitsSlot(
+    slotIndex: number,
+    windowMs: number,
+    maxRequests: number,
+    strategyOverride?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW,
+  ): RedisStore {
+    if (this.strategy === RateLimitStrategy.TOKEN_BUCKET) {
+      throw new Error(
+        'RedisStore.createWindowSiblingForLimitsSlot: template must use sliding or fixed window strategy',
+      );
+    }
+    const strategy =
+      strategyOverride ??
+      (this.strategy as RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW);
+    if (strategy !== RateLimitStrategy.SLIDING_WINDOW && strategy !== RateLimitStrategy.FIXED_WINDOW) {
+      throw new Error(
+        'RedisStore.createWindowSiblingForLimitsSlot: strategy must be SLIDING_WINDOW or FIXED_WINDOW',
+      );
+    }
+    const ws = sanitizeWindowMs(windowMs, 60_000);
+    const cap = sanitizeRateLimitCap(maxRequests, 100);
+    const slotPrefix = `${this.keyPrefix}limits:${slotIndex}:w${ws}:`;
+    const resilience = this.cloneResilienceForLimitsSibling(ws, cap, strategy);
+    return new RedisStore({
+      ...this.connectionForCloning,
+      strategy,
+      windowMs: ws,
+      maxRequests: cap,
+      keyPrefix: slotPrefix,
+      onWarn: this.onWarn,
+      onRedisError: this.redisErrorMode,
+      ...(resilience !== undefined ? { resilience } : {}),
+    });
   }
 
   private usesInsurance(): boolean {

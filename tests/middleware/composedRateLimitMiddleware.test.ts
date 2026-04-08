@@ -2,14 +2,17 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { compose } from '../../src/composition/compose.js';
+import { ComposedStore } from '../../src/composition/ComposedStore.js';
+import { createRedisEvalEmulator } from '../helpers/redis-eval-emulator.js';
 import { MemoryStore } from '../../src/stores/memory-store.js';
+import { RedisStore } from '../../src/stores/redis-store.js';
 import { expressRateLimiter } from '../../src/middleware/express.js';
 import { mergeRateLimiterOptions } from '../../src/middleware/merge-options.js';
 import type { RateLimitStore } from '../../src/types/index.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 
 describe('ComposedStore + expressRateLimiter', () => {
-  it('rejects merge when both limits and store are set', () => {
+  it('rejects merge when both limits and store are set (non-Redis template)', () => {
     expect(() =>
       mergeRateLimiterOptions({
         strategy: RateLimitStrategy.SLIDING_WINDOW,
@@ -17,6 +20,57 @@ describe('ComposedStore + expressRateLimiter', () => {
         store: {} as RateLimitStore,
       }),
     ).toThrow(/mutually exclusive/i);
+  });
+
+  it('rejects limits + ComposedStore', () => {
+    const c = compose.windows(
+      { windowMs: 60_000, maxRequests: 10 },
+      { windowMs: 120_000, maxRequests: 100 },
+    );
+    expect(c).toBeInstanceOf(ComposedStore);
+    expect(() =>
+      mergeRateLimiterOptions({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        limits: [{ windowMs: 60_000, max: 10 }],
+        store: c,
+      }),
+    ).toThrow(/composed/);
+    void c.shutdown();
+  });
+
+  it('allows limits + MemoryStore (ignored)', () => {
+    const mem = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 50,
+    });
+    expect(() =>
+      mergeRateLimiterOptions({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        limits: [{ windowMs: 60_000, max: 10 }],
+        store: mem,
+      }),
+    ).not.toThrow();
+    void mem.shutdown();
+  });
+
+  it('allows limits + sliding-window RedisStore template (no resilience)', () => {
+    const client = createRedisEvalEmulator();
+    const template = new RedisStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 100,
+      client,
+      keyPrefix: 'rlf:mw:',
+    });
+    expect(() =>
+      mergeRateLimiterOptions({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        limits: [{ windowMs: 60_000, max: 10 }],
+        store: template,
+      }),
+    ).not.toThrow();
+    void template.shutdown();
   });
 
   it('uses ComposedStore via store option and exposes rateLimitComposed with layers', async () => {

@@ -550,7 +550,7 @@ export interface WindowRateLimitOptions extends RateLimitOptionsBase {
   strategy?: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
 
   /**
-   * @description Multiple independent windows for the same route; blocks if any limit is exceeded. Merged options build a {@link ComposedStore} via {@link compose.windows} (mutually exclusive with a custom `store`). Top-level `windowMs` / `maxRequests` are set to the shortest window and minimum cap for header defaults.
+   * @description Multiple independent windows for the same route; blocks if any limit is exceeded. Merged options build a {@link ComposedStore} via {@link compose.windows} (one {@link MemoryStore} per slot by default). When **`store`** is a sliding/fixed-window {@link RedisStore}, it is used as a **template** and each slot gets its own {@link RedisStore} (distinct key prefix; optional {@link RedisStoreOptions.resilience} is cloned per slot with a per-slot insurance {@link MemoryStore}). **`MemoryStore`** with `limits` is accepted and ignored (same as omitting `store`). A {@link ComposedStore} cannot be combined with `limits`. Use `groupedWindowStores` for fully custom per-slot stores. Top-level `windowMs` / `maxRequests` are set to the shortest window and minimum cap for header defaults.
    * @default undefined
    * @since 1.1.0
    */
