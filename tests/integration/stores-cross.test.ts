@@ -348,16 +348,6 @@ describe('stores-cross integration', { timeout: 60_000 }, () => {
       await store.shutdown();
     }
 
-    async function ensureDynamoTable(raw: DynamoDBClient): Promise<void> {
-      try {
-        await raw.send(new CreateTableCommand(dynamoStoreTableSchema));
-      } catch (e) {
-        if (!(e instanceof ResourceInUseException)) {
-          throw e;
-        }
-      }
-    }
-
     it('Express + MemoryStore', async () => {
       const store = new MemoryStore({ ...smokeOpts });
       const app = express();
