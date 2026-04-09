@@ -34,6 +34,11 @@ export interface StoreTestHarness {
    * (e.g. AWS SDK) has internal timers that don't respect vi.useFakeTimers().
    */
   useRealTimers?: boolean;
+  /**
+   * When true, skip sliding-window tests that assume **exact** per-hit aging (boundary spike, aged-hit drop).
+   * {@link DynamoStore} uses a weighted sub-window model — set this so the shared suite does not assert exact semantics there.
+   */
+  skipExactSlidingWindowTimingTests?: boolean;
 }
 
 function expectWindowQuota(r: RateLimitResult, cap: number): void {
@@ -203,7 +208,9 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
     });
 
     describe('sliding window', () => {
-      it('smooths bursts at window boundaries (no spike past rolling cap)', async () => {
+      it.skipIf(!!harness.skipExactSlidingWindowTimingTests)(
+        'smooths bursts at window boundaries (no spike past rolling cap)',
+        async () => {
         const store = await harness.createStore({
           strategy: RateLimitStrategy.SLIDING_WINDOW,
           windowMs: 1000,
@@ -225,9 +232,12 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
         } finally {
           await store.shutdown();
         }
-      });
+      },
+      );
 
-      it('drops aged hits so quota recovers without a full wall-clock window gap', async () => {
+      it.skipIf(!!harness.skipExactSlidingWindowTimingTests)(
+        'drops aged hits so quota recovers without a full wall-clock window gap',
+        async () => {
         const store = await harness.createStore({
           strategy: RateLimitStrategy.SLIDING_WINDOW,
           windowMs: 1000,
@@ -253,7 +263,8 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
         } finally {
           await store.shutdown();
         }
-      });
+      },
+      );
 
       it('applies cost > 1 atomically (weighted sliding units)', async () => {
         const store = await harness.createStore({

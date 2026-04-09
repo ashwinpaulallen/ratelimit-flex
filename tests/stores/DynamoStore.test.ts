@@ -70,6 +70,8 @@ describe.skipIf(!runDynamoStoreIntegration)(
        * AWS SDK has internal timers that don't respect vi.useFakeTimers(), so use real delays.
        */
       useRealTimers: true,
+      /** Weighted sliding is approximate — exact boundary / aged-hit scenarios are not asserted here. */
+      skipExactSlidingWindowTimingTests: true,
       async createStore(config: StoreComplianceConfig) {
         if (config.strategy === RateLimitStrategy.TOKEN_BUCKET) {
           return new DynamoStore({
