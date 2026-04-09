@@ -293,18 +293,18 @@ export class PgStore implements RateLimitStore {
     const t = this.tableName;
 
     const sql = `
-      WITH merged AS (
+      WITH filtered AS (
         SELECT COALESCE(
           (
             SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
-            FROM (
-              SELECT e.elem::text AS elem
-              FROM jsonb_array_elements_text(COALESCE(${t}.hits, '[]'::jsonb)) AS e(elem)
-              WHERE e.elem::bigint > $3::bigint
-            ) s
+            FROM jsonb_array_elements_text(COALESCE((SELECT hits FROM ${t} WHERE key = $1::text), '[]'::jsonb)) AS e(elem)
+            WHERE e.elem::bigint > $3::bigint
           ),
           '[]'::jsonb
-        ) || $5::jsonb AS arr
+        ) AS old_hits
+      ),
+      merged AS (
+        SELECT (SELECT old_hits FROM filtered) || $5::jsonb AS new_hits
       )
       INSERT INTO ${t} (key, total_hits, reset_at, hits, tokens, last_refill_at)
       VALUES (
@@ -316,12 +316,12 @@ export class PgStore implements RateLimitStore {
         NULL
       )
       ON CONFLICT (key) DO UPDATE SET
-        hits = (SELECT arr FROM merged),
-        total_hits = jsonb_array_length((SELECT arr FROM merged)),
+        hits = (SELECT new_hits FROM merged),
+        total_hits = jsonb_array_length((SELECT new_hits FROM merged)),
         reset_at = to_timestamp(COALESCE(
           (
             SELECT MAX(elem::bigint)
-            FROM merged, jsonb_array_elements_text(merged.arr) AS m(elem)
+            FROM jsonb_array_elements_text((SELECT new_hits FROM merged)) AS m(elem)
           ),
           $3::bigint + $4::bigint
         ) / 1000.0)

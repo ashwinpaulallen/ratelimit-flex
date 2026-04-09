@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build
+        run: npm run build
+
       - name: Lint
         run: npm run lint
 
@@ -43,9 +46,6 @@ jobs:
           MONGO_STORE_TEST: '1'
           DYNAMO_STORE_TEST: '1'
         run: npm run test:coverage
-
-      - name: Build
-        run: npm run build
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
