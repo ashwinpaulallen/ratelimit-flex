@@ -66,6 +66,10 @@ describe.skipIf(!runDynamoStoreIntegration)(
        * The harness relaxes sliding-window **numeric** assertions accordingly; fixed window and token bucket stay exact.
        */
       slidingWindowTolerance: 0.1,
+      /**
+       * AWS SDK has internal timers that don't respect vi.useFakeTimers(), so use real delays.
+       */
+      useRealTimers: true,
       async createStore(config: StoreComplianceConfig) {
         if (config.strategy === RateLimitStrategy.TOKEN_BUCKET) {
           return new DynamoStore({

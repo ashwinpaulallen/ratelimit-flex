@@ -28,6 +28,11 @@ export interface StoreTestHarness {
    * allow up to this **relative** error (0.1 = 10%). Exact stores (Memory, Redis, PgStore, MongoStore) omit this.
    */
   slidingWindowTolerance?: number;
+  /**
+   * When true, skip fake timers and use real delays. Required for stores whose underlying client
+   * (e.g. AWS SDK) has internal timers that don't respect vi.useFakeTimers().
+   */
+  useRealTimers?: boolean;
 }
 
 function expectWindowQuota(r: RateLimitResult, cap: number): void {
@@ -59,13 +64,17 @@ function expectSlidingCount(
 export function runStoreComplianceTests(harness: StoreTestHarness): void {
   describe(`${harness.name} — store compliance`, () => {
     beforeEach(() => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      if (!harness.useRealTimers) {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      }
     });
 
     afterEach(async () => {
       await harness.afterEach?.();
-      vi.useRealTimers();
+      if (!harness.useRealTimers) {
+        vi.useRealTimers();
+      }
     });
 
     afterAll(async () => {
@@ -88,7 +97,11 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           expect(r3.isBlocked).toBe(true);
           expectWindowQuota(r3, 2);
 
-          vi.advanceTimersByTime(1001);
+          if (harness.useRealTimers) {
+            await new Promise((r) => setTimeout(r, 1100));
+          } else {
+            vi.advanceTimersByTime(1001);
+          }
           const r4 = await store.increment('fw');
           expect(r4.isBlocked).toBe(false);
           expect(r4.totalHits).toBe(1);
@@ -198,7 +211,11 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
         try {
           await store.increment('sm', { cost: 1 });
           await store.increment('sm', { cost: 1 });
-          vi.advanceTimersByTime(999);
+          if (harness.useRealTimers) {
+            await new Promise((r) => setTimeout(r, 1000));
+          } else {
+            vi.advanceTimersByTime(999);
+          }
           const edge = await store.increment('sm');
           expect(edge.isBlocked).toBe(true);
         } finally {
@@ -219,7 +236,11 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           const blocked = await store.increment('age');
           expect(blocked.isBlocked).toBe(true);
 
-          vi.advanceTimersByTime(1001);
+          if (harness.useRealTimers) {
+            await new Promise((r) => setTimeout(r, 1100));
+          } else {
+            vi.advanceTimersByTime(1001);
+          }
           const fresh = await store.increment('age');
           expect(fresh.isBlocked).toBe(false);
           expectSlidingCount(harness, fresh.totalHits, 1);
@@ -286,7 +307,11 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           expect(r2.isBlocked).toBe(false);
           expect(r3.isBlocked).toBe(true);
 
-          vi.advanceTimersByTime(1000);
+          if (harness.useRealTimers) {
+            await new Promise((r) => setTimeout(r, 1100));
+          } else {
+            vi.advanceTimersByTime(1000);
+          }
           const r4 = await store.increment('tb');
           expect(r4.isBlocked).toBe(false);
           expect(r4.remaining).toBe(1);
@@ -361,7 +386,11 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           await store.increment('rf', { cost: 5 });
           const blocked = await store.increment('rf');
           expect(blocked.isBlocked).toBe(true);
-          vi.advanceTimersByTime(500);
+          if (harness.useRealTimers) {
+            await new Promise((r) => setTimeout(r, 600));
+          } else {
+            vi.advanceTimersByTime(500);
+          }
           const ok = await store.increment('rf');
           expect(ok.isBlocked).toBe(false);
         } finally {
