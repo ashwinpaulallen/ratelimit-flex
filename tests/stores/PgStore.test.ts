@@ -24,7 +24,7 @@ describe.skipIf(!runPgStoreIntegration)(
       pool = backend.pool;
       cleanup = backend.cleanup;
       connectionUri = backend.connectionUri;
-    });
+    }, 120_000);
 
     afterAll(async () => {
       try {

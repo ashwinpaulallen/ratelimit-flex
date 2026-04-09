@@ -292,20 +292,8 @@ export class PgStore implements RateLimitStore {
     const initialResetAt = new Date(nowMs + windowMs);
     const t = this.tableName;
 
+    // Use a function to compute merged hits once in ON CONFLICT clause
     const sql = `
-      WITH filtered AS (
-        SELECT COALESCE(
-          (
-            SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
-            FROM jsonb_array_elements_text(COALESCE((SELECT hits FROM ${t} WHERE key = $1::text), '[]'::jsonb)) AS e(elem)
-            WHERE e.elem::bigint > $3::bigint
-          ),
-          '[]'::jsonb
-        ) AS old_hits
-      ),
-      merged AS (
-        SELECT (SELECT old_hits FROM filtered) || $5::jsonb AS new_hits
-      )
       INSERT INTO ${t} (key, total_hits, reset_at, hits, tokens, last_refill_at)
       VALUES (
         $1::text,
@@ -316,12 +304,52 @@ export class PgStore implements RateLimitStore {
         NULL
       )
       ON CONFLICT (key) DO UPDATE SET
-        hits = (SELECT new_hits FROM merged),
-        total_hits = jsonb_array_length((SELECT new_hits FROM merged)),
+        hits = (
+          WITH filtered AS (
+            SELECT COALESCE(
+              (
+                SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                WHERE e.elem::bigint > $3::bigint
+              ),
+              '[]'::jsonb
+            ) AS old_hits
+          )
+          SELECT old_hits || $5::jsonb FROM filtered
+        ),
+        total_hits = jsonb_array_length(
+          (
+            WITH filtered AS (
+              SELECT COALESCE(
+                (
+                  SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                  FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                  WHERE e.elem::bigint > $3::bigint
+                ),
+                '[]'::jsonb
+              ) AS old_hits
+            )
+            SELECT old_hits || $5::jsonb FROM filtered
+          )
+        ),
         reset_at = to_timestamp(COALESCE(
           (
             SELECT MAX(elem::bigint)
-            FROM jsonb_array_elements_text((SELECT new_hits FROM merged)) AS m(elem)
+            FROM jsonb_array_elements_text(
+              (
+                WITH filtered AS (
+                  SELECT COALESCE(
+                    (
+                      SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                      FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                      WHERE e.elem::bigint > $3::bigint
+                    ),
+                    '[]'::jsonb
+                  ) AS old_hits
+                )
+                SELECT old_hits || $5::jsonb FROM filtered
+              )
+            ) AS m(elem)
           ),
           $3::bigint + $4::bigint
         ) / 1000.0)

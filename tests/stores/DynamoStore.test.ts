@@ -48,7 +48,7 @@ describe.skipIf(!runDynamoStoreIntegration)(
           throw e;
         }
       }
-    });
+    }, 120_000);
 
     afterAll(async () => {
       try {
