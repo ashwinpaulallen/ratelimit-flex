@@ -55,36 +55,69 @@ class FailingPrimaryStore implements RateLimitStore {
   async shutdown(): Promise<void> {}
 }
 
-describe('stores-cross integration', () => {
+describe('stores-cross integration', { timeout: 60_000 }, () => {
+  // Shared Postgres backend for all PgStore tests
+  let pgBackend: Awaited<ReturnType<typeof initPgStoreTestBackend>> | null = null;
+  
+  // Shared DynamoDB backend for all DynamoStore tests
+  let dynamoBackend: Awaited<ReturnType<typeof initDynamoStoreTestBackend>> | null = null;
+  let dynamoClient: DynamoDBDocumentClient | null = null;
+
+  beforeAll(async () => {
+    if (runPgStoreIntegration) {
+      pgBackend = await initPgStoreTestBackend();
+    }
+    if (runDynamoStoreIntegration) {
+      dynamoBackend = await initDynamoStoreTestBackend();
+      const raw = new DynamoDBClient({
+        endpoint: dynamoBackend.endpoint,
+        region: 'us-east-1',
+        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      });
+      dynamoClient = DynamoDBDocumentClient.from(raw);
+      try {
+        await raw.send(new CreateTableCommand(dynamoStoreTableSchema));
+      } catch (e) {
+        if (!(e instanceof ResourceInUseException)) {
+          throw e;
+        }
+      }
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    if (pgBackend) {
+      await pgBackend.cleanup();
+    }
+    if (dynamoBackend) {
+      await dynamoBackend.cleanup();
+    }
+  });
+
   describe('InMemoryShield wraps remote stores', () => {
     it.skipIf(!runPgStoreIntegration)(
       'PgStore: blocked keys are cached; later increments skip the inner store',
       async () => {
-        const { pool, cleanup } = await initPgStoreTestBackend();
-        try {
-          const inner = new PgStore({
-            client: pool,
-            ...windowOpts,
-            autoSweepIntervalMs: 0,
-          });
-          const shielded = shield(inner, { blockOnConsumed: 3, blockDurationMs: 60_000 });
-          shielded.resetMetrics();
+        const inner = new PgStore({
+          client: pgBackend!.pool,
+          ...windowOpts,
+          autoSweepIntervalMs: 0,
+        });
+        const shielded = shield(inner, { blockOnConsumed: 3, blockDurationMs: 60_000 });
+        shielded.resetMetrics();
 
-          await shielded.increment('shield-pg');
-          await shielded.increment('shield-pg');
-          const third = await shielded.increment('shield-pg');
-          expect(third.totalHits).toBeGreaterThanOrEqual(3);
+        await shielded.increment('shield-pg');
+        await shielded.increment('shield-pg');
+        const third = await shielded.increment('shield-pg');
+        expect(third.totalHits).toBeGreaterThanOrEqual(3);
 
-          const m1 = shielded.getMetrics();
-          const fourth = await shielded.increment('shield-pg');
-          expect(fourth.shielded).toBe(true);
-          const m2 = shielded.getMetrics();
-          expect(m2.storeCallsSaved).toBeGreaterThan(m1.storeCallsSaved);
+        const m1 = shielded.getMetrics();
+        const fourth = await shielded.increment('shield-pg');
+        expect(fourth.shielded).toBe(true);
+        const m2 = shielded.getMetrics();
+        expect(m2.storeCallsSaved).toBeGreaterThan(m1.storeCallsSaved);
 
-          await shielded.shutdown();
-        } finally {
-          await cleanup();
-        }
+        await shielded.shutdown();
       },
     );
 
@@ -114,53 +147,27 @@ describe('stores-cross integration', () => {
     it.skipIf(!runDynamoStoreIntegration)(
       'DynamoStore: shield metrics show saved calls after cache',
       async () => {
-        const backend = await initDynamoStoreTestBackend();
-        const raw = new DynamoDBClient({
-          endpoint: backend.endpoint,
-          region: 'us-east-1',
-          credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+        const inner = new DynamoStore({
+          client: dynamoClient!,
+          tableName: 'rate_limits',
+          ...windowOpts,
         });
-        const doc = DynamoDBDocumentClient.from(raw);
-        try {
-          try {
-            await raw.send(new CreateTableCommand(dynamoStoreTableSchema));
-          } catch (e) {
-            if (!(e instanceof ResourceInUseException)) {
-              throw e;
-            }
-          }
-          const inner = new DynamoStore({
-            client: doc,
-            tableName: 'rate_limits',
-            ...windowOpts,
-          });
-          const shielded = shield(inner, { blockOnConsumed: 2, blockDurationMs: 60_000 });
-          await clearDynamoRateLimitsTable(doc, 'rate_limits');
-          shielded.resetMetrics();
-          await shielded.increment('d');
-          await shielded.increment('d');
-          await shielded.increment('d');
-          expect(shielded.getMetrics().storeCallsSaved).toBeGreaterThan(0);
-          await shielded.shutdown();
-        } finally {
-          await backend.cleanup();
-        }
+        const shielded = shield(inner, { blockOnConsumed: 2, blockDurationMs: 60_000 });
+        await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
+        shielded.resetMetrics();
+        await shielded.increment('d');
+        await shielded.increment('d');
+        await shielded.increment('d');
+        expect(shielded.getMetrics().storeCallsSaved).toBeGreaterThan(0);
+        await shielded.shutdown();
       },
     );
   });
 
   describe.skipIf(!runPgStoreIntegration)('compose.all stacks PgStore + MemoryStore', () => {
-    let cleanup: () => Promise<void> = async () => {};
-
-    afterAll(async () => {
-      await cleanup();
-    });
-
     it('both layers are consulted on each increment', async () => {
-      const { pool, cleanup: c } = await initPgStoreTestBackend();
-      cleanup = c;
       const pg = new PgStore({
-        client: pool,
+        client: pgBackend!.pool,
         ...windowOpts,
         autoSweepIntervalMs: 0,
       });
@@ -243,60 +250,42 @@ describe('stores-cross integration', () => {
 
   describe.skipIf(!runDynamoStoreIntegration)('metrics: store latency with DynamoStore', () => {
     it('records store_duration in snapshot after requests', async () => {
-      const backend = await initDynamoStoreTestBackend();
-      const raw = new DynamoDBClient({
-        endpoint: backend.endpoint,
-        region: 'us-east-1',
-        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      const store = new DynamoStore({
+        client: dynamoClient!,
+        tableName: 'rate_limits',
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 100,
       });
-      const doc = DynamoDBDocumentClient.from(raw);
-      try {
-        try {
-          await raw.send(new CreateTableCommand(dynamoStoreTableSchema));
-        } catch (e) {
-          if (!(e instanceof ResourceInUseException)) {
-            throw e;
-          }
-        }
-        const store = new DynamoStore({
-          client: doc,
-          tableName: 'rate_limits',
-          strategy: RateLimitStrategy.FIXED_WINDOW,
-          windowMs: 60_000,
-          maxRequests: 100,
-        });
-        await clearDynamoRateLimitsTable(doc, 'rate_limits');
+      await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
 
-        const limiter = expressRateLimiter({
-          strategy: RateLimitStrategy.FIXED_WINDOW,
-          windowMs: 60_000,
-          maxRequests: 100,
-          keyGenerator: () => 'metrics-ip',
-          store,
-          metrics: true,
-        });
+      const limiter = expressRateLimiter({
+        strategy: RateLimitStrategy.FIXED_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 100,
+        keyGenerator: () => 'metrics-ip',
+        store,
+        metrics: true,
+      });
 
-        const app = express();
-        app.use(limiter);
-        app.get('/ok', (_req, res) => {
-          res.status(200).json({ ok: true });
-        });
+      const app = express();
+      app.use(limiter);
+      app.get('/ok', (_req, res) => {
+        res.status(200).json({ ok: true });
+      });
 
-        for (let i = 0; i < 5; i++) {
-          await request(app).get('/ok').expect(200);
-        }
-
-        await new Promise<void>((r) => setTimeout(r, 10_500));
-        const snap = limiter.getMetricsSnapshot();
-        expect(snap).not.toBeNull();
-        expect(snap!.storeLatencySamplesMs?.length ?? 0).toBeGreaterThan(0);
-        expect(snap!.storeLatency.p50).toBeGreaterThanOrEqual(0);
-
-        await limiter.shutdownMetrics();
-        await store.shutdown();
-      } finally {
-        await backend.cleanup();
+      for (let i = 0; i < 5; i++) {
+        await request(app).get('/ok').expect(200);
       }
+
+      await new Promise<void>((r) => setTimeout(r, 10_500));
+      const snap = limiter.getMetricsSnapshot();
+      expect(snap).not.toBeNull();
+      expect(snap!.storeLatencySamplesMs?.length ?? 0).toBeGreaterThan(0);
+      expect(snap!.storeLatency.p50).toBeGreaterThanOrEqual(0);
+
+      await limiter.shutdownMetrics();
+      await store.shutdown();
     });
   });
 
@@ -391,54 +380,34 @@ describe('stores-cross integration', () => {
     });
 
     it.skipIf(!runPgStoreIntegration)('Express + PgStore', async () => {
-      const { pool, cleanup } = await initPgStoreTestBackend();
-      try {
-        const store = new PgStore({
-          client: pool,
-          ...smokeOpts,
-          autoSweepIntervalMs: 0,
-        });
-        const app = express();
-        app.use(expressRateLimiter({ ...smokeOpts, store }));
-        app.get('/x', (_q, res) => res.json({ ok: true }));
-        await request(app).get('/x').expect(200);
-        await store.shutdown();
-      } finally {
-        await cleanup();
-      }
+      const store = new PgStore({
+        client: pgBackend!.pool,
+        ...smokeOpts,
+        autoSweepIntervalMs: 0,
+      });
+      const app = express();
+      app.use(expressRateLimiter({ ...smokeOpts, store }));
+      app.get('/x', (_q, res) => res.json({ ok: true }));
+      await request(app).get('/x').expect(200);
+      await store.shutdown();
     });
 
     it.skipIf(!runPgStoreIntegration)('Fastify + PgStore', async () => {
-      const { pool, cleanup } = await initPgStoreTestBackend();
-      try {
-        await runFastifySmoke(
-          new PgStore({ client: pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
-        );
-      } finally {
-        await cleanup();
-      }
+      await runFastifySmoke(
+        new PgStore({ client: pgBackend!.pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
+      );
     });
 
     it.skipIf(!runPgStoreIntegration)('Hono + PgStore', async () => {
-      const { pool, cleanup } = await initPgStoreTestBackend();
-      try {
-        await runHonoSmoke(
-          new PgStore({ client: pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
-        );
-      } finally {
-        await cleanup();
-      }
+      await runHonoSmoke(
+        new PgStore({ client: pgBackend!.pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
+      );
     });
 
     it.skipIf(!runPgStoreIntegration)('NestJS + PgStore (HTTP)', async () => {
-      const { pool, cleanup } = await initPgStoreTestBackend();
-      try {
-        await nestHttpSmoke(
-          new PgStore({ client: pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
-        );
-      } finally {
-        await cleanup();
-      }
+      await nestHttpSmoke(
+        new PgStore({ client: pgBackend!.pool, ...smokeOpts, autoSweepIntervalMs: 0 }),
+      );
     });
 
     it('Express + MongoStore', async () => {
@@ -517,86 +486,38 @@ describe('stores-cross integration', () => {
     });
 
     it.skipIf(!runDynamoStoreIntegration)('Express + DynamoStore', async () => {
-      const backend = await initDynamoStoreTestBackend();
-      const raw = new DynamoDBClient({
-        endpoint: backend.endpoint,
-        region: 'us-east-1',
-        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      const store = new DynamoStore({
+        client: dynamoClient!,
+        tableName: 'rate_limits',
+        ...smokeOpts,
       });
-      const doc = DynamoDBDocumentClient.from(raw);
-      try {
-        await ensureDynamoTable(raw);
-        const store = new DynamoStore({
-          client: doc,
-          tableName: 'rate_limits',
-          ...smokeOpts,
-        });
-        await clearDynamoRateLimitsTable(doc, 'rate_limits');
-        const app = express();
-        app.use(expressRateLimiter({ ...smokeOpts, store }));
-        app.get('/x', (_q, res) => res.json({ ok: true }));
-        await request(app).get('/x').expect(200);
-        await store.shutdown();
-      } finally {
-        await backend.cleanup();
-      }
+      await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
+      const app = express();
+      app.use(expressRateLimiter({ ...smokeOpts, store }));
+      app.get('/x', (_q, res) => res.json({ ok: true }));
+      await request(app).get('/x').expect(200);
+      await store.shutdown();
     });
 
     it.skipIf(!runDynamoStoreIntegration)('Fastify + DynamoStore', async () => {
-      const backend = await initDynamoStoreTestBackend();
-      const raw = new DynamoDBClient({
-        endpoint: backend.endpoint,
-        region: 'us-east-1',
-        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
-      });
-      const doc = DynamoDBDocumentClient.from(raw);
-      try {
-        await ensureDynamoTable(raw);
-        await clearDynamoRateLimitsTable(doc, 'rate_limits');
-        await runFastifySmoke(
-          new DynamoStore({ client: doc, tableName: 'rate_limits', ...smokeOpts }),
-        );
-      } finally {
-        await backend.cleanup();
-      }
+      await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
+      await runFastifySmoke(
+        new DynamoStore({ client: dynamoClient!, tableName: 'rate_limits', ...smokeOpts }),
+      );
     });
 
     it.skipIf(!runDynamoStoreIntegration)('Hono + DynamoStore', async () => {
-      const backend = await initDynamoStoreTestBackend();
-      const raw = new DynamoDBClient({
-        endpoint: backend.endpoint,
-        region: 'us-east-1',
-        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
-      });
-      const doc = DynamoDBDocumentClient.from(raw);
-      try {
-        await ensureDynamoTable(raw);
-        await clearDynamoRateLimitsTable(doc, 'rate_limits');
-        await runHonoSmoke(
-          new DynamoStore({ client: doc, tableName: 'rate_limits', ...smokeOpts }),
-        );
-      } finally {
-        await backend.cleanup();
-      }
+      await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
+      await runHonoSmoke(
+        new DynamoStore({ client: dynamoClient!, tableName: 'rate_limits', ...smokeOpts }),
+      );
     });
 
     it.skipIf(!runDynamoStoreIntegration)('NestJS + DynamoStore (HTTP)', async () => {
-      const backend = await initDynamoStoreTestBackend();
-      const raw = new DynamoDBClient({
-        endpoint: backend.endpoint,
-        region: 'us-east-1',
-        credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
-      });
-      const doc = DynamoDBDocumentClient.from(raw);
-      try {
-        await ensureDynamoTable(raw);
-        await clearDynamoRateLimitsTable(doc, 'rate_limits');
-        await nestHttpSmoke(
-          new DynamoStore({ client: doc, tableName: 'rate_limits', ...smokeOpts }),
-        );
-      } finally {
-        await backend.cleanup();
-      }
+      await clearDynamoRateLimitsTable(dynamoClient!, 'rate_limits');
+      await nestHttpSmoke(
+        new DynamoStore({ client: dynamoClient!, tableName: 'rate_limits', ...smokeOpts }),
+      );
     });
   });
 });
