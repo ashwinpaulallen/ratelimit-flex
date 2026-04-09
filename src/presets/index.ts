@@ -1,4 +1,3 @@
-import cluster from 'node:cluster';
 import type { CircuitBreakerOptions } from '../resilience/CircuitBreaker.js';
 import type { ResilienceHooks } from '../resilience/types.js';
 import type { QueuedRateLimiterOptions } from '../middleware/expressQueuedRateLimiter.js';
@@ -6,7 +5,7 @@ import { ClusterStore } from '../stores/ClusterStore.js';
 import { MemoryStore } from '../stores/memory-store.js';
 import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
-import { detectEnvironment, type EnvironmentInfo } from '../utils/environment.js';
+import { ceilDiv, estimateWorkersFromEnvironment } from './estimate-workers.js';
 import type { RedisStoreConnectionOptions } from '../utils/store-factory.js';
 import type {
   RateLimitOptions,
@@ -65,47 +64,6 @@ export type ResilientRedisPresetRedisOptions = RedisStoreConnectionOptions &
     bucketSize: number;
   }> &
   Partial<Pick<RedisStoreOptions, 'onWarn' | 'keyPrefix' | 'onRedisError'>>;
-
-function ceilDiv(numerator: number, denominator: number): number {
-  if (denominator <= 0) {
-    return Math.max(1, numerator);
-  }
-  return Math.max(1, Math.ceil(numerator / denominator));
-}
-
-/**
- * Best-effort replica count from {@link detectEnvironment} when `estimatedWorkers` is omitted.
- *
- * @description Returns `1` when no multi-instance signals; otherwise uses Kubernetes (4), Docker (2), or cluster worker count when available.
- */
-function estimateWorkersFromEnvironment(
-  explicit: number | undefined,
-  env: EnvironmentInfo = detectEnvironment(),
-): number {
-  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0) {
-    return Math.max(1, Math.floor(explicit));
-  }
-  if (!env.isMultiInstance) {
-    return 1;
-  }
-  let n = 1;
-  if (env.isKubernetes) {
-    n = Math.max(n, 4);
-  }
-  if (env.isDocker) {
-    n = Math.max(n, 2);
-  }
-  if (env.isCluster) {
-    const workerCount =
-      cluster.isPrimary && cluster.workers
-        ? Object.keys(cluster.workers).length
-        : cluster.isWorker
-          ? 1
-          : 0;
-    n = Math.max(n, workerCount > 1 ? workerCount : 2);
-  }
-  return Math.max(1, n);
-}
 
 function extractStrategyFromRedisOptions(redisOptions: ResilientRedisPresetRedisOptions): Partial<RateLimitOptions> {
   const s = redisOptions.strategy;
@@ -639,4 +597,12 @@ export function publicApiPreset(
     ...options,
   };
 }
+
+export {
+  failClosedPostgresPreset,
+  postgresInsuranceMemoryStore,
+  postgresPreset,
+  resilientPostgresPreset,
+  type PostgresPresetPgOptions,
+} from './postgres-presets.js';
 

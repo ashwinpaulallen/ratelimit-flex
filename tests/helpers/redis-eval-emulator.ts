@@ -143,6 +143,28 @@ export function createRedisEvalEmulator(): RedisLikeClient {
         return [count, blocked, resetAt];
       }
 
+      // --- Sliding window decrement (ZPOPMIN / ZPOPMAX) ---
+      if (script.includes('--rlf:sd')) {
+        const zkey = keys[0]!;
+        const cost = Math.max(1, Number(argv[0]) || 1);
+        const newest = argv[1] === '1';
+        const members = zsets.get(zkey) ?? [];
+        members.sort((a, b) => a.score - b.score);
+        for (let i = 0; i < cost && members.length > 0; i++) {
+          if (newest) {
+            members.pop();
+          } else {
+            members.shift();
+          }
+        }
+        if (members.length === 0) {
+          zsets.delete(zkey);
+        } else {
+          zsets.set(zkey, members);
+        }
+        return 1;
+      }
+
       // --- Fixed window increment ---
       if (script.includes('--rlf:fi')) {
         const k = keys[0]!;
@@ -162,6 +184,28 @@ export function createRedisEvalEmulator(): RedisLikeClient {
         const resetAt = now + Math.max(0, pttl);
         const blocked = current > maxReq ? 1 : 0;
         return [current, blocked, resetAt];
+      }
+
+      // --- Fixed window decrement ---
+      if (script.includes('--rlf:fd')) {
+        const k = keys[0]!;
+        const dec = Math.max(1, Number(argv[0]) || 1);
+        const prev = getStringKey(k);
+        if (!prev) {
+          return 0;
+        }
+        const v = Number(prev.value);
+        if (v <= 0) {
+          return v;
+        }
+        const take = Math.min(v, dec);
+        const next = v - take;
+        if (next <= 0) {
+          strings.delete(k);
+        } else {
+          strings.set(k, { value: String(next), pxatMs: prev.pxatMs });
+        }
+        return v;
       }
 
       // --- Fixed window get ---
@@ -228,6 +272,21 @@ export function createRedisEvalEmulator(): RedisLikeClient {
         return [0, tokens, bucketSize, 1, nextRefill];
       }
 
+      // --- Token bucket decrement ---
+      if (script.includes('--rlf:bd')) {
+        const key = keys[0]!;
+        const bucketSize = Number(argv[0]);
+        const add = Math.max(1, Number(argv[1]) || 1);
+        const h = hashes.get(key);
+        if (!h) {
+          return 0;
+        }
+        let tokens = Number(h.tokens);
+        tokens = Math.min(bucketSize, tokens + add);
+        hashes.set(key, { ...h, tokens: String(tokens) });
+        return 1;
+      }
+
       // --- Token bucket get ---
       if (script.includes('--rlf:bg')) {
         const key = keys[0]!;
@@ -274,5 +333,15 @@ export function createRedisEvalEmulator(): RedisLikeClient {
 
       throw new Error('redis-eval-emulator: unhandled script');
     },
+
+    flushdb: async () => {
+      zsets.clear();
+      strings.clear();
+      hashes.clear();
+    },
   };
 }
+
+export type RedisEvalEmulatorClient = RedisLikeClient & {
+  flushdb(): Promise<void>;
+};

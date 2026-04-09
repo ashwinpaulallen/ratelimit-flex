@@ -41,6 +41,7 @@ import {
   KeyedRateLimiterQueue,
   expressQueuedRateLimiter,
   createStore,
+  failClosedPostgresPreset,
   defaultKeyGenerator,
   defaultRateLimitIdentifier,
   detectEnvironment,
@@ -57,9 +58,15 @@ import {
   MetricsManager,
   multiInstancePreset,
   multiWindowPreset,
+  postgresInsuranceMemoryStore,
+  postgresPreset,
   publicApiPreset,
+  pgStoreSchema,
+  pgStoreSchemaDown,
+  PgStore,
   queuedClusterPreset,
   RedisStore,
+  resilientPostgresPreset,
   resilientRedisPreset,
   RateLimitEngine,
   RateLimiterQueue,
@@ -197,6 +204,9 @@ describe('package exports', () => {
   it('exports stores and factory', () => {
     expect(MemoryStore).toBeDefined();
     expect(RedisStore).toBeDefined();
+    expect(PgStore).toBeDefined();
+    expect(typeof pgStoreSchema).toBe('string');
+    expect(typeof pgStoreSchemaDown).toBe('string');
     expect(ComposedStore).toBeDefined();
     expect(typeof compose.all).toBe('function');
     expect(typeof compose.layer).toBe('function');
@@ -231,6 +241,10 @@ describe('package exports', () => {
     expect(typeof authEndpointPreset).toBe('function');
     expect(typeof publicApiPreset).toBe('function');
     expect(typeof resilientRedisPreset).toBe('function');
+    expect(typeof postgresPreset).toBe('function');
+    expect(typeof failClosedPostgresPreset).toBe('function');
+    expect(typeof resilientPostgresPreset).toBe('function');
+    expect(typeof postgresInsuranceMemoryStore).toBe('function');
     expect(typeof clusterPreset).toBe('function');
     expect(typeof queuedClusterPreset).toBe('function');
     expect(typeof apiKeyHeaderKeyGenerator).toBe('function');

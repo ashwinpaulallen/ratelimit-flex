@@ -212,6 +212,7 @@ return { count, blocked, reset_at }
 
 /** Pop entries: ARGV[1]=cost, ARGV[2]='1' for newest (ZPOPMAX) else oldest (ZPOPMIN). */
 const LUA_SLIDING_DECR = `
+--rlf:sd
 local n = tonumber(ARGV[1]) or 1
 if n < 1 then n = 1 end
 local newest = ARGV[2] == '1'
@@ -251,6 +252,7 @@ return { current, blocked, reset_at }
 `;
 
 const LUA_FIXED_DECR = `
+--rlf:fd
 local k = KEYS[1]
 local dec = tonumber(ARGV[1]) or 1
 if dec < 1 then dec = 1 end
@@ -310,6 +312,7 @@ return { 0, tokens, bucket_size, 1, next_refill }
 `;
 
 const LUA_BUCKET_DECR = `
+--rlf:bd
 local key = KEYS[1]
 local bucket_size = tonumber(ARGV[1])
 local add = tonumber(ARGV[2]) or 1

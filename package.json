@@ -82,6 +82,17 @@
         "default": "./dist/cjs/hono/index.js"
       },
       "default": "./dist/hono/index.js"
+    },
+    "./postgres": {
+      "import": {
+        "types": "./dist/stores/postgres/index.d.ts",
+        "default": "./dist/stores/postgres/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/stores/postgres/index.d.ts",
+        "default": "./dist/cjs/stores/postgres/index.js"
+      },
+      "default": "./dist/stores/postgres/index.js"
     }
   },
   "peerDependencies": {
@@ -94,6 +105,7 @@
     "fastify": "^4.28.0 || ^5.0.0",
     "fastify-plugin": "^4.5.1 || ^5.0.0",
     "hono": ">=4",
+    "pg": ">=8",
     "ioredis": "^5.0.0",
     "prom-client": "^15.0.0"
   },
@@ -120,6 +132,9 @@
       "optional": true
     },
     "hono": {
+      "optional": true
+    },
+    "pg": {
       "optional": true
     },
     "ioredis": {
@@ -165,8 +180,10 @@
     "@nestjs/platform-express": "^11.1.9",
     "@nestjs/testing": "^11.1.18",
     "@opentelemetry/api": "^1.9.0",
+    "@testcontainers/postgresql": "^11.14.0",
     "@types/express": "^5.0.6",
     "@types/node": "^25.5.0",
+    "@types/pg": "^8.20.0",
     "@types/supertest": "^7.2.0",
     "@vitest/coverage-v8": "^4.1.2",
     "eslint": "^10.1.0",
@@ -174,10 +191,12 @@
     "fastify": "^5.8.4",
     "fastify-plugin": "^5.1.0",
     "hono": "^4.11.3",
+    "pg": "^8.20.0",
     "prettier": "^3.8.1",
     "prom-client": "^15.1.3",
     "reflect-metadata": "^0.2.2",
     "supertest": "^7.2.2",
+    "testcontainers": "^11.14.0",
     "tsx": "^4.21.0",
     "typedoc": "^0.28.18",
     "typescript": "^5.9.3",

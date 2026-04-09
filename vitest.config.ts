@@ -1,4 +1,8 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 const shared = {
   environment: 'node' as const,
@@ -12,6 +16,12 @@ const shared = {
 };
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      /** Resolve like published `ratelimit-flex/postgres` subpath (see package.json `exports`). */
+      'ratelimit-flex/postgres': path.resolve(rootDir, 'src/stores/postgres/index.ts'),
+    },
+  },
   test: {
     projects: [
       {

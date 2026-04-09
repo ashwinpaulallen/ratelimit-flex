@@ -125,6 +125,16 @@ export type {
 export { RedisStore, type RedisErrorMode } from './stores/redis-store.js';
 
 /**
+ * Postgres-backed {@link PgStore} (fixed window and token bucket; sliding window planned).
+ *
+ * @see {@link pgStoreSchema} — run DDL yourself before use
+ * @since 3.3.0
+ */
+export { PgStore } from './stores/postgres/PgStore.js';
+export type { PgClientLike, PgStoreOptions } from './stores/postgres/types.js';
+export { pgStoreSchema, pgStoreSchemaDown } from './stores/postgres/schema.js';
+
+/**
  * Store factory and Redis connection types for programmatic store creation.
  *
  * @see {@link createStore}
@@ -235,7 +245,7 @@ export {
 export { fromExpressRateLimitOptions, type ExpressRateLimitLikeOptions } from './compat/expressRateLimitCompat.js';
 
 /**
- * Opinionated {@link RateLimitOptions} builders for common deployments.
+ * Opinionated {@link RateLimitOptions} builders for common deployments (Redis, Postgres, in-memory, cluster).
  *
  * @since 1.2.0
  */
@@ -245,10 +255,15 @@ export {
   authEndpointPreset,
   clusterPreset,
   multiInstancePreset,
+  failClosedPostgresPreset,
+  postgresInsuranceMemoryStore,
+  postgresPreset,
   publicApiPreset,
   queuedClusterPreset,
+  resilientPostgresPreset,
   resilientRedisPreset,
   singleInstancePreset,
+  type PostgresPresetPgOptions,
   type ResilientRedisPresetRedisOptions,
 } from './presets/index.js';
 
