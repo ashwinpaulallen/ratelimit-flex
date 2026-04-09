@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fixedWindowBoundaryMs } from '../../src/stores/dynamo/sliding-weighted.js';
 import type { RateLimitResult, RateLimitStore } from '../../src/types/index.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 
@@ -209,10 +210,13 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           maxRequests: 2,
         });
         try {
+          /** Wall-clock anchor so real-time waits match fake `advanceTimersByTime(999)` from the same logical start. */
+          const anchor = Date.now();
           await store.increment('sm', { cost: 1 });
           await store.increment('sm', { cost: 1 });
           if (harness.useRealTimers) {
-            await new Promise((r) => setTimeout(r, 1000));
+            const elapsed = Date.now() - anchor;
+            await new Promise((r) => setTimeout(r, Math.max(0, 999 - elapsed)));
           } else {
             vi.advanceTimersByTime(999);
           }
@@ -230,6 +234,7 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           maxRequests: 3,
         });
         try {
+          const anchor = Date.now();
           await store.increment('age');
           await store.increment('age');
           await store.increment('age');
@@ -237,7 +242,8 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           expect(blocked.isBlocked).toBe(true);
 
           if (harness.useRealTimers) {
-            await new Promise((r) => setTimeout(r, 1100));
+            const elapsed = Date.now() - anchor;
+            await new Promise((r) => setTimeout(r, Math.max(0, 1001 - elapsed)));
           } else {
             vi.advanceTimersByTime(1001);
           }
@@ -519,16 +525,22 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
     describe('resetTime contract', () => {
       it('allowed window increments: resetTime is in the future and matches window boundary', async () => {
         const windowMs = 1000;
-        const t0 = Date.now();
         const store = await harness.createStore({
           strategy: RateLimitStrategy.SLIDING_WINDOW,
           windowMs,
           maxRequests: 10,
         });
         try {
+          const t0 = Date.now();
           const r = await store.increment('rt');
           expect(r.resetTime.getTime()).toBeGreaterThan(t0);
-          expect(r.resetTime.getTime()).toBe(t0 + windowMs);
+          if (harness.useRealTimers) {
+            /** {@link DynamoStore} uses {@link fixedWindowBoundaryMs} for sub-windows, not `t0 + windowMs`. */
+            const b = fixedWindowBoundaryMs(t0, windowMs);
+            expect(r.resetTime.getTime()).toBe(b + windowMs);
+          } else {
+            expect(r.resetTime.getTime()).toBe(t0 + windowMs);
+          }
         } finally {
           await store.shutdown();
         }
@@ -536,16 +548,21 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
 
       it('allowed fixed-window increment: resetTime aligns with slice expiry', async () => {
         const windowMs = 1000;
-        const t0 = Date.now();
         const store = await harness.createStore({
           strategy: RateLimitStrategy.FIXED_WINDOW,
           windowMs,
           maxRequests: 10,
         });
         try {
+          const t0 = Date.now();
           const r = await store.increment('rt-fw');
           expect(r.resetTime.getTime()).toBeGreaterThan(t0);
-          expect(r.resetTime.getTime()).toBe(t0 + windowMs);
+          if (harness.useRealTimers) {
+            const b = fixedWindowBoundaryMs(t0, windowMs);
+            expect(r.resetTime.getTime()).toBe(b + windowMs);
+          } else {
+            expect(r.resetTime.getTime()).toBe(t0 + windowMs);
+          }
         } finally {
           await store.shutdown();
         }
