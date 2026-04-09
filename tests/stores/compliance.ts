@@ -89,9 +89,16 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
 
     describe('fixed window', () => {
       it('increments, blocks when over cap, resets after window expiry', async () => {
+        /**
+         * With real wall clock (e.g. {@link DynamoStore} + AWS SDK), a 1s window is flaky on CI:
+         * sequential async increments can straddle epoch-aligned window boundaries and the 3rd hit
+         * starts a new slice instead of exceeding the cap. Use a wider window only in that mode.
+         */
+        const windowMs = harness.useRealTimers ? 5_000 : 1_000;
+        const pastWindowMs = windowMs + 100;
         const store = await harness.createStore({
           strategy: RateLimitStrategy.FIXED_WINDOW,
-          windowMs: 1000,
+          windowMs,
           maxRequests: 2,
         });
         try {
@@ -104,7 +111,7 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           expectWindowQuota(r3, 2);
 
           if (harness.useRealTimers) {
-            await new Promise((r) => setTimeout(r, 1100));
+            await new Promise((r) => setTimeout(r, pastWindowMs));
           } else {
             vi.advanceTimersByTime(1001);
           }
