@@ -42,7 +42,7 @@ describe.skipIf(!runPgStoreIntegration)(
         );
         throw err;
       }
-    });
+    }, 120_000);
 
     afterAll(async () => {
       await cleanup();

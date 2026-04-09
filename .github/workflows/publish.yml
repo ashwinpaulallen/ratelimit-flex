@@ -22,14 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build
+        run: npm run build
+
       - name: Lint
         run: npm run lint
 
       - name: Test
+        env:
+          PG_STORE_TEST: '1'
+          MONGO_STORE_TEST: '1'
+          DYNAMO_STORE_TEST: '1'
         run: npm test
-
-      - name: Build
-        run: npm run build
 
       - name: Publish package
         run: npm publish --access public

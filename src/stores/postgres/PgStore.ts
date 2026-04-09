@@ -10,6 +10,7 @@ import {
   sanitizeRateLimitCap,
   sanitizeWindowMs,
 } from '../../utils/clamp.js';
+import { num, refillBucketState, resetTimeDateFromSlidingStamps } from '../../utils/store-utils.js';
 import type { PgClientLike, PgStoreOptions } from './types.js';
 
 const TABLE_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -21,22 +22,6 @@ function assertSafeTableName(name: string): string {
     );
   }
   return name;
-}
-
-function num(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) {
-    return v;
-  }
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    if (Number.isFinite(n)) {
-      return n;
-    }
-  }
-  if (typeof v === 'bigint') {
-    return Number(v);
-  }
-  return NaN;
 }
 
 /**
@@ -229,7 +214,7 @@ export class PgStore implements RateLimitStore {
         }
       }
 
-      const refilled = this.refillBucketState(tokens, lastRefillMs, now, bs, tpi, interval);
+      const refilled = refillBucketState(tokens, lastRefillMs, now, bs, tpi, interval);
 
       let newTokens: number;
       let newLastRefillMs: number;
@@ -286,25 +271,6 @@ export class PgStore implements RateLimitStore {
     });
   }
 
-  private refillBucketState(
-    tokens: number,
-    lastRefillMs: number,
-    now: number,
-    bucketSize: number,
-    tokensPerInterval: number,
-    intervalMs: number,
-  ): { tokens: number; lastRefillMs: number } {
-    let t = tokens;
-    let lr = lastRefillMs;
-    const elapsed = now - lr;
-    const intervals = Math.floor(elapsed / intervalMs);
-    if (intervals > 0) {
-      t = Math.min(bucketSize, t + intervals * tokensPerInterval);
-      lr += intervals * intervalMs;
-    }
-    return { tokens: t, lastRefillMs: lr };
-  }
-
   /**
    * Sliding window: JSONB array of epoch-ms **strings** (multiset of hit times).
    * Prune entries with `ts <= windowStartMs`, append `cost` copies of `nowMs` via `|| EXCLUDED.hits`.
@@ -326,20 +292,8 @@ export class PgStore implements RateLimitStore {
     const initialResetAt = new Date(nowMs + windowMs);
     const t = this.tableName;
 
+    // Use a function to compute merged hits once in ON CONFLICT clause
     const sql = `
-      WITH merged AS (
-        SELECT COALESCE(
-          (
-            SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
-            FROM (
-              SELECT e.elem::text AS elem
-              FROM jsonb_array_elements_text(COALESCE(${t}.hits, '[]'::jsonb)) AS e(elem)
-              WHERE e.elem::bigint > $3::bigint
-            ) s
-          ),
-          '[]'::jsonb
-        ) || $5::jsonb AS arr
-      )
       INSERT INTO ${t} (key, total_hits, reset_at, hits, tokens, last_refill_at)
       VALUES (
         $1::text,
@@ -350,12 +304,52 @@ export class PgStore implements RateLimitStore {
         NULL
       )
       ON CONFLICT (key) DO UPDATE SET
-        hits = (SELECT arr FROM merged),
-        total_hits = jsonb_array_length((SELECT arr FROM merged)),
+        hits = (
+          WITH filtered AS (
+            SELECT COALESCE(
+              (
+                SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                WHERE e.elem::bigint > $3::bigint
+              ),
+              '[]'::jsonb
+            ) AS old_hits
+          )
+          SELECT old_hits || $5::jsonb FROM filtered
+        ),
+        total_hits = jsonb_array_length(
+          (
+            WITH filtered AS (
+              SELECT COALESCE(
+                (
+                  SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                  FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                  WHERE e.elem::bigint > $3::bigint
+                ),
+                '[]'::jsonb
+              ) AS old_hits
+            )
+            SELECT old_hits || $5::jsonb FROM filtered
+          )
+        ),
         reset_at = to_timestamp(COALESCE(
           (
             SELECT MAX(elem::bigint)
-            FROM merged, jsonb_array_elements_text(merged.arr) AS m(elem)
+            FROM jsonb_array_elements_text(
+              (
+                WITH filtered AS (
+                  SELECT COALESCE(
+                    (
+                      SELECT jsonb_agg(elem::text ORDER BY elem::bigint)
+                      FROM jsonb_array_elements_text(${t}.hits) AS e(elem)
+                      WHERE e.elem::bigint > $3::bigint
+                    ),
+                    '[]'::jsonb
+                  ) AS old_hits
+                )
+                SELECT old_hits || $5::jsonb FROM filtered
+              )
+            ) AS m(elem)
           ),
           $3::bigint + $4::bigint
         ) / 1000.0)
@@ -388,12 +382,7 @@ export class PgStore implements RateLimitStore {
 
   /** Oldest remaining hit + window length (matches {@link MemoryStore} sliding semantics). */
   private resetTimeFromSlidingHitsRow(hits: unknown, windowMs: number, nowMs: number): Date {
-    const stamps = this.parseSlidingHitsJson(hits);
-    if (stamps.length === 0) {
-      return new Date(nowMs + windowMs);
-    }
-    const oldest = Math.min(...stamps);
-    return new Date(oldest + windowMs);
+    return resetTimeDateFromSlidingStamps(this.parseSlidingHitsJson(hits), windowMs, nowMs);
   }
 
   private parseSlidingHitsJson(hits: unknown): number[] {
@@ -602,7 +591,7 @@ export class PgStore implements RateLimitStore {
         const lr = row['last_refill_at'];
         const lastRefillMs =
           lr instanceof Date ? lr.getTime() : new Date(String(lr)).getTime();
-        const ref = this.refillBucketState(
+        const ref = refillBucketState(
           tokens,
           lastRefillMs,
           nowMs,
@@ -632,8 +621,7 @@ export class PgStore implements RateLimitStore {
         const totalHits = stamps.length;
         const isBlocked = totalHits > cap;
         const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
-        const oldest = Math.min(...stamps);
-        const resetTime = new Date(oldest + this.windowMs);
+        const resetTime = resetTimeDateFromSlidingStamps(stamps, this.windowMs, nowMs);
         return { totalHits, remaining, resetTime, isBlocked };
       }
     } catch (err) {

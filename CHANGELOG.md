@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+
+## [3.3.0] - 2026-04-09
+
+### Added
+
+- **`PgStore`** — PostgreSQL-backed store supporting all three strategies (sliding window via JSONB arrays, fixed window and token bucket via atomic UPSERT with `ON CONFLICT`). Accepts `pg.Pool` or any `PgClientLike` adapter. Background sweep of expired rows. Store entry point: `ratelimit-flex/postgres`; **`postgresPreset`** from `ratelimit-flex`.
+- **`MongoStore`** — MongoDB-backed store using `findOneAndUpdate` with aggregation pipelines for atomic conditional updates. TTL index-based expiry. All three strategies exact. Accepts `MongoClient`, `Db`, or `Collection`. Store entry point: `ratelimit-flex/mongo`; **`mongoPreset`** from `ratelimit-flex`.
+- **`DynamoStore`** — DynamoDB-backed store using AWS SDK v3. **Default strategy: `FIXED_WINDOW`** (exact counting), aligned with **`dynamoPreset`**. Fixed window and token bucket are exact; **sliding window** uses a weighted sub-window algorithm (approximate, ~10% max error near boundaries, &lt;2% typical). Automatic TTL cleanup via DynamoDB TTL. Conditional updates for fixed/sliding increments and decrements to avoid lost updates at window boundaries; **`onWarn`** defaults to `console.warn` like other SQL/document stores; internal `DynamoStore:` errors rethrow instead of mapping to fail-open/fail-closed quota. Store entry point: `ratelimit-flex/dynamo`; **`dynamoPreset`** from `ratelimit-flex`.
+- Shared store compliance test suite (`runStoreComplianceTests`) that runs identical behavioral tests against every `RateLimitStore` implementation to guarantee parity.
+- **Integration tests** (`tests/integration/stores-cross.test.ts`): `shield`, `compose`, `KeyManager`, metrics, and Express / Fastify / Hono / NestJS smoke tests against Postgres, MongoDB, and DynamoDB backends where configured.
+
+### Peer dependencies
+
+- `pg >= 8` (optional, for `PgStore`)
+- `mongodb >= 5` (optional, for `MongoStore`)
+- `@aws-sdk/client-dynamodb >= 3` and `@aws-sdk/lib-dynamodb >= 3` (optional, for `DynamoStore`)
+
+### Documentation
+
+- **README:** Store backends comparison table; Quick Start (Redis, PostgreSQL, MongoDB, DynamoDB); peer dependency table; **Deployment guide** sections for `PgStore`, `MongoStore`, `DynamoStore`; deployment topology rows; API reference rows; comparison with rate-limiter-flexible.
+- **`docs/stores/postgres.md`**, **`docs/stores/mongo.md`**, **`docs/stores/dynamo.md`:** schema/setup, indexes/TTL, performance, troubleshooting (including DynamoDB sliding approximation).
+
 ## [3.2.0] - 2026-04-07
 
 ### Added
