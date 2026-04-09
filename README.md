@@ -11,7 +11,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 
 ## Features
 
-- **Three algorithms:** **Sliding window** (default, smooth & accurate), **Token bucket** (allows bursts), **Fixed window** (simplest, lowest memory) — all fully implemented in both `MemoryStore` and `RedisStore` with atomic Lua scripts
+- **Three algorithms:** **Sliding window**, **Token bucket**, **Fixed window** — implemented across **`MemoryStore`**, **`RedisStore`** (Lua), **`PgStore`**, **`MongoStore`** (exact for all strategies), and **`DynamoStore`** (exact fixed window & token bucket; sliding window uses a weighted approximation on DynamoDB — see [docs/stores/dynamo.md](docs/stores/dynamo.md))
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean); NestJS (`ratelimit-flex/nestjs`) and Hono (`ratelimit-flex/hono`)
 - **Stores:** `MemoryStore`, `RedisStore`, `ClusterStore`, `PgStore`, `MongoStore`, `DynamoStore`
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
@@ -20,7 +20,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **In-memory block shielding:** `InMemoryShield` / `inMemoryBlock` — cache blocked keys in process memory so hot keys stop hitting Redis under attack
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true` ([full docs][doc-metrics])
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
-- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`
+- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`, `postgresPreset`, `mongoPreset`, `dynamoPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore`
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API
 - **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes
