@@ -104,6 +104,17 @@
         "default": "./dist/cjs/stores/mongo/index.js"
       },
       "default": "./dist/stores/mongo/index.js"
+    },
+    "./dynamo": {
+      "import": {
+        "types": "./dist/stores/dynamo/index.d.ts",
+        "default": "./dist/stores/dynamo/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/stores/dynamo/index.d.ts",
+        "default": "./dist/cjs/stores/dynamo/index.js"
+      },
+      "default": "./dist/stores/dynamo/index.js"
     }
   },
   "peerDependencies": {
@@ -117,9 +128,11 @@
     "fastify-plugin": "^4.5.1 || ^5.0.0",
     "hono": ">=4",
     "ioredis": "^5.0.0",
+    "mongodb": ">=5",
+    "@aws-sdk/client-dynamodb": ">=3",
+    "@aws-sdk/lib-dynamodb": ">=3",
     "pg": ">=8",
-    "prom-client": "^15.0.0",
-    "mongodb": ">=5"
+    "prom-client": "^15.0.0"
   },
   "peerDependenciesMeta": {
     "@nestjs/common": {
@@ -160,6 +173,12 @@
     },
     "mongodb": {
       "optional": true
+    },
+    "@aws-sdk/client-dynamodb": {
+      "optional": true
+    },
+    "@aws-sdk/lib-dynamodb": {
+      "optional": true
     }
   },
   "engines": {
@@ -188,6 +207,8 @@
     "prepublishOnly": "npm run lint && npm run test && npm run build"
   },
   "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1027.0",
+    "@aws-sdk/lib-dynamodb": "^3.1027.0",
     "@eslint/js": "^10.0.1",
     "@nestjs/common": "^11.1.9",
     "@nestjs/core": "^11.1.9",

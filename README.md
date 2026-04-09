@@ -13,7 +13,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 
 - **Three algorithms:** **Sliding window** (default, smooth & accurate), **Token bucket** (allows bursts), **Fixed window** (simplest, lowest memory) — all fully implemented in both `MemoryStore` and `RedisStore` with atomic Lua scripts
 - **Frameworks:** Express and Fastify (separate entry for Fastify to keep bundles lean); NestJS (`ratelimit-flex/nestjs`) and Hono (`ratelimit-flex/hono`)
-- **Stores:** `MemoryStore` (in-process), `RedisStore` (shared, Lua-backed for atomic multi-step operations), and `ClusterStore` (Node.js native cluster IPC)
+- **Stores:** `MemoryStore`, `RedisStore`, `ClusterStore`, `PgStore`, `MongoStore`, `DynamoStore`
 - **Request queuing:** Queue over-limit requests instead of rejecting them immediately (`expressQueuedRateLimiter`, `fastifyQueuedRateLimiter`, `createRateLimiterQueue`)
 - **TypeScript-first:** strict types, discriminated options where it matters
 - **Redis resilience:** insurance limiter fallback, circuit breaker, counter sync on recovery; or **`fail-open`** / **`fail-closed`** when Redis is unavailable without insurance
@@ -24,6 +24,10 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore`
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API
 - **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes
+
+### Comparison with rate-limiter-flexible
+
+- **Store backends:** [rate-limiter-flexible](https://github.com/animir/node-rate-limiter-flexible) ships more drivers (Memcached, MySQL, SQLite, Etcd, Prisma, Drizzle, and others). **ratelimit-flex** focuses on fewer, high-traffic integrations: **Redis**, **PostgreSQL**, **MongoDB**, and **DynamoDB**, each with atomic window semantics (where the datastore allows) and shared test coverage.
 
 ## Table of Contents
 
@@ -41,10 +45,14 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
   - [Request Queuing](#request-queuing)
 - [Choosing a Strategy](#choosing-a-strategy)
 - [Weighted / Cost-Based Rate Limiting](#weighted--cost-based-rate-limiting)
+- [Store backends](#store-backends)
 - [Deployment Guide](#deployment-guide)
   - [When to use MemoryStore](#when-to-use-memorystore)
   - [When to use ClusterStore](#when-to-use-clusterstore)
   - [When to use RedisStore](#when-to-use-redisstore)
+  - [When to use PgStore](#when-to-use-pgstore)
+  - [When to use MongoStore](#when-to-use-mongostore)
+  - [When to use DynamoStore](#when-to-use-dynamostore)
 - [Presets](#presets)
 - [Redis Failure Handling](#redis-failure-handling)
 - [Redis Resilience](#redis-resilience)
@@ -85,6 +93,9 @@ pnpm add ratelimit-flex
 | `@nestjs/common`, `@nestjs/core` (+ optional `@nestjs/graphql` for GraphQL context) | NestJS module (`ratelimit-flex/nestjs`) |
 | `hono` | Hono middleware (`ratelimit-flex/hono`) |
 | `ioredis` | `RedisStore` with `url` (or use your own Redis client adapter) |
+| `pg` | `PgStore` (`ratelimit-flex/postgres`) |
+| `mongodb` | `MongoStore` (`ratelimit-flex/mongo`) |
+| `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` | `DynamoStore` (`ratelimit-flex/dynamo`) |
 | `prom-client` | Optional: `metrics.prometheus.registry` integration |
 | `@opentelemetry/api` | Optional: `metrics.openTelemetry.meter` integration |
 
@@ -94,7 +105,80 @@ All peers are optional at install time; the runtime you choose must be present w
 
 ## Quick Start
 
-**Express (sliding window, the default):**
+### Redis (shared limits across instances)
+
+```ts
+import express from 'express';
+import { expressRateLimiter, multiInstancePreset } from 'ratelimit-flex';
+
+const app = express();
+app.use(expressRateLimiter(multiInstancePreset({ url: process.env.REDIS_URL! })));
+app.get('/health', (_req, res) => res.json({ ok: true }));
+```
+
+### PostgreSQL
+
+See **[docs/stores/postgres.md](docs/stores/postgres.md)** for schema, indexes, and operations notes.
+
+```ts
+import express from 'express';
+import { Pool } from 'pg';
+import { expressRateLimiter, postgresPreset } from 'ratelimit-flex';
+import { pgStoreSchema } from 'ratelimit-flex/postgres';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// Run once during deploy / migrations (not per request):
+await pool.query(pgStoreSchema);
+
+const app = express();
+app.use(expressRateLimiter(postgresPreset({ pool })));
+```
+
+### MongoDB
+
+See **[docs/stores/mongo.md](docs/stores/mongo.md)** for TTL indexes and client shapes.
+
+```ts
+import express from 'express';
+import { MongoClient } from 'mongodb';
+import { expressRateLimiter, mongoPreset } from 'ratelimit-flex';
+
+const client = new MongoClient(process.env.MONGODB_URI!);
+await client.connect();
+
+const app = express();
+app.use(expressRateLimiter(mongoPreset({ client, dbName: 'myapp' })));
+```
+
+### DynamoDB
+
+See **[docs/stores/dynamo.md](docs/stores/dynamo.md)** for table creation, TTL, and sliding-window behavior.
+
+```ts
+import {
+  CreateTableCommand,
+  DynamoDBClient,
+  UpdateTimeToLiveCommand,
+} from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import express from 'express';
+import { dynamoPreset, expressRateLimiter } from 'ratelimit-flex';
+import {
+  dynamoStoreEnableTtlParams,
+  dynamoStoreTableSchema,
+} from 'ratelimit-flex/dynamo';
+
+const raw = new DynamoDBClient({ region: process.env.AWS_REGION ?? 'us-east-1' });
+// Once at deploy (prefer CDK / Terraform in production):
+await raw.send(new CreateTableCommand(dynamoStoreTableSchema));
+await raw.send(new UpdateTimeToLiveCommand(dynamoStoreEnableTtlParams));
+
+const doc = DynamoDBDocumentClient.from(raw);
+const app = express();
+app.use(expressRateLimiter(dynamoPreset({ client: doc, tableName: 'rate_limits' })));
+```
+
+### Express (in-process defaults)
 
 ```ts
 import express from 'express';
@@ -103,10 +187,10 @@ import rateLimit, { RateLimitStrategy } from 'ratelimit-flex';
 const app = express();
 
 // Sliding window (default) - smooth, accurate rate limiting
-app.use(rateLimit({ 
+app.use(rateLimit({
   strategy: RateLimitStrategy.SLIDING_WINDOW, // optional, this is the default
-  maxRequests: 100, 
-  windowMs: 60_000 
+  maxRequests: 100,
+  windowMs: 60_000,
 }));
 
 // Token bucket - allows bursts
@@ -127,7 +211,7 @@ app.use(rateLimit({
 app.get('/health', (_req, res) => res.json({ ok: true }));
 ```
 
-**Fastify (same strategies):**
+### Fastify (same strategies)
 
 ```ts
 import Fastify from 'fastify';
@@ -136,10 +220,10 @@ import { fastifyRateLimiter, RateLimitStrategy } from 'ratelimit-flex/fastify';
 const app = Fastify();
 
 // Sliding window (default)
-await app.register(fastifyRateLimiter, { 
+await app.register(fastifyRateLimiter, {
   strategy: RateLimitStrategy.SLIDING_WINDOW,
-  maxRequests: 100, 
-  windowMs: 60_000 
+  maxRequests: 100,
+  windowMs: 60_000,
 });
 
 app.get('/health', async () => ({ ok: true }));
@@ -920,6 +1004,19 @@ Helpers **`resolveIncrementOpts(options, req)`** and **`matchingDecrementOptions
 
 **Redis implementation note:** for sliding windows with **`cost > 1`**, each ZSET member is a distinct random value so Redis never silently merges two hits into one.
 
+## Store backends
+
+Choose a backend from latency, consistency, and operational constraints. Deeper setup for SQL, MongoDB, and DynamoDB lives in **[docs/stores/postgres.md](docs/stores/postgres.md)**, **[docs/stores/mongo.md](docs/stores/mongo.md)**, and **[docs/stores/dynamo.md](docs/stores/dynamo.md)**.
+
+| Backend | Atomic sliding window | TTL cleanup | Latency | Best for |
+|---------|----------------------|-------------|---------|----------|
+| MemoryStore | exact (in-process) | in-process | &lt;0.01ms | Single process |
+| RedisStore | exact (Lua ZSET) | Redis EXPIRE | 1–5ms | Multi-instance, high TPS |
+| ClusterStore | exact (IPC) | in-process | &lt;0.1ms | Node cluster, one host |
+| PgStore | exact (JSONB array) | background sweep | 2–10ms | Postgres shops without Redis |
+| MongoStore | exact (aggregation pipeline) | TTL index | 2–10ms | MongoDB shops |
+| DynamoStore | approximate (weighted sub-window) | DynamoDB TTL | 5–20ms | AWS-native deployments |
+
 ## Deployment guide
 
 ### When to use MemoryStore
@@ -1010,6 +1107,65 @@ Prefer passing a **shared Redis URL or client** from every instance. Use a **dis
 
 **Multi-window:** The **`limits: [{ windowMs, max }, …]`** option (see [Multi-window limits (`limits`)](#multi-window-limits-limits)) defaults to one **`MemoryStore` per window**. Pass a sliding/fixed-window **`RedisStore`** as **`store`** together with **`limits`** to reuse connection settings (and optional **`resilience`**, cloned per slot) and get **one Redis-backed slot per window** with distinct key prefixes. A **`MemoryStore`** with **`limits`** is accepted and **ignored** (same as omitting **`store`**). Alternatively use **`compose.windows(redisTemplate, …)`**, **`multiWindowPreset`**, or **`groupedWindowStores`**.
 
+### When to use PgStore
+
+Use **`PgStore`** when:
+
+- You already run **PostgreSQL** and prefer not to add Redis
+- You want **exact** sliding, fixed-window, and token-bucket semantics with **atomic** `INSERT … ON CONFLICT` / JSONB sliding arrays
+- A small amount of **background sweep** work for expired rows is acceptable
+
+```ts
+import { expressRateLimiter, postgresPreset } from 'ratelimit-flex';
+import { pgStoreSchema } from 'ratelimit-flex/postgres';
+import { Pool } from 'pg';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
+await pool.query(pgStoreSchema);
+
+app.use(expressRateLimiter(postgresPreset({ pool })));
+```
+
+Run **`pgStoreSchema`** (or your migration) once at deploy. Tune **`autoSweepIntervalMs`** / worker estimates if you shard many app processes—see **[docs/stores/postgres.md](docs/stores/postgres.md)**.
+
+### When to use MongoStore
+
+Use **`MongoStore`** when:
+
+- Your system of record is **MongoDB** (Atlas or self-hosted)
+- You are on **MongoDB 4.2+** (aggregation pipelines in `findOneAndUpdate`)
+- You can maintain a **TTL index** on the reset field for passive expiry
+
+```ts
+import { expressRateLimiter, mongoPreset } from 'ratelimit-flex';
+import { MongoClient } from 'mongodb';
+
+const client = new MongoClient(process.env.MONGODB_URI!);
+await client.connect();
+
+app.use(expressRateLimiter(mongoPreset({ client, dbName: 'myapp' })));
+```
+
+See **[docs/stores/mongo.md](docs/stores/mongo.md)** for index requirements and failure modes.
+
+### When to use DynamoStore
+
+Use **`DynamoStore`** when:
+
+- You deploy on **AWS** and want a **managed, serverless-friendly** store
+- **Fixed window** and **token bucket** must be **exact** on DynamoDB
+- **Sliding window** can be **approximate** (weighted sub-windows; typically &lt;2% error, higher near window edges—see **[docs/stores/dynamo.md](docs/stores/dynamo.md)**)
+
+```ts
+import { dynamoPreset, expressRateLimiter } from 'ratelimit-flex';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+
+const doc = DynamoDBDocumentClient.from(/* DynamoDBClient */);
+app.use(expressRateLimiter(dynamoPreset({ client: doc, tableName: 'rate_limits' })));
+```
+
+Create the table and enable **TTL** on the `ttl` attribute once (CDK / Terraform / console). **`dynamoPreset`** defaults to **fixed window** so out-of-the-box counting is exact; pass **`strategy: RateLimitStrategy.SLIDING_WINDOW`** when you accept the weighted approximation.
+
 ### Deployment topology
 
 | Setup | Store | What’s shared | What’s per-process |
@@ -1018,7 +1174,10 @@ Prefer passing a **shared Redis URL or client** from every instance. Use a **dis
 | Node.js native `cluster` (same host, forked workers) | `ClusterStore` + `ClusterStorePrimary` | Rate limit counters (on primary) | Allowlist, blocklist, penalty |
 | PM2 cluster (same host) | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
 | Multiple servers + LB | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
+| Multiple servers + LB | `PgStore` / `MongoStore` (shared DB) | Rate limit rows in the database | Allowlist, blocklist, penalty |
 | Kubernetes pods | `RedisStore` | Rate limit counters | Allowlist, blocklist, penalty |
+| Kubernetes pods | `PgStore` / `MongoStore` | Rate limit rows | Allowlist, blocklist, penalty |
+| AWS Lambda / Fargate / multi-AZ | `DynamoStore` | DynamoDB table & TTL | Allowlist, blocklist, penalty |
 | Microservices (one global limit) | `RedisStore` (same namespace/prefix) | Rate limit counters | Allowlist, blocklist, penalty |
 | Microservices (per-service limits) | `RedisStore` (different prefix/DB) | Per-service counters | Allowlist, blocklist, penalty |
 
@@ -1655,6 +1814,9 @@ Pass your store as **`store`** in middleware options.
 | **`CircuitBreaker`**, **`RedisResilienceOptions`**, **`ResilienceHooks`**, **`InsuranceLimiterOptions`**, **`CircuitBreakerOptions`**, **`CircuitState`** | Circuit breaker and Redis failover types ([Redis resilience](#redis-resilience)) |
 | **`MemoryStore`** | In-memory store (`getActiveKeys` / `resetAll` for advanced sync scenarios) |
 | **`RedisStore`** | Redis-backed store (Lua); optional **`resilience`** for insurance + breaker |
+| **`PgStore`** | `ratelimit-flex/postgres` — PostgreSQL ([docs/stores/postgres.md](docs/stores/postgres.md)); **`postgresPreset`** from `ratelimit-flex` |
+| **`MongoStore`** | `ratelimit-flex/mongo` — MongoDB ([docs/stores/mongo.md](docs/stores/mongo.md)); **`mongoPreset`** from `ratelimit-flex` |
+| **`DynamoStore`** | `ratelimit-flex/dynamo` — DynamoDB ([docs/stores/dynamo.md](docs/stores/dynamo.md)); **`dynamoPreset`** from `ratelimit-flex` |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
 | **`resolveIncrementOpts`**, **`matchingDecrementOptions`** | Resolve per-request `increment` / `decrement` options (weighted limits) |
 | **`createRateLimiter`** | `{ express }` middleware helper |

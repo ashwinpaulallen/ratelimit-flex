@@ -608,3 +608,5 @@ export {
 
 export { mongoPreset } from './mongo.js';
 
+export { dynamoPreset } from './dynamo.js';
+

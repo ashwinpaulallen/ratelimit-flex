@@ -263,6 +263,7 @@ export {
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
   clusterPreset,
+  dynamoPreset,
   multiInstancePreset,
   failClosedPostgresPreset,
   mongoPreset,

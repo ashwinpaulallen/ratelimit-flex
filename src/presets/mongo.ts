@@ -57,7 +57,7 @@ function buildPresetMongoStoreOptions(
  * @returns Partial {@link RateLimitOptions} with a {@link MongoStore}.
  * @example
  * ```ts
- * import { expressRateLimiter, mongoPreset } from 'ratelimit-flex/mongo';
+ * import { expressRateLimiter, mongoPreset } from 'ratelimit-flex';
  * const client = new MongoClient(process.env.MONGODB_URI!);
  * await client.connect();
  * app.use(expressRateLimiter(mongoPreset({ client, dbName: 'myapp' }, { maxRequests: 500 })));

@@ -315,8 +315,8 @@ describe('MongoStore', { timeout: 300_000 }, () => {
     });
   });
 
-  it('mongoPreset is exported from ratelimit-flex/mongo', async () => {
-    const { mongoPreset } = await import('ratelimit-flex/mongo');
+  it('mongoPreset is exported from ratelimit-flex', async () => {
+    const { mongoPreset } = await import('ratelimit-flex');
     expect(typeof mongoPreset).toBe('function');
   });
 
@@ -329,7 +329,7 @@ describe('MongoStore', { timeout: 300_000 }, () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-12-01T00:00:00.000Z'));
       const db = client.db(TEST_DB);
-      const opts = await import('ratelimit-flex/mongo').then((m) =>
+      const opts = await import('ratelimit-flex').then((m) =>
         m.mongoPreset({ client, dbName: TEST_DB, collectionName: 'preset_override' }, { maxRequests: 3 }),
       );
       expect(opts.maxRequests).toBe(3);
@@ -348,7 +348,7 @@ describe('MongoStore', { timeout: 300_000 }, () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-12-01T00:00:00.000Z'));
       const db = client.db(TEST_DB);
-      const opts = await import('ratelimit-flex/mongo').then((m) =>
+      const opts = await import('ratelimit-flex').then((m) =>
         m.mongoPreset(
           { client, dbName: TEST_DB, collectionName: 'preset_tb' },
           {

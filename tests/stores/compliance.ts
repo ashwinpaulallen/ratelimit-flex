@@ -23,6 +23,11 @@ export interface StoreTestHarness {
   createStore(config: StoreComplianceConfig): Promise<RateLimitStore>;
   afterEach?(): Promise<void>;
   afterAll?(): Promise<void>;
+  /**
+   * When set (e.g. {@link DynamoStore}'s weighted sliding window), sliding-window **numeric** expectations
+   * allow up to this **relative** error (0.1 = 10%). Exact stores (Memory, Redis, PgStore, MongoStore) omit this.
+   */
+  slidingWindowTolerance?: number;
 }
 
 function expectWindowQuota(r: RateLimitResult, cap: number): void {
@@ -33,6 +38,22 @@ function expectWindowQuota(r: RateLimitResult, cap: number): void {
     expect(r.totalHits).toBeLessThanOrEqual(cap);
     expect(r.remaining).toBe(Math.max(0, cap - r.totalHits));
   }
+}
+
+/** Sliding-window count assertions: exact `toBe` unless harness.slidingWindowTolerance allows relative slack. */
+function expectSlidingCount(
+  harness: StoreTestHarness,
+  actual: number,
+  expected: number,
+): void {
+  const tol = harness.slidingWindowTolerance;
+  if (tol === undefined || tol <= 0) {
+    expect(actual).toBe(expected);
+    return;
+  }
+  const scale = Math.max(1, Math.abs(expected));
+  const maxDelta = Math.max(1, tol * scale);
+  expect(Math.abs(actual - expected)).toBeLessThanOrEqual(maxDelta);
 }
 
 export function runStoreComplianceTests(harness: StoreTestHarness): void {
@@ -201,7 +222,7 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           vi.advanceTimersByTime(1001);
           const fresh = await store.increment('age');
           expect(fresh.isBlocked).toBe(false);
-          expect(fresh.totalHits).toBe(1);
+          expectSlidingCount(harness, fresh.totalHits, 1);
         } finally {
           await store.shutdown();
         }
@@ -217,15 +238,15 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           const a = await store.increment('w', { cost: 2 });
           const b = await store.increment('w', { cost: 2 });
           const c = await store.increment('w', { cost: 2 });
-          expect(a.totalHits).toBe(2);
-          expect(b.totalHits).toBe(4);
+          expectSlidingCount(harness, a.totalHits, 2);
+          expectSlidingCount(harness, b.totalHits, 4);
           expect(c.isBlocked).toBe(true);
-          expect(c.totalHits).toBe(6);
+          expectSlidingCount(harness, c.totalHits, 6);
 
           await store.decrement('w', { cost: 2 });
           const d = await store.increment('w', { cost: 1 });
           expect(d.isBlocked).toBe(false);
-          expect(d.totalHits).toBe(5);
+          expectSlidingCount(harness, d.totalHits, 5);
         } finally {
           await store.shutdown();
         }
@@ -241,8 +262,8 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           const results = await Promise.all(
             Array.from({ length: 100 }, () => store.increment('sw-conc')),
           );
-          expect(results.filter((r) => r.isBlocked).length).toBe(50);
-          expect(Math.max(...results.map((r) => r.totalHits))).toBe(100);
+          expectSlidingCount(harness, results.filter((r) => r.isBlocked).length, 50);
+          expectSlidingCount(harness, Math.max(...results.map((r) => r.totalHits)), 100);
         } finally {
           await store.shutdown();
         }
@@ -363,11 +384,13 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           await store.increment('k');
           await store.increment('k');
           let g = await store.get('k');
-          expect(g?.totalHits).toBe(2);
+          expect(g).not.toBeNull();
+          expectSlidingCount(harness, g!.totalHits, 2);
 
           await store.set('k', 9);
           g = await store.get('k');
-          expect(g?.totalHits).toBe(9);
+          expect(g).not.toBeNull();
+          expectSlidingCount(harness, g!.totalHits, 9);
 
           expect(await store.delete('k')).toBe(true);
           await expect(store.get('k')).resolves.toBeNull();
@@ -394,7 +417,7 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
             expect(store.getActiveKeys().size).toBe(0);
           }
           const after = await store.increment('z');
-          expect(after.totalHits).toBe(1);
+          expectSlidingCount(harness, after.totalHits, 1);
         } finally {
           await store.shutdown();
         }
@@ -413,8 +436,8 @@ export function runStoreComplianceTests(harness: StoreTestHarness): void {
           );
           const blocked = results.filter((r) => r.isBlocked).length;
           const maxHits = Math.max(...results.map((r) => r.totalHits));
-          expect(blocked).toBe(25);
-          expect(maxHits).toBe(50);
+          expectSlidingCount(harness, blocked, 25);
+          expectSlidingCount(harness, maxHits, 50);
         } finally {
           await store.shutdown();
         }
