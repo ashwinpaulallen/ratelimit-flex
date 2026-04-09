@@ -9,7 +9,11 @@ import type { PgClientLike } from '../../src/stores/postgres/types.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 import { runStoreComplianceTests } from './compliance.js';
 import type { StoreComplianceConfig } from './compliance.js';
-import { initPgStoreTestBackend, runPgStoreIntegration } from './pg-test-backend.js';
+import {
+  attachPgPoolTestErrorHandler,
+  initPgStoreTestBackend,
+  runPgStoreIntegration,
+} from './pg-test-backend.js';
 
 describe.skipIf(!runPgStoreIntegration)(
   'PgStore',
@@ -162,6 +166,7 @@ describe.skipIf(!runPgStoreIntegration)(
       it('dead pool: subsequent increment follows onPostgresError (fail-open)', async () => {
         const { Pool } = await import('pg');
         const isolated = new Pool({ connectionString: connectionUri! });
+        attachPgPoolTestErrorHandler(isolated);
         await isolated.query(pgStoreSchema);
         const store = new PgStore({
           client: isolated,
