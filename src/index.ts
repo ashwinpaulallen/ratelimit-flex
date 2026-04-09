@@ -135,6 +135,15 @@ export type { PgClientLike, PgStoreOptions } from './stores/postgres/types.js';
 export { pgStoreSchema, pgStoreSchemaDown } from './stores/postgres/schema.js';
 
 /**
+ * MongoDB-backed {@link MongoStore} (optional peer `mongodb`).
+ *
+ * @see {@link mongoPreset}
+ * @since 3.3.0
+ */
+export { MongoStore } from './stores/mongo/MongoStore.js';
+export type { MongoStoreClient, MongoStoreOptions, RateLimitDocument } from './stores/mongo/types.js';
+
+/**
  * Store factory and Redis connection types for programmatic store creation.
  *
  * @see {@link createStore}
@@ -256,6 +265,7 @@ export {
   clusterPreset,
   multiInstancePreset,
   failClosedPostgresPreset,
+  mongoPreset,
   postgresInsuranceMemoryStore,
   postgresPreset,
   publicApiPreset,

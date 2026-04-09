@@ -606,3 +606,5 @@ export {
   type PostgresPresetPgOptions,
 } from './postgres-presets.js';
 
+export { mongoPreset } from './mongo.js';
+

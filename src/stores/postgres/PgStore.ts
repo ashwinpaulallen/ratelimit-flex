@@ -10,6 +10,7 @@ import {
   sanitizeRateLimitCap,
   sanitizeWindowMs,
 } from '../../utils/clamp.js';
+import { num, refillBucketState, resetTimeDateFromSlidingStamps } from '../../utils/store-utils.js';
 import type { PgClientLike, PgStoreOptions } from './types.js';
 
 const TABLE_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -21,22 +22,6 @@ function assertSafeTableName(name: string): string {
     );
   }
   return name;
-}
-
-function num(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v)) {
-    return v;
-  }
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    if (Number.isFinite(n)) {
-      return n;
-    }
-  }
-  if (typeof v === 'bigint') {
-    return Number(v);
-  }
-  return NaN;
 }
 
 /**
@@ -229,7 +214,7 @@ export class PgStore implements RateLimitStore {
         }
       }
 
-      const refilled = this.refillBucketState(tokens, lastRefillMs, now, bs, tpi, interval);
+      const refilled = refillBucketState(tokens, lastRefillMs, now, bs, tpi, interval);
 
       let newTokens: number;
       let newLastRefillMs: number;
@@ -284,25 +269,6 @@ export class PgStore implements RateLimitStore {
         isBlocked,
       };
     });
-  }
-
-  private refillBucketState(
-    tokens: number,
-    lastRefillMs: number,
-    now: number,
-    bucketSize: number,
-    tokensPerInterval: number,
-    intervalMs: number,
-  ): { tokens: number; lastRefillMs: number } {
-    let t = tokens;
-    let lr = lastRefillMs;
-    const elapsed = now - lr;
-    const intervals = Math.floor(elapsed / intervalMs);
-    if (intervals > 0) {
-      t = Math.min(bucketSize, t + intervals * tokensPerInterval);
-      lr += intervals * intervalMs;
-    }
-    return { tokens: t, lastRefillMs: lr };
   }
 
   /**
@@ -388,12 +354,7 @@ export class PgStore implements RateLimitStore {
 
   /** Oldest remaining hit + window length (matches {@link MemoryStore} sliding semantics). */
   private resetTimeFromSlidingHitsRow(hits: unknown, windowMs: number, nowMs: number): Date {
-    const stamps = this.parseSlidingHitsJson(hits);
-    if (stamps.length === 0) {
-      return new Date(nowMs + windowMs);
-    }
-    const oldest = Math.min(...stamps);
-    return new Date(oldest + windowMs);
+    return resetTimeDateFromSlidingStamps(this.parseSlidingHitsJson(hits), windowMs, nowMs);
   }
 
   private parseSlidingHitsJson(hits: unknown): number[] {
@@ -602,7 +563,7 @@ export class PgStore implements RateLimitStore {
         const lr = row['last_refill_at'];
         const lastRefillMs =
           lr instanceof Date ? lr.getTime() : new Date(String(lr)).getTime();
-        const ref = this.refillBucketState(
+        const ref = refillBucketState(
           tokens,
           lastRefillMs,
           nowMs,
@@ -632,8 +593,7 @@ export class PgStore implements RateLimitStore {
         const totalHits = stamps.length;
         const isBlocked = totalHits > cap;
         const remaining = isBlocked ? 0 : Math.max(0, cap - totalHits);
-        const oldest = Math.min(...stamps);
-        const resetTime = new Date(oldest + this.windowMs);
+        const resetTime = resetTimeDateFromSlidingStamps(stamps, this.windowMs, nowMs);
         return { totalHits, remaining, resetTime, isBlocked };
       }
     } catch (err) {

@@ -54,8 +54,10 @@ import {
   Histogram,
   InMemoryShield,
   MemoryStore,
+  MongoStore,
   MetricsCounters,
   MetricsManager,
+  mongoPreset,
   multiInstancePreset,
   multiWindowPreset,
   postgresInsuranceMemoryStore,
@@ -205,6 +207,7 @@ describe('package exports', () => {
     expect(MemoryStore).toBeDefined();
     expect(RedisStore).toBeDefined();
     expect(PgStore).toBeDefined();
+    expect(MongoStore).toBeDefined();
     expect(typeof pgStoreSchema).toBe('string');
     expect(typeof pgStoreSchemaDown).toBe('string');
     expect(ComposedStore).toBeDefined();
@@ -242,6 +245,7 @@ describe('package exports', () => {
     expect(typeof publicApiPreset).toBe('function');
     expect(typeof resilientRedisPreset).toBe('function');
     expect(typeof postgresPreset).toBe('function');
+    expect(typeof mongoPreset).toBe('function');
     expect(typeof failClosedPostgresPreset).toBe('function');
     expect(typeof resilientPostgresPreset).toBe('function');
     expect(typeof postgresInsuranceMemoryStore).toBe('function');

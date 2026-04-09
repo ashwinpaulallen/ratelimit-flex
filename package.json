@@ -93,6 +93,17 @@
         "default": "./dist/cjs/stores/postgres/index.js"
       },
       "default": "./dist/stores/postgres/index.js"
+    },
+    "./mongo": {
+      "import": {
+        "types": "./dist/stores/mongo/index.d.ts",
+        "default": "./dist/stores/mongo/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/stores/mongo/index.d.ts",
+        "default": "./dist/cjs/stores/mongo/index.js"
+      },
+      "default": "./dist/stores/mongo/index.js"
     }
   },
   "peerDependencies": {
@@ -105,9 +116,10 @@
     "fastify": "^4.28.0 || ^5.0.0",
     "fastify-plugin": "^4.5.1 || ^5.0.0",
     "hono": ">=4",
-    "pg": ">=8",
     "ioredis": "^5.0.0",
-    "prom-client": "^15.0.0"
+    "pg": ">=8",
+    "prom-client": "^15.0.0",
+    "mongodb": ">=5"
   },
   "peerDependenciesMeta": {
     "@nestjs/common": {
@@ -144,6 +156,9 @@
       "optional": true
     },
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "mongodb": {
       "optional": true
     }
   },
@@ -191,6 +206,8 @@
     "fastify": "^5.8.4",
     "fastify-plugin": "^5.1.0",
     "hono": "^4.11.3",
+    "mongodb": "^6.21.0",
+    "mongodb-memory-server": "^11.0.1",
     "pg": "^8.20.0",
     "prettier": "^3.8.1",
     "prom-client": "^15.1.3",

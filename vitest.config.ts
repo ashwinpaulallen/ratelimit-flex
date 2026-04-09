@@ -20,6 +20,7 @@ export default defineConfig({
     alias: {
       /** Resolve like published `ratelimit-flex/postgres` subpath (see package.json `exports`). */
       'ratelimit-flex/postgres': path.resolve(rootDir, 'src/stores/postgres/index.ts'),
+      'ratelimit-flex/mongo': path.resolve(rootDir, 'src/stores/mongo/index.ts'),
     },
   },
   test: {
