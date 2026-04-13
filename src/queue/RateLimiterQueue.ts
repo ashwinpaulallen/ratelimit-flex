@@ -1,7 +1,11 @@
 import type { RateLimitStore } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
+import { ShutdownError } from './errors.js';
 
-/** Minimum delay before retrying drain when head is blocked (avoids tight spin). */
+/**
+ * Minimum delay (ms) before retrying the internal drain loop when the queue head is blocked
+ * (avoids tight spin). Reused as the polling step in {@link RateLimiterQueue.shutdown}.
+ */
 const MIN_BLOCK_RETRY_DELAY_MS = 10;
 
 /**
@@ -83,6 +87,16 @@ export interface RateLimiterQueueOptions {
    * Default: Infinity (wait forever)
    */
   maxQueueTimeMs?: number;
+
+  /**
+   * When **`true`**, {@link shutdown} awaits `store.shutdown()` after clearing the queue.
+   * Set by {@link createRateLimiterQueue} when it creates the default {@link MemoryStore}.
+   * When **`false`** (default), the caller owns the store — use for middleware and shared stores.
+   *
+   * @default false
+   * @since 4.0.0
+   */
+  ownsStore?: boolean;
 }
 
 export interface RateLimiterQueueResult {
@@ -96,7 +110,7 @@ interface QueueEntry {
   key: string;
   cost: number;
   resolve: (result: RateLimiterQueueResult) => void;
-  reject: (error: RateLimiterQueueError) => void;
+  reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
   /** Intrusive doubly-linked list (FIFO). O(1) unlink on queue timeout vs array indexOf/splice. */
   prev: QueueEntry | null;
@@ -129,15 +143,22 @@ export class RateLimiterQueue {
 
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private _shutdown = false;
+  private isShutdown = false;
+
+  /**
+   * Count of queue entries removed by the max-queue-time timer during shutdown (excluded from
+   * {@link shutdown} `drained`). Reset after drain accounting and on redundant {@link shutdown} calls.
+   */
+  private shutdownQueueTimeoutUnlinks = 0;
+
+  private readonly ownsStore: boolean;
 
   /**
    * Create a rate limiter queue.
    *
-   * **Store ownership:** The queue takes ownership of the provided store. Calling {@link shutdown}
-   * will close the store via `store.shutdown()`. If you passed a custom store that is shared with
-   * other components, use {@link clear} instead of {@link shutdown} to avoid closing the shared store
-   * prematurely, and manage the store lifecycle separately.
+   * **Store ownership:** Pass **`ownsStore: true`** in `options` only when this queue created the
+   * store (see {@link createRateLimiterQueue}). Otherwise {@link shutdown} does not call
+   * `store.shutdown()` — use {@link clear} to drop pending work without touching a shared store.
    *
    * **Head-of-line blocking:** The queue is a single FIFO list. When a request for key "A" is
    * blocked, all subsequent requests for key "B" also wait. This is intentional for the outbound
@@ -169,6 +190,7 @@ export class RateLimiterQueue {
     this.strategy = storeConfig.strategy ?? RateLimitStrategy.SLIDING_WINDOW;
     this.maxQueueSize = options?.maxQueueSize ?? Number.POSITIVE_INFINITY;
     this.maxQueueTimeMs = options?.maxQueueTimeMs ?? Number.POSITIVE_INFINITY;
+    this.ownsStore = options?.ownsStore ?? false;
   }
 
   /** `windowMs` from constructor (introspection / tests). */
@@ -189,14 +211,17 @@ export class RateLimiterQueue {
    * is blocked (waiting for capacity), subsequent requests for key "B" also wait, even if "B"
    * has capacity. For independent keys, create separate queues.
    *
+   * **After {@link shutdown} has started:** rejects immediately with {@link ShutdownError}; waiters
+   * already in the queue are handled as described in {@link shutdown}.
+   *
    * @param key - The rate limit key (e.g. IP, API key, user ID)
    * @param cost - Number of tokens to consume (default: 1)
    *
    * @see {@link RateLimiterQueueOptions} for head-of-line blocking examples
    */
   removeTokens(key: string, cost = 1): Promise<RateLimiterQueueResult> {
-    if (this._shutdown) {
-      return Promise.reject(new RateLimiterQueueError('Queue shut down', 'queue_shutdown'));
+    if (this.isShutdown) {
+      return Promise.reject(new ShutdownError('queue-shutdown'));
     }
     if (this.queueLength >= this.maxQueueSize) {
       return Promise.reject(new RateLimiterQueueError('Queue is full', 'queue_full'));
@@ -229,6 +254,9 @@ export class RateLimiterQueue {
           const removed = this.unlink(entry);
           entry.timer = null;
           if (removed) {
+            if (this.isShutdown) {
+              this.shutdownQueueTimeoutUnlinks++;
+            }
             entry.reject(new RateLimiterQueueError('Queue timeout exceeded', 'queue_timeout'));
             if (wasHead && this.drainTimer !== null) {
               this.clearDrainTimer();
@@ -267,6 +295,9 @@ export class RateLimiterQueue {
    * blocked (the probe consumes one unit). Concurrent traffic can still interleave.
    */
   async getTokensRemaining(key: string): Promise<number> {
+    if (this.isShutdown) {
+      throw new ShutdownError('queue-shutdown');
+    }
     const result = await this.store.increment(key, { maxRequests: this.maxRequests, cost: 1 });
     try {
       await this.store.decrement(key, { cost: 1 });
@@ -291,41 +322,79 @@ export class RateLimiterQueue {
    * @see {@link shutdown} for store lifecycle management
    */
   clear(): void {
+    if (this.isShutdown) {
+      throw new ShutdownError('queue-shutdown');
+    }
     this.clearPending(new RateLimiterQueueError('Queue cleared', 'queue_cleared'));
   }
 
   /**
-   * Graceful shutdown: reject all pending, clean up timers, and **close the backing store**.
+   * Gracefully shut down the queue. Once shutdown begins, {@link removeTokens} rejects **new**
+   * requests immediately with {@link ShutdownError} (including while this method is still
+   * awaiting the drain window)—incoming work is turned away while the queue drains. Waiters
+   * **already enqueued** keep being processed by the internal drain loop and may still **resolve
+   * successfully** during the **`drainTimeoutMs`** grace period (best-effort). When that window ends,
+   * any waiters still in the FIFO are rejected with {@link ShutdownError} so callers can handle
+   * them (e.g. **503** in HTTP middleware). After {@link shutdown} returns, {@link removeTokens}
+   * continues to reject immediately for the lifetime of this instance.
    *
-   * **IMPORTANT:** This calls `store.shutdown()`, which closes the backing store. If you passed
-   * a custom store that is shared with other components (e.g. a shared `RedisStore` or `ClusterStore`),
-   * calling `shutdown()` will close that store for all consumers. If you need to share a store,
-   * either:
-   * - Call `queue.clear()` instead of `queue.shutdown()` to reject pending requests without closing the store, OR
-   * - Manage store lifecycle separately and only call `store.shutdown()` when all consumers are done.
+   * **Idempotent** — safe to call from multiple signal handlers.
    *
-   * @example
-   * ```ts
-   * // Safe: each queue has its own store
-   * const queue = createRateLimiterQueue({ maxRequests: 10, windowMs: 60_000 });
-   * await queue.shutdown(); // ✅ closes the internal MemoryStore
+   * **`drainTimeoutMs`** is best-effort: this implementation polls every **`MIN_BLOCK_RETRY_DELAY_MS`**
+   *   (same as the minimum drain block-retry delay) until the deadline.
+   * Slow handlers may still leave work in the queue; remaining entries are then rejected. Do not
+   * assume a full drain just because the timeout is large.
    *
-   * // Unsafe: shared store
-   * const sharedStore = new RedisStore({ client: redisClient });
-   * const queue1 = new RateLimiterQueue(sharedStore, { ... });
-   * const queue2 = new RateLimiterQueue(sharedStore, { ... });
-   * await queue1.shutdown(); // ❌ closes sharedStore, breaking queue2
+   * **`ownsStore`:** When **`true`** (see {@link createRateLimiterQueue}), `store.shutdown()` is
+   * awaited after pending work is cleared. When **`false`**, the store is left open.
    *
-   * // Safe alternative:
-   * queue1.clear(); // ✅ only clears queue1's pending requests
-   * queue2.clear(); // ✅ only clears queue2's pending requests
-   * await sharedStore.shutdown(); // ✅ close store after all queues are done
-   * ```
+   * @param options.drainTimeoutMs — Wait up to this many ms for entries to complete via the normal
+   *   drain path before rejecting the rest. **Default: 0** (reject queued waiters immediately).
+   * @param options.reason — Passed to {@link ShutdownError} for each rejected waiter.
+   *
+   * @returns **`rejected`** — waiters still queued when the drain window ends, rejected with
+   *   {@link ShutdownError}. **`drained`** — entries that acquired capacity via the normal
+   *   {@link drain} path during shutdown; entries that leave due to {@link RateLimiterQueueOptions.maxQueueTimeMs}
+   *   (`queue_timeout`) are not included.
    */
-  shutdown(): void {
-    this._shutdown = true;
-    this.clearPending(new RateLimiterQueueError('Queue shut down', 'queue_shutdown'));
-    void this.store.shutdown();
+  async shutdown(options: { drainTimeoutMs?: number; reason?: string } = {}): Promise<{
+    rejected: number;
+    drained: number;
+  }> {
+    if (this.isShutdown) {
+      this.shutdownQueueTimeoutUnlinks = 0;
+      return { rejected: 0, drained: 0 };
+    }
+    this.shutdownQueueTimeoutUnlinks = 0;
+    this.isShutdown = true;
+
+    const reason = options.reason ?? 'shutdown';
+    const drainTimeoutMs = options.drainTimeoutMs ?? 0;
+    const err = new ShutdownError(reason);
+
+    const lenAtStart = this.queueLength;
+    void this.drain();
+
+    if (drainTimeoutMs > 0 && this.queueLength > 0) {
+      const maxPolls = Math.max(1, Math.ceil(drainTimeoutMs / MIN_BLOCK_RETRY_DELAY_MS));
+      for (let i = 0; i < maxPolls && this.queueLength > 0; i++) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, MIN_BLOCK_RETRY_DELAY_MS);
+        });
+        void this.drain();
+      }
+    }
+
+    const drained = Math.max(0, lenAtStart - this.queueLength - this.shutdownQueueTimeoutUnlinks);
+    const rejected = this.queueLength;
+    this.clearPending(err);
+    this.shutdownQueueTimeoutUnlinks = 0;
+
+    if (this.ownsStore) {
+      await this.store.shutdown();
+    }
+
+    return { rejected, drained };
   }
 
   private enqueueTail(entry: QueueEntry): void {
@@ -363,7 +432,7 @@ export class RateLimiterQueue {
     return true;
   }
 
-  private clearPending(err: RateLimiterQueueError): void {
+  private clearPending(err: Error): void {
     this.clearDrainTimer();
     let e = this.queueHead;
     while (e !== null) {
@@ -417,7 +486,7 @@ export class RateLimiterQueue {
   }
 
   private async drain(): Promise<void> {
-    if (this._shutdown || this.processing) {
+    if (this.processing) {
       return;
     }
     this.processing = true;

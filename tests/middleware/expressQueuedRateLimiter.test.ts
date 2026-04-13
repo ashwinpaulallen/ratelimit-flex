@@ -174,6 +174,60 @@ describe('expressQueuedRateLimiter', () => {
     expect(typeof mw.queue.clear).toBe('function');
   });
 
+  it('responds 503 with E_RATELIMIT_SHUTDOWN and Retry-After when the queue is shut down', async () => {
+    const app = express();
+    const mw = expressQueuedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      maxQueueSize: 10,
+      standardHeaders: false,
+      keyGenerator: () => 'shutdown-express',
+    });
+    app.use(mw);
+    app.get('/ok', (_req, res) => {
+      res.status(200).send('ok');
+    });
+
+    await request(app).get('/ok');
+    const pending = request(app).get('/ok');
+    await new Promise<void>((r) => setImmediate(r));
+
+    const shutdownPromise = mw.queue.shutdown({ reason: 'test' });
+    const r = await pending;
+    await shutdownPromise;
+
+    expect(r.status).toBe(503);
+    expect(r.body).toEqual({ error: 'Service shutting down', code: 'E_RATELIMIT_SHUTDOWN' });
+    expect(r.headers['retry-after']).toBe('10');
+
+    const after = await request(app).get('/ok');
+    expect(after.status).toBe(503);
+    expect((after.body as { code: string }).code).toBe('E_RATELIMIT_SHUTDOWN');
+  });
+
+  it('sets Retry-After from shutdownRetryAfterSeconds on 503 shutdown', async () => {
+    const app = express();
+    const mw = expressQueuedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      maxQueueSize: 10,
+      standardHeaders: false,
+      shutdownRetryAfterSeconds: 7,
+      keyGenerator: () => 'shutdown-retry-express',
+    });
+    app.use(mw);
+    app.get('/ok', (_req, res) => res.status(200).send('ok'));
+
+    await request(app).get('/ok');
+    const pending = request(app).get('/ok');
+    await new Promise<void>((r) => setImmediate(r));
+    const pShut = mw.queue.shutdown({ reason: 'test' });
+    const r = await pending;
+    await pShut;
+    expect(r.status).toBe(503);
+    expect(r.headers['retry-after']).toBe('7');
+  });
+
   it('accepts a custom store', async () => {
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,

@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import {
   formatRateLimitHeaders,
   type HeaderInput,
@@ -12,8 +13,9 @@ import {
   resolveStoreWithInMemoryShield,
 } from '../middleware/merge-options.js';
 import { MetricsManager } from '../metrics/manager.js';
+import { ShutdownError } from '../queue/errors.js';
 import { RateLimiterQueue, RateLimiterQueueError } from '../queue/RateLimiterQueue.js';
-import { resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
+import { queuedShutdownErrorJson, resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
 import { resolveIncrementOpts } from '../strategies/rate-limit-engine.js';
 import { RateLimitStrategy } from '../types/index.js';
 import type { MetricsSnapshot } from '../types/metrics.js';
@@ -36,6 +38,11 @@ export type HonoQueuedRateLimitOptions = HonoRateLimitOptions & {
   maxQueueTimeMs?: number;
   /** Prefix for internal queue keys (default: `rlf-queued`). */
   keyPrefix?: string;
+  /**
+   * `Retry-After` header value in **seconds** when the queue is shut down (503 / {@link ShutdownError}).
+   * @default 10
+   */
+  shutdownRetryAfterSeconds?: number;
 };
 
 /** Queued middleware plus {@link RateLimiterQueue} and the same metrics surface as {@link HonoRateLimiterHandler}. */
@@ -56,9 +63,15 @@ export interface HonoQueuedRateLimiterHandler extends HonoRateLimiterHandler {
  *
  * @remarks
  * Head-of-line blocking applies to the shared FIFO queue — see {@link RateLimiterQueue}.
+ *
+ * **Shutdown:** The returned handler exposes **`queue`** (same pattern as Express `expressQueuedRateLimiter`). Use
+ * **`await handler.shutdown()`** or **`await handler.queue.shutdown()`** on process exit; while shutting down,
+ * new token acquisitions throw {@link ShutdownError}, surfaced as **503** with **`Retry-After`** and
+ * **`E_RATELIMIT_SHUTDOWN`**. On Cloudflare Workers, wrap shutdown in **`executionCtx.waitUntil(...)`** so it
+ * completes after the response is sent.
  */
 export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): HonoQueuedRateLimiterHandler {
-  const { maxQueueSize, maxQueueTimeMs, keyPrefix, ...honoRest } = options;
+  const { maxQueueSize, maxQueueTimeMs, keyPrefix, shutdownRetryAfterSeconds, ...honoRest } = options;
   const partial = buildHonoMergePartial(honoRest);
   const merged = mergeRateLimiterOptions({
     ...partial,
@@ -68,7 +81,7 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
 
-  const metricsManager = new MetricsManager(resolved.metrics, shield);
+  const metricsManager = new MetricsManager(resolved.metrics, shield, resolved.store);
   let metricsCollectorStarted = false;
 
   const windowMsForQueue =
@@ -88,11 +101,13 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
     {
       maxQueueSize: maxQueueSize ?? 100,
       maxQueueTimeMs: maxQueueTimeMs ?? 30_000,
+      ownsStore: false,
     },
   );
 
   const keyFromContext = options.keyGenerator ?? honoDefaultKeyGenerator;
   const rejectStatus = options.statusCode ?? 429;
+  const shutdownRetrySec = shutdownRetryAfterSeconds ?? 10;
   const prometheusMw = metricsManager.getPrometheusMiddleware() ?? undefined;
 
   const middleware: MiddlewareHandler = async (c, next) => {
@@ -157,6 +172,20 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
 
         return next();
       } catch (err: unknown) {
+        if (err instanceof ShutdownError) {
+          const m = options.message;
+          const msgForShutdown =
+            typeof m === 'function' ? undefined : m === undefined ? undefined : m;
+          const body = queuedShutdownErrorJson(err, msgForShutdown);
+          const res = new Response(JSON.stringify(body), {
+            status: 503,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': String(shutdownRetrySec),
+            },
+          });
+          throw new HTTPException(503, { res });
+        }
         if (err instanceof RateLimiterQueueError) {
           const retrySec = retryAfterSeconds(err, maxQueueTimeMs ?? 30_000);
           c.header('Retry-After', String(retrySec));
@@ -185,6 +214,7 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
   handler.getMetricsHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
   handler.getHistory = (): MetricsSnapshot[] => metricsManager.getHistory();
   handler.shutdown = async (): Promise<void> => {
+    await queue.shutdown();
     await metricsManager.shutdown();
   };
   handler.shutdownMetrics = async (): Promise<void> => {

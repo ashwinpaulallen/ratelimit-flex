@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ShutdownError } from '../../src/queue/errors.js';
 import {
   RateLimiterQueue,
   RateLimiterQueueError,
@@ -156,17 +157,23 @@ describe('RateLimiterQueue', () => {
     await store.shutdown();
   });
 
-  it('shutdown() rejects pending and calls store.shutdown()', async () => {
+  it('shutdown() rejects pending; with ownsStore, calls store.shutdown()', async () => {
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const store = slidingStore(1, 100_000);
-    const q = new RateLimiterQueue(store, { windowMs: 100_000, maxRequests: 1 });
+    const q = new RateLimiterQueue(
+      store,
+      { windowMs: 100_000, maxRequests: 1 },
+      { ownsStore: true },
+    );
 
     await q.removeTokens('k');
     const p2 = q.removeTokens('k');
-    q.shutdown();
+    const out = await q.shutdown();
 
-    await expect(p2).rejects.toThrow('Queue shut down');
-    await expect(q.removeTokens('x')).rejects.toThrow('Queue shut down');
+    await expect(p2).rejects.toMatchObject({ name: 'ShutdownError', code: 'E_RATELIMIT_SHUTDOWN' });
+    await expect(q.removeTokens('x')).rejects.toBeInstanceOf(ShutdownError);
+    expect(out.rejected).toBe(1);
+    expect(out.drained).toBe(0);
   });
 
   it('processes in FIFO order', async () => {

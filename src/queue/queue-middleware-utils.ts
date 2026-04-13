@@ -6,6 +6,7 @@
  */
 
 import { sanitizeIncrementCost } from '../utils/clamp.js';
+import type { ShutdownError } from './errors.js';
 import { RateLimiterQueueError } from './RateLimiterQueue.js';
 
 /**
@@ -37,4 +38,21 @@ export function retryAfterSeconds(err: RateLimiterQueueError, maxQueueTimeMs: nu
     return Math.max(1, Math.ceil(maxQueueTimeMs / 1000));
   }
   return 1;
+}
+
+/**
+ * JSON body for queued middleware when the queue is shut down (503).
+ * Always includes {@link ShutdownError.code} so clients can branch on `E_RATELIMIT_SHUTDOWN`.
+ */
+export function queuedShutdownErrorJson(
+  err: ShutdownError,
+  message: string | object | undefined,
+): Record<string, unknown> & { code: string } {
+  if (message === undefined) {
+    return { error: 'Service shutting down', code: err.code };
+  }
+  if (typeof message === 'object' && message !== null) {
+    return { ...(message as Record<string, unknown>), code: err.code };
+  }
+  return { error: message, code: err.code };
 }

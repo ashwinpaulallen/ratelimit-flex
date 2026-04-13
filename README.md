@@ -9,6 +9,8 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
+> **v4.0.0 breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
+
 ## Features
 
 - **Three algorithms:** **Sliding window**, **Token bucket**, **Fixed window** — implemented across **`MemoryStore`**, **`RedisStore`** (Lua), **`PgStore`**, **`MongoStore`** (exact for all strategies), and **`DynamoStore`** (exact fixed window & token bucket; sliding window uses a weighted approximation on DynamoDB — see [docs/stores/dynamo.md](docs/stores/dynamo.md))
@@ -390,15 +392,15 @@ process.on('SIGTERM', async () => {
 // Queued rate limiter (wait instead of reject)
 import { queuedRateLimiter } from 'ratelimit-flex/hono';
 
-app.use(
-  '/api/*',
-  queuedRateLimiter({
-    maxRequests: 10,
-    windowMs: 60_000,
-    maxQueueSize: 50,
-    maxQueueTimeMs: 30_000,
-  }),
-);
+const apiLimiter = queuedRateLimiter({
+  maxRequests: 10,
+  windowMs: 60_000,
+  maxQueueSize: 50,
+  maxQueueTimeMs: 30_000,
+});
+app.use('/api/*', apiLimiter);
+// Graceful shutdown: await apiLimiter.queue.shutdown({ drainTimeoutMs: 10_000, reason: 'server-shutdown' })
+// or await apiLimiter.shutdown() — see “Request queuing” for Node/Bun/Workers notes.
 
 // WebSocket rate limiting
 import { webSocketLimiter } from 'ratelimit-flex/hono';
@@ -529,15 +531,106 @@ keyManager.on('blocked', ({ key, reason }) => {
 });
 ```
 
-### Admin endpoints
+### Admin API authentication
+
+The admin router is a SECURITY-SENSITIVE surface. Mounting it without
+authentication exposes block/unblock/reward endpoints to every caller on
+the network. **As of v4.0.0, the `auth` option is REQUIRED** — unauthenticated
+admin routes are no longer allowed without an explicit opt-in.
+
+#### Bearer token (recommended for service-to-service)
 
 ```typescript
 import { createAdminRouter } from 'ratelimit-flex';
 
-app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
-// GET /admin/ratelimit/keys/:key
-// POST /admin/ratelimit/keys/:key/block
-// etc.
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+}));
+```
+
+#### Basic auth (simple setups)
+
+```typescript
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: {
+    type: 'basic',
+    username: 'admin',
+    password: process.env.ADMIN_PASSWORD!,
+  },
+}));
+```
+
+#### Custom middleware (for JWT, OAuth, existing auth systems)
+
+```typescript
+import { requireAuth } from './my-auth';
+
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'middleware', handler: requireAuth(['admin']) },
+}));
+```
+
+#### Audit logging
+
+```typescript
+createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token },
+  onAdminAction: (action) => {
+    auditLogger.info('admin-action', action);
+  },
+});
+```
+
+#### Development escape hatch
+
+In development or tests where you genuinely don't need auth:
+
+```typescript
+createAdminRouter(keyManager, {
+  auth: { type: 'unsafe-no-auth', acknowledgeRisk: true },
+});
+```
+
+This logs a warning at construction time. **Never use this in production.**
+
+#### Migration from v3.3.x
+
+```typescript
+// Before (v3.3.x — no auth required by default; invalid in v4)
+// createAdminRouter(keyManager)
+
+// After (v4.0.0 — explicit auth required)
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+}));
+```
+
+Existing deployments that already wrap the admin router with their own
+`authMiddleware` can use `type: 'middleware'`:
+
+```typescript
+// Before (v3.3.x)
+// app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
+
+// After — either keep the outer middleware (auth checked twice for defense in
+// depth) or move it into the admin router:
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'middleware', handler: authMiddleware },
+}));
+```
+
+#### Fastify (`fastifyAdminPlugin` / `createFastifyAdminPlugin`)
+
+The Fastify plugin takes a nested `options` object with the same `auth`, `onAdminAction`, and `onAuthFailure` fields:
+
+```typescript
+await app.register(fastifyAdminPlugin, {
+  keyManager,
+  prefix: '/admin/ratelimit',
+  options: {
+    auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+  },
+});
 ```
 
 ### What `KeyManager` provides
@@ -658,9 +751,58 @@ keyManager.on('blocked', ({ key, reason }) => {
 
 ## Security and abuse
 
-### Key cardinality and `keyGenerator`
+### Operational limits
 
-Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage.
+#### Key cardinality protection
+
+`MemoryStore` caps the number of distinct keys it tracks in memory. **`ClusterStore`** forwards work to a **`MemoryStore` on the cluster primary**, so the same LRU eviction and default cap apply to that in-process state. When the cap is reached, the least-recently-used key is evicted.
+
+Default: **100,000 keys per `MemoryStore` instance** (including the primary-side store used by `ClusterStore`).
+
+This protects against unbounded memory growth from:
+
+- High-cardinality key generators (e.g., per-URL limits)
+- Misconfigured reverse proxies that pass spoofed IPs through
+- Deliberate attacks that cycle through millions of fake identifiers
+
+Tune via `maxKeys`:
+
+```typescript
+import { MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const store = new MemoryStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  maxKeys: 50_000,  // tighter cap for memory-constrained environments
+  onEvict: (key, reason) => {
+    // Optional: track eviction rate as a health signal
+    metrics.increment('ratelimit.evictions', { reason });
+  },
+});
+```
+
+To disable the cap (NOT recommended in production):
+
+```typescript
+new MemoryStore({ /* ... */, maxKeys: 0 });
+```
+
+#### Monitoring eviction pressure
+
+If `totalEvictions` (from `MemoryStore.getMetrics()`) grows rapidly, your `maxKeys` is too low **or** your `keyGenerator` is producing high-cardinality keys that should be normalized.
+
+When **metrics** are enabled (`metrics.enabled` and the built-in pipeline), check Prometheus text or your registry for:
+
+- `ratelimit_store_active_keys{store="memory"}` — current distinct keys
+- `ratelimit_store_total_evictions{store="memory"}` — cumulative LRU evictions (lifetime for that store instance)
+- `ratelimit_store_max_keys{store="memory"}` — configured cap (`0` means unlimited)
+
+The same values appear on each interval in **`MetricsSnapshot.store`** when the engine store is (or unwraps to) a `MemoryStore`.
+
+### `keyGenerator` and storage keys
+
+Rate limit **state** (`InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) still grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage—even below the `maxKeys` cap.
 
 **Mitigations:** Prefer **stable, low-cardinality** identifiers (user id, tenant id, API key id). **Normalize or hash** untrusted inputs before using them as keys. The library does **not** cap key string length—enforce a maximum or digest in your **`keyGenerator`** if inputs are user-controlled. Use **`InMemoryShieldOptions.maxBlockedKeys`** and related limits where applicable.
 
@@ -671,10 +813,6 @@ Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` b
 ### Lua scripts (`RedisStore`)
 
 All Lua in `RedisStore` is **static source** in the package. Quota and key data are passed only as **`KEYS`** / **`ARGV`** to **`EVAL`**—never build Lua by concatenating user input into the script body.
-
-### Key Manager admin HTTP API
-
-**`createAdminRouter`** (Express) and **`createFastifyAdminPlugin`** expose full control over rate limit and block state. In **production**, mount them **only** behind **authentication**, **authorization**, and ideally **network isolation** (VPN, admin-only ingress). The JSDoc on those factories repeats this warning—treat it as mandatory for exposed deployments.
 
 ## Atomicity & Distributed Systems
 
@@ -812,6 +950,58 @@ await app.register(fastifyQueuedRateLimiter, {
   maxQueueTimeMs: 30_000,
 });
 ```
+
+### Graceful shutdown
+
+Rate limiter queues expose a `shutdown({ drainTimeoutMs, reason })` method
+that gracefully rejects pending requests during process termination.
+
+**Express:**
+
+```typescript
+const limiter = expressQueuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
+app.use(limiter);
+
+process.on('SIGTERM', async () => {
+  const result = await limiter.queue.shutdown({ drainTimeoutMs: 10_000 });
+  console.log(`Queue drained: ${result.drained}, rejected: ${result.rejected}`);
+  await server.close();
+});
+```
+
+**Fastify:**
+
+Fastify's `onClose` hook automatically calls `queue.shutdown()` when the
+server closes. No manual wiring needed.
+
+```typescript
+await app.register(fastifyQueuedRateLimiter, {
+  maxRequests: 10,
+  windowMs: 60_000,
+});
+// queue is drained automatically on app.close()
+```
+
+**Hono:**
+
+```typescript
+import { Hono } from 'hono';
+import { queuedRateLimiter } from 'ratelimit-flex/hono';
+
+const app = new Hono();
+const limiter = queuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
+app.use('*', limiter);
+
+// On Cloudflare Workers, there's no process shutdown — the queue drains
+// when the worker instance is evicted. On Node/Bun, call shutdown manually:
+process.on('SIGTERM', async () => {
+  await limiter.queue.shutdown({ drainTimeoutMs: 5_000 });
+});
+```
+
+Requests rejected during shutdown receive a **503 Service Unavailable**
+response with `Retry-After: 10`. Clients should retry. The error code
+on the thrown `ShutdownError` is `E_RATELIMIT_SHUTDOWN`.
 
 **Outbound API throttling:**
 ```typescript

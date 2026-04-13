@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { ShutdownError } from '../../src/queue/errors.js';
 import {
   RateLimiterQueue,
   RateLimiterQueueError,
@@ -32,7 +33,7 @@ describe('RateLimiterQueueError codes', () => {
     await store.shutdown();
   });
 
-  it('queue_shutdown error has correct code', async () => {
+  it('removeTokens after shutdown throws ShutdownError', async () => {
     const store = new MemoryStore({
       strategy: RateLimitStrategy.SLIDING_WINDOW,
       windowMs: 60_000,
@@ -40,15 +41,15 @@ describe('RateLimiterQueueError codes', () => {
     });
     const q = new RateLimiterQueue(store, { windowMs: 60_000, maxRequests: 1 }, {});
 
-    q.shutdown();
+    await q.shutdown();
 
     try {
       await q.removeTokens('k');
       expect.fail('Should have thrown');
     } catch (err) {
-      expect(err).toBeInstanceOf(RateLimiterQueueError);
-      expect((err as RateLimiterQueueError).code).toBe('queue_shutdown');
-      expect((err as RateLimiterQueueError).message).toBe('Queue shut down');
+      expect(err).toBeInstanceOf(ShutdownError);
+      expect((err as ShutdownError).code).toBe('E_RATELIMIT_SHUTDOWN');
+      expect((err as ShutdownError).message).toContain('queue-shutdown');
     }
 
     await store.shutdown();

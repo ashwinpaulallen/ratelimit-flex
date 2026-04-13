@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { InMemoryShield } from '../shield/InMemoryShield.js';
 import type { HotKeyIntervalCounts, MetricsCollectorOptions, MetricsSnapshot } from '../types/metrics.js';
 import type { MetricsCounters } from './counters.js';
+import { resolveMemoryStoreMetricsSnapshot } from './resolve-memory-store-metrics.js';
 import {
   minMaxMean,
   percentilesQuick,
@@ -41,6 +42,9 @@ export class MetricsCollector extends EventEmitter {
 
   private readonly shield: InMemoryShield | null | undefined;
 
+  /** Engine backing store for optional MemoryStore metrics (may be a shield wrapper). */
+  private readonly backingStore: unknown;
+
   private timer: ReturnType<typeof setInterval> | undefined;
 
   private lastTotalRequests = 0;
@@ -74,6 +78,7 @@ export class MetricsCollector extends EventEmitter {
     this.histogramBuckets = options.histogramBuckets ?? [...DEFAULT_BUCKETS];
     this.onMetricsCb = options.onMetrics;
     this.shield = options.shield;
+    this.backingStore = options.store;
   }
 
   start(): void {
@@ -171,6 +176,8 @@ export class MetricsCollector extends EventEmitter {
           })()
         : undefined;
 
+    const storeSnap = resolveMemoryStoreMetricsSnapshot(this.backingStore);
+
     const snap: MetricsSnapshot = {
       timestamp: new Date(),
       window: {
@@ -220,6 +227,7 @@ export class MetricsCollector extends EventEmitter {
       latencySamplesMs: Object.freeze(lat),
       storeLatencySamplesMs: Object.freeze(st),
       ...(shieldSnap !== undefined ? { shield: shieldSnap } : {}),
+      ...(storeSnap !== undefined ? { store: storeSnap } : {}),
     };
 
     Object.freeze(snap.window);
@@ -230,6 +238,9 @@ export class MetricsCollector extends EventEmitter {
     Object.freeze(snap.trends);
     if (snap.shield !== undefined) {
       Object.freeze(snap.shield);
+    }
+    if (snap.store !== undefined) {
+      Object.freeze(snap.store);
     }
     this.latest = Object.freeze(snap);
 

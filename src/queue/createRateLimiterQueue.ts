@@ -11,6 +11,13 @@ export interface CreateRateLimiterQueueOptions {
   maxQueueTimeMs?: number;
   /** When omitted, a {@link MemoryStore} is created from `strategy`, `windowMs`, and `maxRequests`. */
   store?: RateLimitStore;
+  /**
+   * When **`true`**, {@link RateLimiterQueue.shutdown} closes the backing store. When omitted,
+   * **`true`** if `store` was not provided (internal MemoryStore), else **`false`**.
+   *
+   * @since 4.0.0
+   */
+  ownsStore?: boolean;
 }
 
 function createDefaultMemoryStore(
@@ -84,6 +91,8 @@ export function createRateLimiterQueue(options: CreateRateLimiterQueueOptions): 
 
   const store = options.store ?? createDefaultMemoryStore(strategy, windowMs, maxRequests);
 
+  const ownsStore = options.ownsStore ?? options.store === undefined;
+
   return new RateLimiterQueue(
     store,
     {
@@ -94,6 +103,7 @@ export function createRateLimiterQueue(options: CreateRateLimiterQueueOptions): 
     {
       maxQueueSize: options.maxQueueSize,
       maxQueueTimeMs: options.maxQueueTimeMs,
+      ownsStore,
     },
   );
 }

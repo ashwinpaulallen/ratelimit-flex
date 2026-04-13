@@ -6,8 +6,9 @@ import {
   resolveHeaderConfig,
   resolveWindowMsForHeaders,
 } from '../headers/index.js';
+import { ShutdownError } from '../queue/errors.js';
 import { RateLimiterQueue, RateLimiterQueueError } from '../queue/RateLimiterQueue.js';
-import { resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
+import { queuedShutdownErrorJson, resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import { RateLimitStrategy, type RateLimitOptions } from '../types/index.js';
 import { getLimit, jsonErrorBody, mergeRateLimiterOptions } from './merge-options.js';
@@ -58,6 +59,11 @@ export interface QueuedRateLimiterOptions {
   message?: string | object;
   /** Cost per request (default: 1) */
   incrementCost?: number | ((req: unknown) => number);
+  /**
+   * `Retry-After` header value in **seconds** when the queue is shut down (503 / {@link ShutdownError}).
+   * @default 10
+   */
+  shutdownRetryAfterSeconds?: number;
   /** Headers config */
   standardHeaders?: 'legacy' | 'draft-6' | 'draft-7' | 'draft-8' | boolean;
   /** When using draft standard headers, whether to also emit legacy `X-RateLimit-*` (default: false) */
@@ -84,10 +90,17 @@ export interface ExpressQueuedRateLimiterHandler extends RequestHandler {
  * ```ts
  * const limiter = expressQueuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
  * app.use(limiter);
- * 
+ *
+ * let isShuttingDown = false;
  * process.on('SIGTERM', async () => {
- *   limiter.queue.shutdown(); // Clear pending requests
- *   await server.close();
+ *   if (isShuttingDown) return;
+ *   isShuttingDown = true;
+ *   await limiter.queue.shutdown({
+ *     drainTimeoutMs: 10_000,
+ *     reason: 'server-shutdown',
+ *   });
+ *   await new Promise<void>((resolve) => server.close(() => resolve()));
+ *   process.exit(0);
  * });
  * ```
  * 
@@ -123,11 +136,13 @@ export function expressQueuedRateLimiter(options: QueuedRateLimiterOptions): Exp
     {
       maxQueueSize,
       maxQueueTimeMs,
+      ownsStore: false,
     },
   );
 
   const keyGen = options.keyGenerator ?? defaultKeyGenerator;
   const statusCode = options.statusCode ?? 429;
+  const shutdownRetryAfterSeconds = options.shutdownRetryAfterSeconds ?? 10;
 
   const middleware = async function expressQueuedRateLimiterMiddleware(
     req: Request,
@@ -178,6 +193,12 @@ export function expressQueuedRateLimiter(options: QueuedRateLimiterOptions): Exp
 
       next();
     } catch (err: unknown) {
+      if (err instanceof ShutdownError) {
+        const msg = typeof options.message === 'object' || typeof options.message === 'string' ? options.message : undefined;
+        const body = queuedShutdownErrorJson(err, msg);
+        res.status(503).setHeader('Retry-After', String(shutdownRetryAfterSeconds)).json(body);
+        return;
+      }
       if (err instanceof RateLimiterQueueError) {
         const retrySec = retryAfterSeconds(err, maxQueueTimeMs);
         res.setHeader('Retry-After', String(retrySec));

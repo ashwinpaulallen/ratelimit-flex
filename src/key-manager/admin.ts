@@ -2,6 +2,13 @@ import express from 'express';
 import type { Request, Response, Router } from 'express';
 import type { KeyManager } from './KeyManager.js';
 import {
+  assertAdminRouterOptions,
+  createExpressAdminAuditMiddleware,
+  createExpressAdminAuthMiddleware,
+  warnUnsafeNoAuthIfNeeded,
+  type AdminRouterOptions,
+} from './admin-auth.js';
+import {
   adminDeleteKey,
   adminGetAudit,
   adminGetBlocks,
@@ -20,20 +27,33 @@ import {
  * Creates an Express `Router` with admin endpoints for managing rate limit keys.
  *
  * ⚠️ **Security Warning:** These endpoints provide full control over rate limit state.
- * Always mount behind authentication middleware to prevent unauthorized access.
+ * You must pass an explicit {@link AdminRouterOptions.auth} strategy (including the
+ * development-only `unsafe-no-auth` escape hatch).
  *
  * @example
  * ```ts
  * import { createAdminRouter } from 'ratelimit-flex';
- * app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
+ * app.use(
+ *   '/admin/ratelimit',
+ *   createAdminRouter(keyManager, { auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! } }),
+ * );
  * ```
  * @since 2.2.0
  */
-export function createAdminRouter(keyManager: KeyManager): Router {
+export function createAdminRouter(keyManager: KeyManager, options: AdminRouterOptions): Router {
+  assertAdminRouterOptions(options);
+
+  warnUnsafeNoAuthIfNeeded(options.auth);
+
   const router = express.Router();
   router.use(express.json());
+  router.use(createExpressAdminAuthMiddleware(options));
+  router.use(createExpressAdminAuditMiddleware(options));
 
-  async function sendResult(res: Response, result: Promise<{ status: number; body: unknown }> | { status: number; body: unknown }): Promise<void> {
+  async function sendResult(
+    res: Response,
+    result: Promise<{ status: number; body: unknown }> | { status: number; body: unknown },
+  ): Promise<void> {
     const r = await Promise.resolve(result);
     res.status(r.status).json(r.body);
   }

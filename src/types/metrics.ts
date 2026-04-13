@@ -148,6 +148,17 @@ export interface MetricsSnapshot {
     readonly hitRate: number;
     readonly storeCalls: number;
   };
+  /**
+   * Per-store metrics. Only present when the backing store exposes MemoryStore-shaped `getMetrics()`
+   * (possibly behind InMemoryShield via unwrap).
+   *
+   * @since 4.0.0
+   */
+  readonly store?: {
+    readonly activeKeys: number;
+    readonly totalEvictions: number;
+    readonly maxKeys: number;
+  };
 }
 
 /**
@@ -169,4 +180,10 @@ export interface MetricsCollectorOptions {
    * @since 2.3.0
    */
   readonly shield?: InMemoryShield | null;
+  /**
+   * Engine backing store (same reference as the rate limit engine / middleware `resolved.store`).
+   * When it is or unwraps to MemoryStore, `MetricsSnapshot.store` is filled each tick.
+   * @since 4.0.0
+   */
+  readonly store?: unknown;
 }

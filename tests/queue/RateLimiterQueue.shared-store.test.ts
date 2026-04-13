@@ -24,7 +24,7 @@ describe('RateLimiterQueue with shared store', () => {
         keyPrefix: 'queue1',
         strategy: RateLimitStrategy.SLIDING_WINDOW,
       },
-      { maxQueueSize: 10 },
+      { maxQueueSize: 10, ownsStore: false },
     );
 
     queue2 = new RateLimiterQueue(
@@ -35,26 +35,28 @@ describe('RateLimiterQueue with shared store', () => {
         keyPrefix: 'queue2',
         strategy: RateLimitStrategy.SLIDING_WINDOW,
       },
-      { maxQueueSize: 10 },
+      { maxQueueSize: 10, ownsStore: false },
     );
   });
 
-  it('shutdown() on one queue closes the shared store for all queues', async () => {
-    // Spy on the store's shutdown method
+  it('shutdown() closes the shared store only when the queue opts into ownsStore', async () => {
     const shutdownSpy = vi.spyOn(sharedStore, 'shutdown');
 
-    // Queue1 can successfully remove tokens
-    await expect(queue1.removeTokens('test-key')).resolves.toBeDefined();
+    const qOwns = new RateLimiterQueue(
+      sharedStore,
+      {
+        windowMs: 1000,
+        maxRequests: 5,
+        keyPrefix: 'owns',
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+      },
+      { maxQueueSize: 10, ownsStore: true },
+    );
 
-    // Shutdown queue1 (this closes the shared store)
-    queue1.shutdown();
+    await expect(qOwns.removeTokens('test-key')).resolves.toBeDefined();
+    await qOwns.shutdown();
 
-    // Verify store.shutdown() was called
     expect(shutdownSpy).toHaveBeenCalledOnce();
-
-    // Queue2 can no longer use the store (it's been closed)
-    // Note: MemoryStore doesn't actually prevent operations after shutdown,
-    // but this demonstrates the ownership issue
   });
 
   it('clear() on one queue does not affect the shared store', async () => {
@@ -96,18 +98,24 @@ describe('RateLimiterQueue with shared store', () => {
     expect(shutdownSpy).toHaveBeenCalledOnce();
   });
 
-  it('demonstrates unsafe pattern: shutdown() first queue breaks second queue', async () => {
+  it('demonstrates unsafe pattern: shutdown with ownsStore closes a shared store', async () => {
     const shutdownSpy = vi.spyOn(sharedStore, 'shutdown');
 
-    // Both queues work initially
-    await expect(queue1.removeTokens('key1')).resolves.toBeDefined();
+    const qUnsafe = new RateLimiterQueue(
+      sharedStore,
+      {
+        windowMs: 1000,
+        maxRequests: 5,
+        keyPrefix: 'unsafe',
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+      },
+      { maxQueueSize: 10, ownsStore: true },
+    );
+
+    await expect(qUnsafe.removeTokens('key1')).resolves.toBeDefined();
     await expect(queue2.removeTokens('key2')).resolves.toBeDefined();
 
-    // Unsafe: shutdown queue1 (closes shared store)
-    queue1.shutdown();
+    await qUnsafe.shutdown();
     expect(shutdownSpy).toHaveBeenCalledOnce();
-
-    // Queue2 is now broken because its store was closed by queue1
-    // (In practice, MemoryStore continues to work, but RedisStore/ClusterStore would fail)
   });
 });

@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { fastifyQueuedRateLimiter } from '../../src/middleware/fastifyQueuedRateLimiter.js';
 import { MemoryStore } from '../../src/stores/memory-store.js';
@@ -167,6 +167,49 @@ describe('fastifyQueuedRateLimiter', () => {
     expect(app.rateLimitQueue).toBeDefined();
     expect(typeof app.rateLimitQueue!.getQueueSize).toBe('function');
     expect(typeof app.rateLimitQueue!.clear).toBe('function');
+  });
+
+  it('responds 503 with E_RATELIMIT_SHUTDOWN and Retry-After when the queue is shut down', async () => {
+    const app = trackApp(Fastify());
+    await app.register(fastifyQueuedRateLimiter, {
+      windowMs: 60_000,
+      maxRequests: 1,
+      maxQueueSize: 10,
+      standardHeaders: false,
+      keyGenerator: () => 'shutdown-fastify',
+    });
+    app.get('/ok', async () => 'ok');
+
+    await app.inject({ method: 'GET', url: '/ok' });
+    const pending = app.inject({ method: 'GET', url: '/ok' });
+    await new Promise<void>((r) => setImmediate(r));
+
+    const shutdownPromise = app.rateLimitQueue!.shutdown({ reason: 'test' });
+    const r = await pending;
+    await shutdownPromise;
+
+    expect(r.statusCode).toBe(503);
+    expect(r.json()).toEqual({ error: 'Service shutting down', code: 'E_RATELIMIT_SHUTDOWN' });
+    expect(r.headers['retry-after']).toBe('10');
+  });
+
+  it('onClose invokes queue.shutdown with drainTimeoutMs and reason when the app is idle', async () => {
+    const app = trackApp(Fastify());
+    await app.register(fastifyQueuedRateLimiter, {
+      windowMs: 60_000,
+      maxRequests: 10,
+      standardHeaders: false,
+    });
+    app.get('/ok', async () => 'ok');
+
+    const q = app.rateLimitQueue!;
+    const spy = vi.spyOn(q, 'shutdown').mockResolvedValue({ rejected: 0, drained: 0 });
+    await app.close();
+    expect(spy).toHaveBeenCalledWith({
+      drainTimeoutMs: expect.any(Number),
+      reason: 'fastify-close',
+    });
+    spy.mockRestore();
   });
 
   it('accepts a custom store', async () => {

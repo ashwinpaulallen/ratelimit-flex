@@ -156,7 +156,7 @@ export class RateLimitModule {
       store: options.store,
     } as Partial<RateLimitOptions>);
     const { shield, optionsForEngine } = resolveStoreWithInMemoryShield(merged);
-    const metricsManager = new MetricsManager(optionsForEngine.metrics, shield);
+    const metricsManager = new MetricsManager(optionsForEngine.metrics, shield, optionsForEngine.store);
     const keyManager = (options.keyManager ?? merged.keyManager) ?? null;
     const disposeKeyManagerOnDestroy =
       keyManager !== null && options.keyManager === undefined;
