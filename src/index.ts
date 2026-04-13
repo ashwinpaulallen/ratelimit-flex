@@ -69,6 +69,7 @@ export {
  * @since 1.0.0
  */
 export { MemoryStore } from './stores/memory-store.js';
+export type { MemoryStoreLruOptions, MemoryStoreOptions, MemoryStoreTokenBucketOptions, MemoryStoreWindowOptions } from './stores/memory-store.js';
 
 /**
  * In-memory block shield (wraps a remote rate-limit store).

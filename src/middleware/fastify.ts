@@ -105,7 +105,7 @@ const plugin: FastifyPluginAsync<Partial<RateLimitOptions>> = async (fastify, op
   const { optionsForEngine: resolved, shield } = resolveStoreWithInMemoryShield(merged);
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
-  const metricsManager = new MetricsManager(resolved.metrics, shield);
+  const metricsManager = new MetricsManager(resolved.metrics, shield, resolved.store);
   const { onLimitReached, ...engineOptions } = resolved;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);
   const keyGen = resolved.keyGenerator ?? defaultKeyGenerator;

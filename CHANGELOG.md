@@ -18,6 +18,24 @@ All notable changes to this project are documented in this file.
 - Built-in timing-safe bearer and basic auth implementations
 - `onAdminAction` audit log callback
 - `AdminAuthRequiredError` thrown at construction time when auth is omitted
+- **`MemoryStore` key-cap / LRU:** distinct keys are bounded in one in-memory map (default
+  **`maxKeys` 100,000**; **`0`** = unlimited). LRU move-to-end on access; oldest key evicted when
+  full. Optional **`onEvict(key, 'lru-cap' | 'expired')`**. **`getMetrics()`** returns
+  **`{ activeKeys, totalEvictions, maxKeys }`** (eviction counter is lifetime per instance;
+  **`resetAll()`** does not reset it).
+- **Metrics — MemoryStore observability:** **`MetricsSnapshot.store`** when the engine backing
+  store is or unwraps to **`MemoryStore`** (including behind **`InMemoryShield`** via
+  **`COMPOSED_UNWRAP`**). **`MetricsManager(config, shield?, store)`** and middleware pass
+  **`resolved.store`** so snapshots and exporters stay wired without extra setup. **Prometheus**
+  text and registry: **`ratelimit_store_active_keys`**, **`ratelimit_store_total_evictions`**,
+  **`ratelimit_store_max_keys`** with label **`store="memory"`**. **OpenTelemetry:** matching
+  observable gauges.
+
+### Documentation
+
+- **README — Security:** **Operational limits** — key cardinality protection, **`maxKeys`** tuning,
+  **`totalEvictions` / Prometheus** monitoring (`ratelimit_store_*{store="memory"}`), and
+  **`keyGenerator`** / storage key hygiene.
 
 ## [3.3.0] - 2026-04-09
 

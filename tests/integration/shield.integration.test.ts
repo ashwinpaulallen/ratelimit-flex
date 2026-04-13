@@ -113,7 +113,7 @@ describe('shield integration (DoS-style)', () => {
       headers: false,
     });
     const { optionsForEngine: resolved } = resolveStoreWithInMemoryShield(merged);
-    const metricsManager = new MetricsManager(resolved.metrics, null);
+    const metricsManager = new MetricsManager(resolved.metrics, null, resolved.store);
     const engine = new RateLimitEngine(resolved, metricsManager.getCounters() ?? undefined);
 
     const app = express();
@@ -176,7 +176,7 @@ describe('shield integration (DoS-style)', () => {
       headers: false,
     });
     const { optionsForEngine: resolved } = resolveStoreWithInMemoryShield(merged);
-    const metricsManager = new MetricsManager(resolved.metrics, null);
+    const metricsManager = new MetricsManager(resolved.metrics, null, resolved.store);
     const engine = new RateLimitEngine(resolved, metricsManager.getCounters() ?? undefined);
 
     const limiter = expressRateLimiter({

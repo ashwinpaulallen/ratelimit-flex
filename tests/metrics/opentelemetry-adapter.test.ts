@@ -45,15 +45,18 @@ describe('OpenTelemetryAdapter', () => {
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_total_keys_evicted', expect.any(Object));
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_hit_rate', expect.any(Object));
     expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_shield_store_calls_total', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_store_active_keys', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_store_total_evictions', expect.any(Object));
+    expect(meter.createObservableGauge).toHaveBeenCalledWith('rl_store_max_keys', expect.any(Object));
 
     expect(rps.addCallback).toHaveBeenCalledTimes(1);
     expect(br.addCallback).toHaveBeenCalledTimes(1);
-    expect(hk.addCallback).toHaveBeenCalledTimes(8);
+    expect(hk.addCallback).toHaveBeenCalledTimes(11);
 
     adapter.shutdown();
     expect(rps.removeCallback).toHaveBeenCalledTimes(1);
     expect(br.removeCallback).toHaveBeenCalledTimes(1);
-    expect(hk.removeCallback).toHaveBeenCalledTimes(8);
+    expect(hk.removeCallback).toHaveBeenCalledTimes(11);
   });
 
   it('applies counter deltas and histogram records when metrics events fire', () => {

@@ -131,6 +131,12 @@ export class PrometheusAdapter {
 
   private shieldStoreCallsGauge: import('prom-client').Gauge<string> | null = null;
 
+  private storeActiveKeysGauge: import('prom-client').Gauge<string> | null = null;
+
+  private storeTotalEvictionsGauge: import('prom-client').Gauge<string> | null = null;
+
+  private storeMaxKeysGauge: import('prom-client').Gauge<string> | null = null;
+
   constructor(collector: MetricsCollector, options?: PrometheusAdapterOptions) {
     this.collector = collector;
     this.prefix = normalizePrefix(options?.prefix ?? DEFAULT_PREFIX);
@@ -284,6 +290,22 @@ export class PrometheusAdapter {
     lines.push(`# TYPE ${nameShCalls} gauge`);
     lines.push(`${nameShCalls} ${snap?.shield?.storeCalls ?? 0}`);
 
+    if (snap?.store !== undefined) {
+      const nameAk = `${p}store_active_keys`;
+      const nameTe = `${p}store_total_evictions`;
+      const nameMk = `${p}store_max_keys`;
+      const st = snap.store;
+      lines.push(`# HELP ${nameAk} Distinct keys tracked in the backing MemoryStore`);
+      lines.push(`# TYPE ${nameAk} gauge`);
+      lines.push(`${nameAk}{store="memory"} ${st.activeKeys}`);
+      lines.push(`# HELP ${nameTe} LRU evictions due to maxKeys on the backing MemoryStore (cumulative)`);
+      lines.push(`# TYPE ${nameTe} gauge`);
+      lines.push(`${nameTe}{store="memory"} ${st.totalEvictions}`);
+      lines.push(`# HELP ${nameMk} Configured maxKeys cap on the backing MemoryStore (0 = unlimited)`);
+      lines.push(`# TYPE ${nameMk} gauge`);
+      lines.push(`${nameMk}{store="memory"} ${st.maxKeys}`);
+    }
+
     return `${lines.join('\n')}\n`;
   }
 
@@ -393,6 +415,24 @@ export class PrometheusAdapter {
       help: 'Store increment calls that passed through the shield (cumulative)',
       registers: [reg],
     });
+    this.storeActiveKeysGauge = new prom.Gauge({
+      name: `${p}store_active_keys`,
+      help: 'Distinct keys tracked in the backing MemoryStore',
+      labelNames: ['store'],
+      registers: [reg],
+    });
+    this.storeTotalEvictionsGauge = new prom.Gauge({
+      name: `${p}store_total_evictions`,
+      help: 'LRU evictions due to maxKeys on the backing MemoryStore (cumulative)',
+      labelNames: ['store'],
+      registers: [reg],
+    });
+    this.storeMaxKeysGauge = new prom.Gauge({
+      name: `${p}store_max_keys`,
+      help: 'Configured maxKeys cap on the backing MemoryStore (0 = unlimited)',
+      labelNames: ['store'],
+      registers: [reg],
+    });
     })();
     await this.promRegisterPromise;
   }
@@ -471,5 +511,12 @@ export class PrometheusAdapter {
     this.shieldTotalEvictedGauge?.set(sh?.totalKeysEvicted ?? 0);
     this.shieldHitRateGauge?.set(sh?.hitRate ?? 0);
     this.shieldStoreCallsGauge?.set(sh?.storeCalls ?? 0);
+
+    const mem = s.store;
+    if (mem !== undefined) {
+      this.storeActiveKeysGauge?.set({ store: 'memory' }, mem.activeKeys);
+      this.storeTotalEvictionsGauge?.set({ store: 'memory' }, mem.totalEvictions);
+      this.storeMaxKeysGauge?.set({ store: 'memory' }, mem.maxKeys);
+    }
   }
 }

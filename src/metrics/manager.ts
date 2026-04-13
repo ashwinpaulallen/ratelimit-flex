@@ -37,10 +37,13 @@ export class MetricsManager {
    *   {@link resolveStoreWithInMemoryShield} (or `null` / omitted). {@link MetricsCollector} fills
    *   `snapshot.shield` from `shield.getMetrics()`; request counters still reflect the path through
    *   the engine. If multiple shields are stacked, only this instance is observed (usually the outer layer).
+   * @param store — Same backing store reference as the engine (`resolved.store`). When it is or unwraps to
+   *   MemoryStore, {@link MetricsSnapshot.store} is populated each tick.
    */
   constructor(
     config: MetricsConfig | boolean | undefined,
     shield?: InMemoryShield | null,
+    store?: unknown,
   ) {
     const normalized = normalizeMetricsConfig(config);
     this.normalized = normalized;
@@ -59,6 +62,7 @@ export class MetricsManager {
       topKSize: normalized.topKSize,
       histogramBuckets: normalized.histogramBuckets,
       shield,
+      store,
     });
 
     if (normalized.onMetrics) {

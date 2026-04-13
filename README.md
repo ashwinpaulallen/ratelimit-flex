@@ -749,9 +749,58 @@ keyManager.on('blocked', ({ key, reason }) => {
 
 ## Security and abuse
 
-### Key cardinality and `keyGenerator`
+### Operational limits
 
-Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage.
+#### Key cardinality protection
+
+`MemoryStore` caps the number of distinct keys it tracks in memory. **`ClusterStore`** forwards work to a **`MemoryStore` on the cluster primary**, so the same LRU eviction and default cap apply to that in-process state. When the cap is reached, the least-recently-used key is evicted.
+
+Default: **100,000 keys per `MemoryStore` instance** (including the primary-side store used by `ClusterStore`).
+
+This protects against unbounded memory growth from:
+
+- High-cardinality key generators (e.g., per-URL limits)
+- Misconfigured reverse proxies that pass spoofed IPs through
+- Deliberate attacks that cycle through millions of fake identifiers
+
+Tune via `maxKeys`:
+
+```typescript
+import { MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
+
+const store = new MemoryStore({
+  strategy: RateLimitStrategy.SLIDING_WINDOW,
+  windowMs: 60_000,
+  maxRequests: 100,
+  maxKeys: 50_000,  // tighter cap for memory-constrained environments
+  onEvict: (key, reason) => {
+    // Optional: track eviction rate as a health signal
+    metrics.increment('ratelimit.evictions', { reason });
+  },
+});
+```
+
+To disable the cap (NOT recommended in production):
+
+```typescript
+new MemoryStore({ /* ... */, maxKeys: 0 });
+```
+
+#### Monitoring eviction pressure
+
+If `totalEvictions` (from `MemoryStore.getMetrics()`) grows rapidly, your `maxKeys` is too low **or** your `keyGenerator` is producing high-cardinality keys that should be normalized.
+
+When **metrics** are enabled (`metrics.enabled` and the built-in pipeline), check Prometheus text or your registry for:
+
+- `ratelimit_store_active_keys{store="memory"}` — current distinct keys
+- `ratelimit_store_total_evictions{store="memory"}` — cumulative LRU evictions (lifetime for that store instance)
+- `ratelimit_store_max_keys{store="memory"}` — configured cap (`0` means unlimited)
+
+The same values appear on each interval in **`MetricsSnapshot.store`** when the engine store is (or unwraps to) a `MemoryStore`.
+
+### `keyGenerator` and storage keys
+
+Rate limit **state** (`InMemoryShield` block maps, `KeyManager` bookkeeping, Redis keys, etc.) still grows with **distinct** storage keys. A `keyGenerator` that returns a **new high-cardinality value per request** (full URL including unbounded query strings, raw JWTs, unbounded device fingerprints) lets attackers inflate memory or Redis usage—even below the `maxKeys` cap.
 
 **Mitigations:** Prefer **stable, low-cardinality** identifiers (user id, tenant id, API key id). **Normalize or hash** untrusted inputs before using them as keys. The library does **not** cap key string length—enforce a maximum or digest in your **`keyGenerator`** if inputs are user-controlled. Use **`InMemoryShieldOptions.maxBlockedKeys`** and related limits where applicable.
 

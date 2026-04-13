@@ -209,7 +209,7 @@ export function rateLimiter(options: HonoRateLimitOptions = {}): HonoRateLimiter
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
 
-  const metricsManager = new MetricsManager(resolved.metrics, shield);
+  const metricsManager = new MetricsManager(resolved.metrics, shield, resolved.store);
   const { onLimitReached: _engineOnLimit, ...engineOptions } = resolved;
   void _engineOnLimit;
   const engine = new RateLimitEngine(engineOptions, metricsManager.getCounters() ?? undefined);

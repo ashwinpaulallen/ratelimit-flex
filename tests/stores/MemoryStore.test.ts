@@ -4,6 +4,15 @@ import { RateLimitStrategy } from '../../src/types/index.js';
 import { runStoreComplianceTests } from './compliance.js';
 import type { StoreComplianceConfig } from './compliance.js';
 
+function stateSize(store: MemoryStore): number {
+  return (store as unknown as { state: Map<string, unknown> }).state.size;
+}
+
+function slidingStamps(store: MemoryStore, key: string): number[] | undefined {
+  const v = (store as unknown as { state: Map<string, { stamps?: number[] }> }).state.get(key);
+  return v && 'stamps' in v && v.stamps ? v.stamps : undefined;
+}
+
 runStoreComplianceTests({
   name: 'MemoryStore',
   async createStore(config: StoreComplianceConfig) {
@@ -41,12 +50,12 @@ describe('MemoryStore', () => {
     });
 
     await store.increment('cleanup-key');
-    expect((store as unknown as { sliding: Map<string, number[]> }).sliding.size).toBe(1);
+    expect(stateSize(store)).toBe(1);
 
     vi.advanceTimersByTime(250);
     vi.runOnlyPendingTimers();
 
-    expect((store as unknown as { sliding: Map<string, number[]> }).sliding.size).toBe(0);
+    expect(stateSize(store)).toBe(0);
     await store.shutdown();
   });
 
@@ -64,11 +73,10 @@ describe('MemoryStore', () => {
     vi.advanceTimersByTime(1);
     await store.increment('fifo');
 
-    const sliding = (store as unknown as { sliding: Map<string, number[]> }).sliding;
-    expect(sliding.get('fifo')).toEqual([t0, t0 + 1, t0 + 2]);
+    expect(slidingStamps(store, 'fifo')).toEqual([t0, t0 + 1, t0 + 2]);
 
     await store.decrement('fifo');
-    expect(sliding.get('fifo')).toEqual([t0 + 1, t0 + 2]);
+    expect(slidingStamps(store, 'fifo')).toEqual([t0 + 1, t0 + 2]);
 
     await store.shutdown();
   });
@@ -145,11 +153,212 @@ describe('MemoryStore', () => {
 
       store.resetAll();
       expect(store.getActiveKeys().size).toBe(0);
-      expect((store as unknown as { sliding: Map<string, unknown> }).sliding.size).toBe(0);
+      expect(stateSize(store)).toBe(0);
 
       const after = await store.increment('z');
       expect(after.totalHits).toBe(1);
 
+      await store.shutdown();
+    });
+
+    it('resetAll does not clear getMetrics totalEvictions (lifetime counter)', async () => {
+      const onEvict = vi.fn();
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 1,
+        onEvict,
+      });
+      await store.increment('a');
+      await store.increment('b');
+      expect(store.getMetrics().totalEvictions).toBe(1);
+      store.resetAll();
+      expect(store.getMetrics().totalEvictions).toBe(1);
+      expect(store.getMetrics().activeKeys).toBe(0);
+      await store.shutdown();
+    });
+  });
+
+  describe('maxKeys (LRU)', () => {
+    it('evicts least-recently-used sliding key when adding a new distinct key at cap', async () => {
+      const onEvict = vi.fn();
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 3,
+        onEvict,
+      });
+
+      await store.increment('a');
+      await store.increment('b');
+      await store.increment('c');
+      await store.increment('d');
+
+      expect(slidingStamps(store, 'a')).toBeUndefined();
+      expect(slidingStamps(store, 'b')).toBeDefined();
+      expect(slidingStamps(store, 'c')).toBeDefined();
+      expect(slidingStamps(store, 'd')).toBeDefined();
+      expect(onEvict).toHaveBeenCalledWith('a', 'lru-cap');
+      expect(store.getMetrics().totalEvictions).toBe(1);
+      expect(store.getMetrics().activeKeys).toBe(3);
+
+      await store.shutdown();
+    });
+
+    it('increment refreshes LRU order so the untouched key is evicted next', async () => {
+      const onEvict = vi.fn();
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 3,
+        onEvict,
+      });
+
+      await store.increment('a');
+      await store.increment('b');
+      await store.increment('c');
+      await store.increment('a');
+      await store.increment('d');
+
+      expect(slidingStamps(store, 'b')).toBeUndefined();
+      expect(slidingStamps(store, 'a')).toBeDefined();
+      expect(slidingStamps(store, 'c')).toBeDefined();
+      expect(slidingStamps(store, 'd')).toBeDefined();
+      expect(onEvict).toHaveBeenCalledWith('b', 'lru-cap');
+
+      await store.shutdown();
+    });
+
+    it('get() refreshes LRU order so the untouched key is evicted next', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 2,
+      });
+
+      await store.increment('a');
+      await store.increment('b');
+      await store.get('a');
+      await store.increment('c');
+
+      expect(slidingStamps(store, 'b')).toBeUndefined();
+      expect(slidingStamps(store, 'a')).toBeDefined();
+      expect(slidingStamps(store, 'c')).toBeDefined();
+
+      await store.shutdown();
+    });
+
+    it('maxKeys 0 disables the cap', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 0,
+      });
+
+      for (let i = 0; i < 50; i++) {
+        await store.increment(`k${i}`);
+      }
+      expect(stateSize(store)).toBe(50);
+      expect(store.getMetrics().maxKeys).toBe(0);
+      expect(store.getMetrics().totalEvictions).toBe(0);
+      expect(store.getMetrics().activeKeys).toBe(50);
+
+      await store.shutdown();
+    });
+
+    it('unbounded mode: many distinct keys, no LRU evictions', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 0,
+      });
+      const n = 1_000_000;
+      for (let i = 0; i < n; i++) {
+        await store.increment(`k${i}`);
+      }
+      expect(store.getMetrics().activeKeys).toBe(n);
+      expect(store.getMetrics().totalEvictions).toBe(0);
+      await store.shutdown();
+    }, 120_000);
+
+    it('default maxKeys is 100_000; 100_001 distinct keys causes exactly one eviction', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+      });
+      expect(store.getMetrics().maxKeys).toBe(100_000);
+      for (let i = 0; i < 100_001; i++) {
+        await store.increment(`k${i}`);
+      }
+      expect(store.getMetrics().activeKeys).toBe(100_000);
+      expect(store.getMetrics().totalEvictions).toBe(1);
+      await store.shutdown();
+    }, 120_000);
+
+    it('expired wall-TTL head is removed as expired when making room, not as lru-cap', async () => {
+      const onEvict = vi.fn();
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 1,
+        onEvict,
+      });
+      const t0 = Date.now();
+      await store.set('a', 1, new Date(t0 + 100));
+      vi.advanceTimersByTime(150);
+      await store.increment('b');
+      expect(onEvict).toHaveBeenCalledWith('a', 'expired');
+      expect(onEvict).not.toHaveBeenCalledWith('a', 'lru-cap');
+      expect(store.getMetrics().totalEvictions).toBe(0);
+      expect(slidingStamps(store, 'b')).toBeDefined();
+      await store.shutdown();
+    });
+
+    it('concurrent-ish increments respect maxKeys without duplicate keys', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 100,
+        maxKeys: 5,
+      });
+      await Promise.all(
+        Array.from({ length: 10 }, (_, i) => store.increment(`key-${i}`)),
+      );
+      expect(store.getMetrics().activeKeys).toBe(5);
+      const st = (store as unknown as { state: Map<string, unknown> }).state;
+      expect(st.size).toBe(5);
+      const keys = [...st.keys()];
+      expect(new Set(keys).size).toBe(5);
+      await store.shutdown();
+    });
+
+    it('getMetrics tracks activeKeys and totalEvictions in real time', async () => {
+      const store = new MemoryStore({
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 10,
+        maxKeys: 2,
+      });
+      expect(store.getMetrics()).toEqual({
+        activeKeys: 0,
+        totalEvictions: 0,
+        maxKeys: 2,
+      });
+      await store.increment('x');
+      expect(store.getMetrics().activeKeys).toBe(1);
+      await store.increment('y');
+      expect(store.getMetrics().activeKeys).toBe(2);
+      await store.increment('z');
+      expect(store.getMetrics().activeKeys).toBe(2);
+      expect(store.getMetrics().totalEvictions).toBe(1);
       await store.shutdown();
     });
   });

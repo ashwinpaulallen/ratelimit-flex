@@ -85,6 +85,12 @@ export class OpenTelemetryAdapter {
 
   private readonly shieldStoreCallsGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
 
+  private readonly storeActiveKeysGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly storeTotalEvictionsGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
+  private readonly storeMaxKeysGauge: ReturnType<OtelMeterLike['createObservableGauge']>;
+
   private readonly rpsCallback: (r: ObservableResult) => void;
 
   private readonly blockRateCallback: (r: ObservableResult) => void;
@@ -104,6 +110,12 @@ export class OpenTelemetryAdapter {
   private readonly shieldHitRateCallback: (r: ObservableResult) => void;
 
   private readonly shieldStoreCallsCallback: (r: ObservableResult) => void;
+
+  private readonly storeActiveKeysCallback: (r: ObservableResult) => void;
+
+  private readonly storeTotalEvictionsCallback: (r: ObservableResult) => void;
+
+  private readonly storeMaxKeysCallback: (r: ObservableResult) => void;
 
   private readonly onMetrics: (snap: MetricsSnapshot) => void;
 
@@ -158,6 +170,16 @@ export class OpenTelemetryAdapter {
       description: 'Store increment calls that passed through the shield (cumulative)',
     });
 
+    this.storeActiveKeysGauge = m.createObservableGauge(`${p}_store_active_keys`, {
+      description: 'Distinct keys tracked in the backing MemoryStore',
+    });
+    this.storeTotalEvictionsGauge = m.createObservableGauge(`${p}_store_total_evictions`, {
+      description: 'LRU evictions due to maxKeys on the backing MemoryStore (cumulative)',
+    });
+    this.storeMaxKeysGauge = m.createObservableGauge(`${p}_store_max_keys`, {
+      description: 'Configured maxKeys cap on the backing MemoryStore (0 = unlimited)',
+    });
+
     this.rpsCallback = (observableResult) => {
       const snap = this.lastSnapshot;
       observableResult.observe(snap !== null ? snap.window.requestsPerSecond : 0);
@@ -203,6 +225,28 @@ export class OpenTelemetryAdapter {
       observableResult.observe(snap?.shield?.storeCalls ?? 0);
     };
 
+    this.storeActiveKeysCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      if (snap?.store === undefined) {
+        return;
+      }
+      observableResult.observe(snap.store.activeKeys, { store: 'memory' });
+    };
+    this.storeTotalEvictionsCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      if (snap?.store === undefined) {
+        return;
+      }
+      observableResult.observe(snap.store.totalEvictions, { store: 'memory' });
+    };
+    this.storeMaxKeysCallback = (observableResult) => {
+      const snap = this.lastSnapshot;
+      if (snap?.store === undefined) {
+        return;
+      }
+      observableResult.observe(snap.store.maxKeys, { store: 'memory' });
+    };
+
     this.rpsGauge.addCallback(this.rpsCallback);
     this.blockRateGauge.addCallback(this.blockRateCallback);
     this.hotKeyGauge.addCallback(this.hotKeyCallback);
@@ -213,6 +257,9 @@ export class OpenTelemetryAdapter {
     this.shieldTotalEvictedGauge.addCallback(this.shieldTotalEvictedCallback);
     this.shieldHitRateGauge.addCallback(this.shieldHitRateCallback);
     this.shieldStoreCallsGauge.addCallback(this.shieldStoreCallsCallback);
+    this.storeActiveKeysGauge.addCallback(this.storeActiveKeysCallback);
+    this.storeTotalEvictionsGauge.addCallback(this.storeTotalEvictionsCallback);
+    this.storeMaxKeysGauge.addCallback(this.storeMaxKeysCallback);
 
     this.onMetrics = (snap: MetricsSnapshot) => {
       const prev = this.lastSnapshot;
@@ -238,6 +285,9 @@ export class OpenTelemetryAdapter {
     this.shieldTotalEvictedGauge.removeCallback(this.shieldTotalEvictedCallback);
     this.shieldHitRateGauge.removeCallback(this.shieldHitRateCallback);
     this.shieldStoreCallsGauge.removeCallback(this.shieldStoreCallsCallback);
+    this.storeActiveKeysGauge.removeCallback(this.storeActiveKeysCallback);
+    this.storeTotalEvictionsGauge.removeCallback(this.storeTotalEvictionsCallback);
+    this.storeMaxKeysGauge.removeCallback(this.storeMaxKeysCallback);
   }
 
   private applyCounterDeltas(s: MetricsSnapshot, prev: MetricsSnapshot | null): void {

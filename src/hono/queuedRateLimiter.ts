@@ -68,7 +68,7 @@ export function queuedRateLimiter(options: HonoQueuedRateLimitOptions = {}): Hon
   warnIfMemoryStoreInCluster(resolved.store);
   warnIfRedisStoreWithoutInsurance(resolved.store);
 
-  const metricsManager = new MetricsManager(resolved.metrics, shield);
+  const metricsManager = new MetricsManager(resolved.metrics, shield, resolved.store);
   let metricsCollectorStarted = false;
 
   const windowMsForQueue =
