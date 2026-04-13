@@ -2,9 +2,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import type { KeyManager } from './KeyManager.js';
 import {
-  AdminAuthRequiredError,
-  authenticateFastifyRequest,
+  assertAdminRouterOptions,
+  createFastifyAdminAuthHandler,
   extractAdminKeyFromPath,
+  warnUnsafeNoAuthIfNeeded,
   type AdminRouterOptions,
 } from './admin-auth.js';
 import {
@@ -26,6 +27,9 @@ import {
  * Options for {@link createFastifyAdminPlugin} / {@link fastifyAdminPlugin}.
  *
  * `options` must include {@link AdminRouterOptions.auth} — there is no default.
+ *
+ * If you set {@link AdminRouterOptions.onAuthFailure}, read that option’s **Fastify** note: the
+ * callback’s `req` parameter is not a real Express request (only `res` is a usable bridge).
  */
 export interface FastifyAdminPluginOptions {
   keyManager: KeyManager;
@@ -36,21 +40,13 @@ export interface FastifyAdminPluginOptions {
 
 const adminPluginImpl: FastifyPluginAsync<FastifyAdminPluginOptions> = async (fastify, pluginOpts) => {
   const opts = pluginOpts.options;
-  if (!opts || !opts.auth) {
-    throw new AdminAuthRequiredError();
-  }
+  assertAdminRouterOptions(opts);
 
-  if (opts.auth.type === 'unsafe-no-auth') {
-    process.stderr.write(
-      '[ratelimit-flex] WARNING: KeyManager admin router mounted with ' +
-        '`unsafe-no-auth`. This exposes block/unblock/reward endpoints ' +
-        'without authentication. Use only for development and tests. ' +
-        'For production, use { type: "bearer" | "basic" | "middleware" }.\n',
-    );
-  }
+  warnUnsafeNoAuthIfNeeded(opts.auth);
 
+  const authenticateRequest = createFastifyAdminAuthHandler(opts);
   fastify.addHook('preHandler', async (request, reply) => {
-    await authenticateFastifyRequest(request, reply, opts);
+    await authenticateRequest(request, reply);
   });
 
   const { onAdminAction } = opts;
@@ -160,6 +156,10 @@ const adminPluginImpl: FastifyPluginAsync<FastifyAdminPluginOptions> = async (fa
  *
  * ⚠️ **Security Warning:** These endpoints provide full control over rate limit state.
  * You must pass `options.auth` on {@link FastifyAdminPluginOptions} — use bearer, basic, or middleware in production.
+ *
+ * **Auth failure hook:** When {@link AdminRouterOptions.onAuthFailure} is set, `res` in that callback
+ * is the Express-shaped bridge to `reply` (works for typical `status`/`json` usage). `req` is the
+ * raw {@link FastifyRequest} cast to Express `Request` for typing — see {@link AdminRouterOptions.onAuthFailure}.
  *
  * @example
  * ```ts

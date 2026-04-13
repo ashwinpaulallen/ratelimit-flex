@@ -185,7 +185,7 @@ export class MemoryStore implements RateLimitStore {
       this.tokensPerInterval = 0;
       this.refillIntervalMs = 0;
       this.bucketSize = 0;
-      this.cleanupEveryMs = Math.max(1, options.windowMs);
+      this.cleanupEveryMs = Math.max(1, this.windowMs);
     }
 
     this.maxKeys = options.maxKeys === undefined ? 100_000 : Math.max(0, Math.floor(options.maxKeys));
@@ -211,7 +211,7 @@ export class MemoryStore implements RateLimitStore {
    * - **`totalEvictions`**: cumulative LRU evictions (`lru-cap`) since construction; **not** cleared by {@link MemoryStore.resetAll}.
    * - **`activeKeys`**: current `state.size` (distinct keys in the map).
    *
-   * @since 4.1.0
+   * @since 4.0.0
    */
   getMetrics(): { activeKeys: number; totalEvictions: number; maxKeys: number } {
     return {

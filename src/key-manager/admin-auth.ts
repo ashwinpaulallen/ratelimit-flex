@@ -50,8 +50,20 @@ export interface AdminRouterOptions {
   auth: AdminAuthMode;
 
   /**
-   * Optional custom error handler for auth failures. Default: 401 with
-   * { error: 'Unauthorized' }.
+   * Optional handler for **built-in** bearer/basic auth failures (missing or invalid
+   * credentials). Passed to the bearer/basic middleware instead of the default 401 +
+   * `WWW-Authenticate` response. Not used for `auth.type === 'middleware'` — implement
+   * failure responses inside your custom handler.
+   *
+   * **Express (`createAdminRouter`):** `req` and `res` are real Express objects.
+   *
+   * **Fastify (`createFastifyAdminPlugin`):** `res` is a bridge object that forwards to
+   * `FastifyReply` — `res.status(...)`, `res.json(...)`, headers, etc. work as the built-in auth
+   * expects. **`req` is typed as Express `Request` only so the same middleware can run in both
+   * environments; at runtime it is the underlying {@link FastifyRequest} cast.** Do not call
+   * Express-only helpers such as `req.path`, `req.query`, or `req.get()` — they are not present and
+   * may throw or return `undefined`. Prefer handling failures via `res` only, or read portable
+   * fields (e.g. `url`, `headers`) if you need request context.
    */
   onAuthFailure?: (req: Request, res: Response) => void;
 
@@ -86,13 +98,16 @@ export class AdminAuthRequiredError extends Error {
   }
 }
 
-const UNSAFE_NO_AUTH_WARNING =
-  '[ratelimit-flex] KeyManager admin HTTP API is registered with auth mode "unsafe-no-auth". ' +
-    'Anyone who can reach these routes can modify every rate-limited key. Use bearer, basic, or middleware auth in production.';
+/** Shared with {@link createAdminRouter} and the Fastify admin plugin — one message, `stderr`. */
+const UNSAFE_NO_AUTH_STDERR_MESSAGE =
+  '[ratelimit-flex] WARNING: KeyManager admin router mounted with ' +
+    '`unsafe-no-auth`. This exposes block/unblock/reward endpoints ' +
+    'without authentication. Use only for development and tests. ' +
+    'For production, use { type: "bearer" | "basic" | "middleware" }.\n';
 
 export function warnUnsafeNoAuthIfNeeded(auth: AdminAuthMode): void {
   if (auth.type === 'unsafe-no-auth') {
-    console.warn(UNSAFE_NO_AUTH_WARNING);
+    process.stderr.write(UNSAFE_NO_AUTH_STDERR_MESSAGE);
   }
 }
 
@@ -116,61 +131,24 @@ export function extractAdminKeyFromPath(path: string): string | undefined {
   }
 }
 
-/**
- * When {@link AdminRouterOptions.onAuthFailure} is set, intercept the built-in
- * 401 response (`res.end` after `statusCode = 401`) so the custom handler runs instead.
- */
-function wrapWithCustomAuthFailure(
-  core: AdminAuthMiddleware,
-  onFailure: (req: Request, res: Response) => void,
-): AdminAuthMiddleware {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const prevEnd = res.end.bind(res);
-    let delegated401 = false;
-
-    res.end = ((...args: Parameters<typeof res.end>) => {
-      if (res.statusCode === 401 && !delegated401) {
-        delegated401 = true;
-        res.end = prevEnd;
-        onFailure(req, res);
-        return res;
-      }
-      return prevEnd(...args);
-    }) as typeof res.end;
-
-    const wrapNext: NextFunction = (err?: unknown) => {
-      if (!delegated401) {
-        res.end = prevEnd;
-      }
-      next(err);
-    };
-
-    try {
-      const out = core(req, res, wrapNext);
-      if (out !== undefined && typeof (out as Promise<void>).then === 'function') {
-        void (out as Promise<void>).finally(() => {
-          if (!delegated401) {
-            res.end = prevEnd;
-          }
-        });
-      } else if (!res.headersSent && !delegated401) {
-        res.end = prevEnd;
-      }
-    } catch (e) {
-      if (!delegated401) {
-        res.end = prevEnd;
-      }
-      throw e;
-    }
-  };
+function buildResolvedAdminAuthMiddleware(options: AdminRouterOptions): AdminAuthMiddleware {
+  return resolveAdminAuth(options.auth, options.onAuthFailure);
 }
 
 export function createExpressAdminAuthMiddleware(options: AdminRouterOptions): RequestHandler {
-  let core = resolveAdminAuth(options.auth);
-  if (options.onAuthFailure) {
-    core = wrapWithCustomAuthFailure(core, options.onAuthFailure);
-  }
-  return core as RequestHandler;
+  return buildResolvedAdminAuthMiddleware(options) as RequestHandler;
+}
+
+/**
+ * Resolves {@link resolveAdminAuth} once (same as {@link createExpressAdminAuthMiddleware}) and
+ * returns a Fastify `(request, reply)` function. Use this from the Fastify plugin registration path —
+ * do not re-resolve per request.
+ */
+export function createFastifyAdminAuthHandler(
+  options: AdminRouterOptions,
+): (request: FastifyRequest, reply: FastifyReply) => Promise<void> {
+  const core = buildResolvedAdminAuthMiddleware(options);
+  return (request, reply) => runExpressMiddlewareOnFastify(request, reply, core);
 }
 
 export function createExpressAdminAuditMiddleware(options: AdminRouterOptions): RequestHandler {
@@ -302,14 +280,3 @@ async function runExpressMiddlewareOnFastify(
   });
 }
 
-export async function authenticateFastifyRequest(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  options: AdminRouterOptions,
-): Promise<void> {
-  let core = resolveAdminAuth(options.auth);
-  if (options.onAuthFailure) {
-    core = wrapWithCustomAuthFailure(core, options.onAuthFailure);
-  }
-  await runExpressMiddlewareOnFastify(request, reply, core);
-}

@@ -18,7 +18,7 @@ function isMemoryStoreGetMetricsResult(
  * `getMetrics()` returns MemoryStore-shaped data is found — so inner {@link MemoryStore}
  * metrics are visible when the engine store is a shield wrapper.
  *
- * @since 4.1.0
+ * @since 4.0.0
  */
 export function resolveMemoryStoreMetricsSnapshot(store: unknown):
   | Readonly<{

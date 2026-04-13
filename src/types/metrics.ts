@@ -152,7 +152,7 @@ export interface MetricsSnapshot {
    * Per-store metrics. Only present when the backing store exposes MemoryStore-shaped `getMetrics()`
    * (possibly behind InMemoryShield via unwrap).
    *
-   * @since 4.1.0
+   * @since 4.0.0
    */
   readonly store?: {
     readonly activeKeys: number;
@@ -183,7 +183,7 @@ export interface MetricsCollectorOptions {
   /**
    * Engine backing store (same reference as the rate limit engine / middleware `resolved.store`).
    * When it is or unwraps to MemoryStore, `MetricsSnapshot.store` is filled each tick.
-   * @since 4.1.0
+   * @since 4.0.0
    */
   readonly store?: unknown;
 }

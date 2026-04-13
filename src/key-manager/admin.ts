@@ -2,9 +2,10 @@ import express from 'express';
 import type { Request, Response, Router } from 'express';
 import type { KeyManager } from './KeyManager.js';
 import {
-  AdminAuthRequiredError,
+  assertAdminRouterOptions,
   createExpressAdminAuditMiddleware,
   createExpressAdminAuthMiddleware,
+  warnUnsafeNoAuthIfNeeded,
   type AdminRouterOptions,
 } from './admin-auth.js';
 import {
@@ -40,18 +41,9 @@ import {
  * @since 2.2.0
  */
 export function createAdminRouter(keyManager: KeyManager, options: AdminRouterOptions): Router {
-  if (!options || !options.auth) {
-    throw new AdminAuthRequiredError();
-  }
+  assertAdminRouterOptions(options);
 
-  if (options.auth.type === 'unsafe-no-auth') {
-    process.stderr.write(
-      '[ratelimit-flex] WARNING: KeyManager admin router mounted with ' +
-        '`unsafe-no-auth`. This exposes block/unblock/reward endpoints ' +
-        'without authentication. Use only for development and tests. ' +
-        'For production, use { type: "bearer" | "basic" | "middleware" }.\n',
-    );
-  }
+  warnUnsafeNoAuthIfNeeded(options.auth);
 
   const router = express.Router();
   router.use(express.json());

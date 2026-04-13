@@ -78,6 +78,21 @@ describe('resolveAdminAuth — bearer', () => {
     mw({ headers: { authorization: 'Bearer' } } as Request, noSpace.res, () => {});
     expect(noSpace.res.statusCode).toBe(401);
   });
+
+  it('onAuthFailure is used for credential failure instead of default 401 body', () => {
+    const mw = resolveAdminAuth(
+      { type: 'bearer', token: secret },
+      (req, res) => {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: 'custom-auth-failure' }));
+      },
+    );
+    const r = createMockRes();
+    mw({ headers: {} } as Request, r.res, () => {});
+    expect(r.res.statusCode).toBe(403);
+    expect(r.body).toEqual({ error: 'custom-auth-failure' });
+    expect(r.headers['www-authenticate']).toBeUndefined();
+  });
 });
 
 describe('resolveAdminAuth — basic', () => {

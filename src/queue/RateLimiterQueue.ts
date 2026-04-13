@@ -2,7 +2,10 @@ import type { RateLimitStore } from '../types/index.js';
 import { RateLimitStrategy } from '../types/index.js';
 import { ShutdownError } from './errors.js';
 
-/** Minimum delay before retrying drain when head is blocked (avoids tight spin). */
+/**
+ * Minimum delay (ms) before retrying the internal drain loop when the queue head is blocked
+ * (avoids tight spin). Reused as the polling step in {@link RateLimiterQueue.shutdown}.
+ */
 const MIN_BLOCK_RETRY_DELAY_MS = 10;
 
 /**
@@ -142,6 +145,12 @@ export class RateLimiterQueue {
 
   private isShutdown = false;
 
+  /**
+   * Count of queue entries removed by the max-queue-time timer during shutdown (excluded from
+   * {@link shutdown} `drained`). Reset after drain accounting and on redundant {@link shutdown} calls.
+   */
+  private shutdownQueueTimeoutUnlinks = 0;
+
   private readonly ownsStore: boolean;
 
   /**
@@ -202,6 +211,9 @@ export class RateLimiterQueue {
    * is blocked (waiting for capacity), subsequent requests for key "B" also wait, even if "B"
    * has capacity. For independent keys, create separate queues.
    *
+   * **After {@link shutdown} has started:** rejects immediately with {@link ShutdownError}; waiters
+   * already in the queue are handled as described in {@link shutdown}.
+   *
    * @param key - The rate limit key (e.g. IP, API key, user ID)
    * @param cost - Number of tokens to consume (default: 1)
    *
@@ -242,6 +254,9 @@ export class RateLimiterQueue {
           const removed = this.unlink(entry);
           entry.timer = null;
           if (removed) {
+            if (this.isShutdown) {
+              this.shutdownQueueTimeoutUnlinks++;
+            }
             entry.reject(new RateLimiterQueueError('Queue timeout exceeded', 'queue_timeout'));
             if (wasHead && this.drainTimer !== null) {
               this.clearDrainTimer();
@@ -314,13 +329,19 @@ export class RateLimiterQueue {
   }
 
   /**
-   * Gracefully shut down the queue. Rejects all pending requests with {@link ShutdownError} so
-   * callers can handle them (e.g. **503** in HTTP middleware). After shutdown, {@link removeTokens}
-   * rejects immediately with {@link ShutdownError}.
+   * Gracefully shut down the queue. Once shutdown begins, {@link removeTokens} rejects **new**
+   * requests immediately with {@link ShutdownError} (including while this method is still
+   * awaiting the drain window)—incoming work is turned away while the queue drains. Waiters
+   * **already enqueued** keep being processed by the internal drain loop and may still **resolve
+   * successfully** during the **`drainTimeoutMs`** grace period (best-effort). When that window ends,
+   * any waiters still in the FIFO are rejected with {@link ShutdownError} so callers can handle
+   * them (e.g. **503** in HTTP middleware). After {@link shutdown} returns, {@link removeTokens}
+   * continues to reject immediately for the lifetime of this instance.
    *
    * **Idempotent** — safe to call from multiple signal handlers.
    *
-   * **`drainTimeoutMs`** is best-effort: this implementation polls every **10ms** until the deadline.
+   * **`drainTimeoutMs`** is best-effort: this implementation polls every **`MIN_BLOCK_RETRY_DELAY_MS`**
+   *   (same as the minimum drain block-retry delay) until the deadline.
    * Slow handlers may still leave work in the queue; remaining entries are then rejected. Do not
    * assume a full drain just because the timeout is large.
    *
@@ -330,14 +351,21 @@ export class RateLimiterQueue {
    * @param options.drainTimeoutMs — Wait up to this many ms for entries to complete via the normal
    *   drain path before rejecting the rest. **Default: 0** (reject queued waiters immediately).
    * @param options.reason — Passed to {@link ShutdownError} for each rejected waiter.
+   *
+   * @returns **`rejected`** — waiters still queued when the drain window ends, rejected with
+   *   {@link ShutdownError}. **`drained`** — entries that acquired capacity via the normal
+   *   {@link drain} path during shutdown; entries that leave due to {@link RateLimiterQueueOptions.maxQueueTimeMs}
+   *   (`queue_timeout`) are not included.
    */
   async shutdown(options: { drainTimeoutMs?: number; reason?: string } = {}): Promise<{
     rejected: number;
     drained: number;
   }> {
     if (this.isShutdown) {
+      this.shutdownQueueTimeoutUnlinks = 0;
       return { rejected: 0, drained: 0 };
     }
+    this.shutdownQueueTimeoutUnlinks = 0;
     this.isShutdown = true;
 
     const reason = options.reason ?? 'shutdown';
@@ -348,18 +376,19 @@ export class RateLimiterQueue {
     void this.drain();
 
     if (drainTimeoutMs > 0 && this.queueLength > 0) {
-      const maxPolls = Math.max(1, Math.ceil(drainTimeoutMs / 10));
+      const maxPolls = Math.max(1, Math.ceil(drainTimeoutMs / MIN_BLOCK_RETRY_DELAY_MS));
       for (let i = 0; i < maxPolls && this.queueLength > 0; i++) {
         await new Promise<void>((resolve) => {
-          setTimeout(resolve, 10);
+          setTimeout(resolve, MIN_BLOCK_RETRY_DELAY_MS);
         });
         void this.drain();
       }
     }
 
-    const drained = lenAtStart - this.queueLength;
+    const drained = Math.max(0, lenAtStart - this.queueLength - this.shutdownQueueTimeoutUnlinks);
     const rejected = this.queueLength;
     this.clearPending(err);
+    this.shutdownQueueTimeoutUnlinks = 0;
 
     if (this.ownsStore) {
       await this.store.shutdown();

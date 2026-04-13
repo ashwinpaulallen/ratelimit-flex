@@ -1,7 +1,6 @@
 import { createRateLimiterQueue, type CreateRateLimiterQueueOptions } from './createRateLimiterQueue.js';
 import { ShutdownError } from './errors.js';
 import type { RateLimiterQueue, RateLimiterQueueResult } from './RateLimiterQueue.js';
-import { sanitizeRateLimitCap } from '../utils/clamp.js';
 
 /**
  * Options for {@link KeyedRateLimiterQueue}: same as {@link createRateLimiterQueue}, plus a hard cap on
@@ -13,9 +12,27 @@ export interface KeyedRateLimiterQueueOptions extends CreateRateLimiterQueueOpti
    * {@link KeyedRateLimiterQueue.removeTokens}). When exceeded, the **least-recently-used** inner queue is
    * {@link RateLimiterQueue.shutdown | shut down} and removed before creating a new one.
    *
+   * **`0` = unlimited** (no LRU eviction of inner queues), matching {@link MemoryStoreOptions.maxKeys}.
+   * Negative values are clamped to `0` the same way as MemoryStore.
+   *
    * @default 1000
    */
   maxKeys?: number;
+}
+
+/** @default 1000 when `raw` is `undefined` or non-finite. `0` = unlimited (no LRU eviction). */
+function sanitizeKeyedPoolMaxKeys(raw: number | undefined): number {
+  if (raw === undefined) {
+    return 1000;
+  }
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return 1000;
+  }
+  const n = Math.max(0, Math.floor(raw));
+  if (n === 0) {
+    return 0;
+  }
+  return Math.min(n, Number.MAX_SAFE_INTEGER);
 }
 
 /**
@@ -47,7 +64,7 @@ export class KeyedRateLimiterQueue {
   constructor(options: KeyedRateLimiterQueueOptions) {
     const { maxKeys, ...base } = options;
     this.base = base;
-    this.maxKeys = sanitizeRateLimitCap(maxKeys ?? 1000, 1000);
+    this.maxKeys = sanitizeKeyedPoolMaxKeys(maxKeys);
   }
 
   /**
@@ -65,7 +82,7 @@ export class KeyedRateLimiterQueue {
       return existing;
     }
 
-    while (this.map.size >= this.maxKeys) {
+    while (this.maxKeys > 0 && this.map.size >= this.maxKeys) {
       const oldest = this.map.keys().next().value as string | undefined;
       if (oldest === undefined) {
         break;
@@ -95,7 +112,7 @@ export class KeyedRateLimiterQueue {
     return this.map.size;
   }
 
-  /** Max keys this pool was configured with. */
+  /** Max keys this pool was configured with (`0` = unlimited). */
   getMaxKeys(): number {
     return this.maxKeys;
   }

@@ -75,6 +75,34 @@ describe('RateLimiterQueue.shutdown', () => {
     await store.shutdown();
   });
 
+  it('does not count queue_timeout exits as drained during shutdown', async () => {
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const store = slidingStore(1, 100_000);
+    const q = new RateLimiterQueue(store, { windowMs: 100_000, maxRequests: 1 }, {
+      ownsStore: false,
+      maxQueueTimeMs: 300,
+    });
+
+    await q.removeTokens('k');
+    const w1 = q.removeTokens('k');
+    const w2 = q.removeTokens('k');
+    void w1.catch(() => {});
+    void w2.catch(() => {});
+    await flushMicrotasks();
+    expect(q.getQueueSize()).toBe(2);
+
+    const pShut = q.shutdown({ drainTimeoutMs: 2000 });
+    await vi.advanceTimersByTimeAsync(300);
+    const out = await pShut;
+
+    expect(out.drained).toBe(0);
+    expect(out.rejected).toBe(0);
+    await expect(w1).rejects.toMatchObject({ code: 'queue_timeout' });
+    await expect(w2).rejects.toMatchObject({ code: 'queue_timeout' });
+
+    await store.shutdown();
+  });
+
   it('drainTimeoutMs is best-effort: some complete, remainder rejected', async () => {
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const store = slidingStore(1, 500);

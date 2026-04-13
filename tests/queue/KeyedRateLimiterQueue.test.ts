@@ -31,6 +31,26 @@ describe('KeyedRateLimiterQueue', () => {
     await keyed.shutdown();
   });
 
+  it('maxKeys: 0 is unlimited — no LRU eviction (MemoryStore parity)', async () => {
+    const keyed = new KeyedRateLimiterQueue({
+      maxRequests: 1,
+      windowMs: 60_000,
+      strategy: RateLimitStrategy.FIXED_WINDOW,
+      maxKeys: 0,
+    });
+    expect(keyed.getMaxKeys()).toBe(0);
+    const shutdownSpies: ReturnType<typeof vi.spyOn>[] = [];
+    for (let i = 0; i < 50; i++) {
+      const q = keyed.forKey(`k${i}`);
+      shutdownSpies.push(vi.spyOn(q, 'shutdown'));
+    }
+    expect(keyed.getKeyCount()).toBe(50);
+    for (const s of shutdownSpies) {
+      expect(s).not.toHaveBeenCalled();
+    }
+    await keyed.shutdown();
+  });
+
   it('touching a key refreshes LRU order', async () => {
     const keyed = new KeyedRateLimiterQueue({
       maxRequests: 1,
