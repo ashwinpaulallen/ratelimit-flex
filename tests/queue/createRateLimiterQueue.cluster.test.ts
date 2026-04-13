@@ -85,6 +85,7 @@ describe('createRateLimiterQueue + ClusterStore (mock IPC)', () => {
       maxRequests: 2,
       windowMs: 60_000,
       store,
+      ownsStore: true,
     });
 
     const p = q.removeTokens('job-key');
@@ -113,7 +114,7 @@ describe('createRateLimiterQueue + ClusterStore (mock IPC)', () => {
     const r = await p;
     expect(r.remaining).toBe(1);
 
-    q.shutdown();
+    const pShut = q.shutdown();
     await flushMicrotasks();
     const shutdownMsg = [...sendMock.mock.calls]
       .map((c) => c[0] as { type?: string; id?: string })
@@ -129,5 +130,6 @@ describe('createRateLimiterQueue + ClusterStore (mock IPC)', () => {
       error: 'shutdown',
     });
     await flushMicrotasks();
+    await pShut;
   });
 });

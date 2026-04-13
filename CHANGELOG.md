@@ -2,40 +2,84 @@
 
 All notable changes to this project are documented in this file.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
 ## [4.0.0] - 2026-04-13
 
 ### Changed — BREAKING
 
 - `createAdminRouter(keyManager)` now requires an `options.auth` argument.
-  Unauthenticated admin routes are no longer possible by default.
-  See README for migration. This change is motivated by the real-world
-  security impact of unauthenticated admin APIs in rate-limiting libraries.
+  Unauthenticated admin routes are no longer possible. Existing code must
+  add an explicit `auth` option. See README "Admin API authentication" for
+  migration details.
+- `MemoryStore` now enforces a default `maxKeys` of 100,000. Deployments
+  that legitimately tracked more than 100,000 concurrent keys will start
+  seeing LRU eviction of the oldest entries. Set `maxKeys: 0` to restore
+  unbounded behavior if needed (not recommended).
+- Calling methods on a shutdown `RateLimiterQueue` now throws `ShutdownError`
+  instead of hanging indefinitely.
 
 ### Added
 
 - `AdminAuthMode` discriminated union: `bearer`, `basic`, `middleware`,
-  `unsafe-no-auth`
-- Built-in timing-safe bearer and basic auth implementations
-- `onAdminAction` audit log callback
-- `AdminAuthRequiredError` thrown at construction time when auth is omitted
-- **`MemoryStore` key-cap / LRU:** distinct keys are bounded in one in-memory map (default
-  **`maxKeys` 100,000**; **`0`** = unlimited). LRU move-to-end on access; oldest key evicted when
-  full. Optional **`onEvict(key, 'lru-cap' | 'expired')`**. **`getMetrics()`** returns
-  **`{ activeKeys, totalEvictions, maxKeys }`** (eviction counter is lifetime per instance;
-  **`resetAll()`** does not reset it).
-- **Metrics — MemoryStore observability:** **`MetricsSnapshot.store`** when the engine backing
-  store is or unwraps to **`MemoryStore`** (including behind **`InMemoryShield`** via
-  **`COMPOSED_UNWRAP`**). **`MetricsManager(config, shield?, store)`** and middleware pass
-  **`resolved.store`** so snapshots and exporters stay wired without extra setup. **Prometheus**
-  text and registry: **`ratelimit_store_active_keys`**, **`ratelimit_store_total_evictions`**,
-  **`ratelimit_store_max_keys`** with label **`store="memory"`**. **OpenTelemetry:** matching
-  observable gauges.
+  `unsafe-no-auth`. Built-in timing-safe bearer and basic auth.
+- `onAdminAction` audit log callback on `createAdminRouter`.
+- `AdminAuthRequiredError` thrown at construction time when auth is omitted.
+- `MemoryStoreOptions.maxKeys` — cap on distinct tracked keys with LRU
+  eviction. Default: 100,000. Set to 0 to disable.
+- `MemoryStoreOptions.onEvict` — callback fired on eviction with
+  `(key, reason)` where reason is `'lru-cap'` or `'expired'`.
+- `MemoryStore.getMetrics()` — `{ activeKeys, totalEvictions, maxKeys }`.
+- Store metrics exposed through `MetricsSnapshot.store` and
+  Prometheus/OpenTelemetry adapters as `ratelimit_store_active_keys`,
+  `ratelimit_store_total_evictions`, `ratelimit_store_max_keys`.
+- `RateLimiterQueue.shutdown({ drainTimeoutMs, reason })` — graceful
+  queue drain with configurable timeout. Returns `{ rejected, drained }`.
+- `KeyedRateLimiterQueue.shutdown()` — aggregates shutdown across inner
+  queues.
+- `ShutdownError` class with `code: 'E_RATELIMIT_SHUTDOWN'`.
+- Express, Fastify, and Hono queued middleware map `ShutdownError` to
+  503 responses with `Retry-After` header during shutdown.
+- Fastify queued plugin automatically calls `queue.shutdown()` on `onClose`.
+
+### Migration guide
+
+**Admin router:**
+
+```typescript
+// v3.3.x
+createAdminRouter(keyManager);
+
+// v4.0.0
+createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+});
+```
+
+**MemoryStore with very high key cardinality:**
+
+```typescript
+// v3.3.x (implicit unbounded)
+new MemoryStore({ strategy, windowMs, maxRequests });
+
+// v4.0.0 — opt in to unbounded if you really need it
+new MemoryStore({ strategy, windowMs, maxRequests, maxKeys: 0 });
+
+// Recommended: tune the cap instead of disabling it
+new MemoryStore({ strategy, windowMs, maxRequests, maxKeys: 500_000 });
+```
+
+**Queue shutdown:**
+
+No code changes required — existing `queue.shutdown()` calls (if any)
+continue to work. New behavior: the method now actually drains pending
+requests with 503 responses instead of dropping them silently.
 
 ### Documentation
 
-- **README — Security:** **Operational limits** — key cardinality protection, **`maxKeys`** tuning,
-  **`totalEvictions` / Prometheus** monitoring (`ratelimit_store_*{store="memory"}`), and
-  **`keyGenerator`** / storage key hygiene.
+- **README:** v4.0.0 breaking changes callout; **Security** — operational
+  limits, `maxKeys` tuning, `totalEvictions` / Prometheus (`ratelimit_store_*{store="memory"}`),
+  `keyGenerator` / storage key hygiene.
 
 ## [3.3.0] - 2026-04-09
 

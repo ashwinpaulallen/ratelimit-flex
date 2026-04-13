@@ -199,6 +199,7 @@ export {
   createRateLimiterQueue,
   type CreateRateLimiterQueueOptions,
 } from './queue/createRateLimiterQueue.js';
+export { ShutdownError } from './queue/errors.js';
 export {
   RateLimiterQueue,
   RateLimiterQueueError,

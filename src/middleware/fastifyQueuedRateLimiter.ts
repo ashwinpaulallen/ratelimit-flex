@@ -7,8 +7,9 @@ import {
   resolveHeaderConfig,
   resolveWindowMsForHeaders,
 } from '../headers/index.js';
+import { ShutdownError } from '../queue/errors.js';
 import { RateLimiterQueue, RateLimiterQueueError } from '../queue/RateLimiterQueue.js';
-import { resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
+import { queuedShutdownErrorJson, resolveCost, retryAfterSeconds } from '../queue/queue-middleware-utils.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import { RateLimitStrategy, type RateLimitOptions } from '../types/index.js';
 import { getLimit, jsonErrorBody, mergeRateLimiterOptions } from './merge-options.js';
@@ -59,17 +60,23 @@ const plugin: FastifyPluginAsync<QueuedRateLimiterOptions> = async (fastify, opt
     {
       maxQueueSize,
       maxQueueTimeMs,
+      ownsStore: false,
     },
   );
 
   fastify.decorate('rateLimitQueue', queue);
 
   fastify.addHook('onClose', async () => {
-    queue.shutdown();
+    const drainTimeoutMs = fastify.server?.keepAliveTimeout ?? 5_000;
+    await queue.shutdown({
+      drainTimeoutMs,
+      reason: 'fastify-close',
+    });
   });
 
   const keyGen = options.keyGenerator ?? defaultKeyGenerator;
   const statusCode = options.statusCode ?? 429;
+  const shutdownRetryAfterSeconds = options.shutdownRetryAfterSeconds ?? 10;
 
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     let key: string;
@@ -113,6 +120,12 @@ const plugin: FastifyPluginAsync<QueuedRateLimiterOptions> = async (fastify, opt
         current: Math.max(0, limit - result.remaining),
       };
     } catch (err: unknown) {
+      if (err instanceof ShutdownError) {
+        const msg = typeof options.message === 'object' || typeof options.message === 'string' ? options.message : undefined;
+        const body = queuedShutdownErrorJson(err, msg);
+        await reply.code(503).header('Retry-After', String(shutdownRetryAfterSeconds)).send(body);
+        return;
+      }
       if (err instanceof RateLimiterQueueError) {
         const retrySec = retryAfterSeconds(err, maxQueueTimeMs);
         const body = options.message ?? err.message;
@@ -133,7 +146,9 @@ const plugin: FastifyPluginAsync<QueuedRateLimiterOptions> = async (fastify, opt
  * This is typically fine for HTTP middleware (one queue per route), but be aware if using custom
  * `keyGenerator` with many different keys.
  *
- * @description Registers `onRequest` and decorates the instance with **`rateLimitQueue`**. Import from `ratelimit-flex/fastify`.
+ * @description Registers `onRequest`, decorates the instance with **`rateLimitQueue`**, and on **`onClose`** calls
+ * **`queue.shutdown({ drainTimeoutMs: server.keepAliveTimeout ?? 5000, reason: 'fastify-close' })`** so pending
+ * token waits are rejected with **`ShutdownError`** (**503**). Import from `ratelimit-flex/fastify`.
  * @see {@link expressQueuedRateLimiter}
  * @see {@link RateLimiterQueueOptions} for head-of-line blocking details
  * @since 1.4.2

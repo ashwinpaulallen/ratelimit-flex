@@ -73,6 +73,7 @@ import {
   RateLimitEngine,
   RateLimiterQueue,
   RateLimiterQueueError,
+  ShutdownError,
   singleInstancePreset,
   shield,
   slidingWindowDefaults,
@@ -111,28 +112,30 @@ describe('package exports', () => {
     expect(typeof out.express).toBe('function');
   });
 
-  it('exports createRateLimiterQueue for non-HTTP use', () => {
+  it('exports createRateLimiterQueue for non-HTTP use', async () => {
     expect(typeof createRateLimiterQueue).toBe('function');
     const q = createRateLimiterQueue({ maxRequests: 1, windowMs: 60_000 });
     expect(typeof q.removeTokens).toBe('function');
-    q.shutdown();
+    await q.shutdown();
   });
 
-  it('exports KeyedRateLimiterQueue', () => {
+  it('exports KeyedRateLimiterQueue', async () => {
     expect(typeof KeyedRateLimiterQueue).toBe('function');
     const k = new KeyedRateLimiterQueue({ maxRequests: 1, windowMs: 60_000, maxKeys: 2 });
     expect(typeof k.forKey).toBe('function');
-    k.shutdown();
+    await k.shutdown();
   });
 
   it('exports expressQueuedRateLimiter and RateLimiterQueue surface', () => {
     expect(typeof expressQueuedRateLimiter).toBe('function');
     expect(typeof RateLimiterQueue).toBe('function');
     expect(typeof RateLimiterQueueError).toBe('function');
-    
+    expect(typeof ShutdownError).toBe('function');
+
     // Verify error code type is exported (compile-time check via usage)
     const err = new RateLimiterQueueError('test', 'queue_full');
     expect(err.code).toBe('queue_full');
+    expect(new ShutdownError('x').code).toBe('E_RATELIMIT_SHUTDOWN');
   });
 
   it('exports engine and key generator', () => {

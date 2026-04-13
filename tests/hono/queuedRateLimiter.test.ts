@@ -150,6 +150,52 @@ describe('queuedRateLimiter (Hono)', () => {
     expect(r.headers.get('retry-after')).toBe('1');
   });
 
+  it('returns 503 with HTTPException body and E_RATELIMIT_SHUTDOWN when the queue is shut down', async () => {
+    const app = new Hono();
+    const mw = queuedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      maxQueueSize: 10,
+      standardHeaders: false,
+      keyGenerator: () => 'shutdown-hono',
+    });
+    app.use('*', mw);
+    app.get('/ok', (c) => c.text('ok'));
+
+    await app.request('http://test/ok');
+    const pending = app.request('http://test/ok');
+    await new Promise<void>((r) => setImmediate(r));
+    await mw.queue.shutdown({ reason: 'test' });
+    const r = await pending;
+
+    expect(r.status).toBe(503);
+    const body = (await r.json()) as { error: string; code: string };
+    expect(body.code).toBe('E_RATELIMIT_SHUTDOWN');
+    expect(body.error).toBe('Service shutting down');
+    expect(r.headers.get('retry-after')).toBe('10');
+  });
+
+  it('sets Retry-After from shutdownRetryAfterSeconds on shutdown 503', async () => {
+    const app = new Hono();
+    const mw = queuedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: 1,
+      maxQueueSize: 10,
+      standardHeaders: false,
+      shutdownRetryAfterSeconds: 4,
+      keyGenerator: () => 'shutdown-retry-hono',
+    });
+    app.use('*', mw);
+    app.get('/ok', (c) => c.text('ok'));
+
+    await app.request('http://test/ok');
+    const pending = app.request('http://test/ok');
+    await new Promise<void>((r) => setImmediate(r));
+    await mw.queue.shutdown({ reason: 'test' });
+    const r = await pending;
+    expect(r.headers.get('retry-after')).toBe('4');
+  });
+
   it('exposes the underlying queue on the handler', () => {
     const mw = queuedRateLimiter({
       windowMs: 1000,

@@ -12,7 +12,7 @@ describe('KeyedRateLimiterQueue', () => {
     });
     await expect(keyed.removeTokens('a', 'a')).resolves.toBeDefined();
     await expect(keyed.removeTokens('b', 'b')).resolves.toBeDefined();
-    keyed.shutdown();
+    await keyed.shutdown();
   });
 
   it('evicts LRU when maxKeys exceeded and shuts down evicted queue', async () => {
@@ -28,7 +28,7 @@ describe('KeyedRateLimiterQueue', () => {
     keyed.forKey('k3');
     expect(keyed.getKeyCount()).toBe(2);
     expect(spy).toHaveBeenCalledTimes(1);
-    keyed.shutdown();
+    await keyed.shutdown();
   });
 
   it('touching a key refreshes LRU order', async () => {
@@ -44,6 +44,6 @@ describe('KeyedRateLimiterQueue', () => {
     const spyB = vi.spyOn(qb, 'shutdown');
     keyed.forKey('c');
     expect(spyB).toHaveBeenCalledTimes(1);
-    keyed.shutdown();
+    await keyed.shutdown();
   });
 });

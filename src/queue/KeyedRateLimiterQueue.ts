@@ -1,4 +1,5 @@
 import { createRateLimiterQueue, type CreateRateLimiterQueueOptions } from './createRateLimiterQueue.js';
+import { ShutdownError } from './errors.js';
 import type { RateLimiterQueue, RateLimiterQueueResult } from './RateLimiterQueue.js';
 import { sanitizeRateLimitCap } from '../utils/clamp.js';
 
@@ -41,6 +42,8 @@ export class KeyedRateLimiterQueue {
 
   private readonly map = new Map<string, RateLimiterQueue>();
 
+  private isShutdown = false;
+
   constructor(options: KeyedRateLimiterQueueOptions) {
     const { maxKeys, ...base } = options;
     this.base = base;
@@ -52,6 +55,9 @@ export class KeyedRateLimiterQueue {
    * When at capacity, evicts the LRU queue and calls its {@link RateLimiterQueue.shutdown}.
    */
   forKey(queueKey: string): RateLimiterQueue {
+    if (this.isShutdown) {
+      throw new ShutdownError('queue-shutdown');
+    }
     const existing = this.map.get(queueKey);
     if (existing !== undefined) {
       this.map.delete(queueKey);
@@ -66,7 +72,9 @@ export class KeyedRateLimiterQueue {
       }
       const q = this.map.get(oldest);
       this.map.delete(oldest);
-      q?.shutdown();
+      void q?.shutdown().catch(() => {
+        /* ignore */
+      });
     }
 
     const created = createRateLimiterQueue(this.base);
@@ -76,6 +84,9 @@ export class KeyedRateLimiterQueue {
 
   /** Convenience: `forKey(queueKey).removeTokens(rateLimitKey, cost)`. */
   removeTokens(queueKey: string, rateLimitKey: string, cost?: number): Promise<RateLimiterQueueResult> {
+    if (this.isShutdown) {
+      return Promise.reject(new ShutdownError('queue-shutdown'));
+    }
     return this.forKey(queueKey).removeTokens(rateLimitKey, cost);
   }
 
@@ -90,12 +101,33 @@ export class KeyedRateLimiterQueue {
   }
 
   /**
-   * Shuts down every inner queue (and each backing store created by {@link createRateLimiterQueue}).
+   * Shuts down every inner queue (each inner store is shut down only when that queue owns it —
+   * same as {@link createRateLimiterQueue}).
    */
-  shutdown(): void {
-    for (const q of this.map.values()) {
-      q.shutdown();
+  async shutdown(options: { drainTimeoutMs?: number; reason?: string } = {}): Promise<{
+    rejected: number;
+    drained: number;
+  }> {
+    if (this.isShutdown) {
+      return { rejected: 0, drained: 0 };
     }
+    this.isShutdown = true;
+
+    const queues = Array.from(this.map.values());
     this.map.clear();
+
+    const results = await Promise.all(
+      queues.map((q) =>
+        q.shutdown(options).catch(() => ({
+          rejected: 0,
+          drained: 0,
+        })),
+      ),
+    );
+
+    return {
+      rejected: results.reduce((sum, r) => sum + r.rejected, 0),
+      drained: results.reduce((sum, r) => sum + r.drained, 0),
+    };
   }
 }

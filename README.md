@@ -9,6 +9,8 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 
+> **v4.0.0 breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
+
 ## Features
 
 - **Three algorithms:** **Sliding window**, **Token bucket**, **Fixed window** — implemented across **`MemoryStore`**, **`RedisStore`** (Lua), **`PgStore`**, **`MongoStore`** (exact for all strategies), and **`DynamoStore`** (exact fixed window & token bucket; sliding window uses a weighted approximation on DynamoDB — see [docs/stores/dynamo.md](docs/stores/dynamo.md))
@@ -390,15 +392,15 @@ process.on('SIGTERM', async () => {
 // Queued rate limiter (wait instead of reject)
 import { queuedRateLimiter } from 'ratelimit-flex/hono';
 
-app.use(
-  '/api/*',
-  queuedRateLimiter({
-    maxRequests: 10,
-    windowMs: 60_000,
-    maxQueueSize: 50,
-    maxQueueTimeMs: 30_000,
-  }),
-);
+const apiLimiter = queuedRateLimiter({
+  maxRequests: 10,
+  windowMs: 60_000,
+  maxQueueSize: 50,
+  maxQueueTimeMs: 30_000,
+});
+app.use('/api/*', apiLimiter);
+// Graceful shutdown: await apiLimiter.queue.shutdown({ drainTimeoutMs: 10_000, reason: 'server-shutdown' })
+// or await apiLimiter.shutdown() — see “Request queuing” for Node/Bun/Workers notes.
 
 // WebSocket rate limiting
 import { webSocketLimiter } from 'ratelimit-flex/hono';
@@ -594,8 +596,8 @@ This logs a warning at construction time. **Never use this in production.**
 #### Migration from v3.3.x
 
 ```typescript
-// Before (v3.3.x — no auth required by default)
-app.use('/admin/ratelimit', createAdminRouter(keyManager));
+// Before (v3.3.x — no auth required by default; invalid in v4)
+// createAdminRouter(keyManager)
 
 // After (v4.0.0 — explicit auth required)
 app.use('/admin/ratelimit', createAdminRouter(keyManager, {
@@ -607,11 +609,11 @@ Existing deployments that already wrap the admin router with their own
 `authMiddleware` can use `type: 'middleware'`:
 
 ```typescript
-// Before
-app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
+// Before (v3.3.x)
+// app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
 
-// After — either leave the outer middleware (works but auth is checked twice
-// for defense in depth) OR move it into the admin router:
+// After — either keep the outer middleware (auth checked twice for defense in
+// depth) or move it into the admin router:
 app.use('/admin/ratelimit', createAdminRouter(keyManager, {
   auth: { type: 'middleware', handler: authMiddleware },
 }));
@@ -948,6 +950,58 @@ await app.register(fastifyQueuedRateLimiter, {
   maxQueueTimeMs: 30_000,
 });
 ```
+
+### Graceful shutdown
+
+Rate limiter queues expose a `shutdown({ drainTimeoutMs, reason })` method
+that gracefully rejects pending requests during process termination.
+
+**Express:**
+
+```typescript
+const limiter = expressQueuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
+app.use(limiter);
+
+process.on('SIGTERM', async () => {
+  const result = await limiter.queue.shutdown({ drainTimeoutMs: 10_000 });
+  console.log(`Queue drained: ${result.drained}, rejected: ${result.rejected}`);
+  await server.close();
+});
+```
+
+**Fastify:**
+
+Fastify's `onClose` hook automatically calls `queue.shutdown()` when the
+server closes. No manual wiring needed.
+
+```typescript
+await app.register(fastifyQueuedRateLimiter, {
+  maxRequests: 10,
+  windowMs: 60_000,
+});
+// queue is drained automatically on app.close()
+```
+
+**Hono:**
+
+```typescript
+import { Hono } from 'hono';
+import { queuedRateLimiter } from 'ratelimit-flex/hono';
+
+const app = new Hono();
+const limiter = queuedRateLimiter({ maxRequests: 10, windowMs: 60_000 });
+app.use('*', limiter);
+
+// On Cloudflare Workers, there's no process shutdown — the queue drains
+// when the worker instance is evicted. On Node/Bun, call shutdown manually:
+process.on('SIGTERM', async () => {
+  await limiter.queue.shutdown({ drainTimeoutMs: 5_000 });
+});
+```
+
+Requests rejected during shutdown receive a **503 Service Unavailable**
+response with `Retry-After: 10`. Clients should retry. The error code
+on the thrown `ShutdownError` is `E_RATELIMIT_SHUTDOWN`.
 
 **Outbound API throttling:**
 ```typescript
