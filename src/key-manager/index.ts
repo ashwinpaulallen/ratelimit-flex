@@ -26,5 +26,9 @@ export {
   linearEscalation,
 } from './strategies.js';
 
-export { createAdminRouter } from './admin-router.js';
+export type { AdminAuthMiddleware, AdminAuthMode, AdminRouterOptions } from './admin-auth.js';
+export { AdminAuthRequiredError } from './admin-auth.js';
+export { resolveAdminAuth } from './admin-auth-middleware.js';
+export { createAdminRouter } from './admin.js';
 export { createFastifyAdminPlugin as fastifyAdminPlugin } from './admin-fastify.js';
+export type { FastifyAdminPluginOptions } from './admin-fastify.js';

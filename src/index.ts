@@ -326,6 +326,8 @@ export function createRateLimiter(options: Partial<RateLimitOptions>): {
  * @since 2.2.0
  */
 export {
+  AdminAuthRequiredError,
+  resolveAdminAuth,
   KeyManager,
   MemoryBlockStore,
   RedisBlockStore,
@@ -338,10 +340,14 @@ export {
   linearEscalation,
 } from './key-manager/index.js';
 export type {
+  AdminAuthMiddleware,
+  AdminAuthMode,
+  AdminRouterOptions,
   AuditEntry,
   BlockReason,
   BlockStore,
   EscalationStrategy,
+  FastifyAdminPluginOptions,
   KeyManagerEvents,
   KeyManagerOptions,
   KeyState,

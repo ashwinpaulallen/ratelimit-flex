@@ -529,15 +529,106 @@ keyManager.on('blocked', ({ key, reason }) => {
 });
 ```
 
-### Admin endpoints
+### Admin API authentication
+
+The admin router is a SECURITY-SENSITIVE surface. Mounting it without
+authentication exposes block/unblock/reward endpoints to every caller on
+the network. **As of v4.0.0, the `auth` option is REQUIRED** — unauthenticated
+admin routes are no longer allowed without an explicit opt-in.
+
+#### Bearer token (recommended for service-to-service)
 
 ```typescript
 import { createAdminRouter } from 'ratelimit-flex';
 
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+}));
+```
+
+#### Basic auth (simple setups)
+
+```typescript
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: {
+    type: 'basic',
+    username: 'admin',
+    password: process.env.ADMIN_PASSWORD!,
+  },
+}));
+```
+
+#### Custom middleware (for JWT, OAuth, existing auth systems)
+
+```typescript
+import { requireAuth } from './my-auth';
+
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'middleware', handler: requireAuth(['admin']) },
+}));
+```
+
+#### Audit logging
+
+```typescript
+createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token },
+  onAdminAction: (action) => {
+    auditLogger.info('admin-action', action);
+  },
+});
+```
+
+#### Development escape hatch
+
+In development or tests where you genuinely don't need auth:
+
+```typescript
+createAdminRouter(keyManager, {
+  auth: { type: 'unsafe-no-auth', acknowledgeRisk: true },
+});
+```
+
+This logs a warning at construction time. **Never use this in production.**
+
+#### Migration from v3.3.x
+
+```typescript
+// Before (v3.3.x — no auth required by default)
+app.use('/admin/ratelimit', createAdminRouter(keyManager));
+
+// After (v4.0.0 — explicit auth required)
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+}));
+```
+
+Existing deployments that already wrap the admin router with their own
+`authMiddleware` can use `type: 'middleware'`:
+
+```typescript
+// Before
 app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
-// GET /admin/ratelimit/keys/:key
-// POST /admin/ratelimit/keys/:key/block
-// etc.
+
+// After — either leave the outer middleware (works but auth is checked twice
+// for defense in depth) OR move it into the admin router:
+app.use('/admin/ratelimit', createAdminRouter(keyManager, {
+  auth: { type: 'middleware', handler: authMiddleware },
+}));
+```
+
+#### Fastify (`fastifyAdminPlugin` / `createFastifyAdminPlugin`)
+
+The Fastify plugin takes a nested `options` object with the same `auth`, `onAdminAction`, and `onAuthFailure` fields:
+
+```typescript
+await app.register(fastifyAdminPlugin, {
+  keyManager,
+  prefix: '/admin/ratelimit',
+  options: {
+    auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
+  },
+});
 ```
 
 ### What `KeyManager` provides
@@ -671,10 +762,6 @@ Rate limit **state** (memory stores, `InMemoryShield` block maps, `KeyManager` b
 ### Lua scripts (`RedisStore`)
 
 All Lua in `RedisStore` is **static source** in the package. Quota and key data are passed only as **`KEYS`** / **`ARGV`** to **`EVAL`**—never build Lua by concatenating user input into the script body.
-
-### Key Manager admin HTTP API
-
-**`createAdminRouter`** (Express) and **`createFastifyAdminPlugin`** expose full control over rate limit and block state. In **production**, mount them **only** behind **authentication**, **authorization**, and ideally **network isolation** (VPN, admin-only ingress). The JSDoc on those factories repeats this warning—treat it as mandatory for exposed deployments.
 
 ## Atomicity & Distributed Systems
 

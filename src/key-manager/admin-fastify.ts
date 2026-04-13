@@ -2,6 +2,12 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import type { KeyManager } from './KeyManager.js';
 import {
+  AdminAuthRequiredError,
+  authenticateFastifyRequest,
+  extractAdminKeyFromPath,
+  type AdminRouterOptions,
+} from './admin-auth.js';
+import {
   adminDeleteKey,
   adminGetAudit,
   adminGetBlocks,
@@ -16,15 +22,63 @@ import {
   resolveActorFromRequest,
 } from './admin-common.js';
 
+/**
+ * Options for {@link createFastifyAdminPlugin} / {@link fastifyAdminPlugin}.
+ *
+ * `options` must include {@link AdminRouterOptions.auth} — there is no default.
+ */
 export interface FastifyAdminPluginOptions {
   keyManager: KeyManager;
+  options: AdminRouterOptions;
   /** Route prefix (e.g. `/admin/ratelimit`). No trailing slash. */
   prefix?: string;
 }
 
-const adminPluginImpl: FastifyPluginAsync<FastifyAdminPluginOptions> = async (fastify, opts) => {
-  const km = opts.keyManager;
-  const prefix = opts.prefix ?? '';
+const adminPluginImpl: FastifyPluginAsync<FastifyAdminPluginOptions> = async (fastify, pluginOpts) => {
+  const opts = pluginOpts.options;
+  if (!opts || !opts.auth) {
+    throw new AdminAuthRequiredError();
+  }
+
+  if (opts.auth.type === 'unsafe-no-auth') {
+    process.stderr.write(
+      '[ratelimit-flex] WARNING: KeyManager admin router mounted with ' +
+        '`unsafe-no-auth`. This exposes block/unblock/reward endpoints ' +
+        'without authentication. Use only for development and tests. ' +
+        'For production, use { type: "bearer" | "basic" | "middleware" }.\n',
+    );
+  }
+
+  fastify.addHook('preHandler', async (request, reply) => {
+    await authenticateFastifyRequest(request, reply, opts);
+  });
+
+  const { onAdminAction } = opts;
+  if (onAdminAction) {
+    fastify.addHook('onResponse', (request, reply, done) => {
+      try {
+        const code = reply.statusCode;
+        if (code >= 200 && code < 400) {
+          const path = request.url.split('?')[0] ?? '';
+          onAdminAction({
+            method: request.method,
+            path,
+            key: extractAdminKeyFromPath(path),
+            actor: resolveActorFromRequest(
+              request as FastifyRequest & { body?: unknown; user?: unknown },
+              request.body as { actor?: string } | undefined,
+            ),
+            timestamp: new Date(),
+          });
+        }
+      } finally {
+        done();
+      }
+    });
+  }
+
+  const km = pluginOpts.keyManager;
+  const prefix = pluginOpts.prefix ?? '';
 
   async function run(
     reply: FastifyReply,
@@ -105,13 +159,14 @@ const adminPluginImpl: FastifyPluginAsync<FastifyAdminPluginOptions> = async (fa
  * Fastify plugin registering the same admin routes as {@link createAdminRouter}.
  *
  * ⚠️ **Security Warning:** These endpoints provide full control over rate limit state.
- * Always register behind authentication hooks to prevent unauthorized access.
+ * You must pass `options.auth` on {@link FastifyAdminPluginOptions} — use bearer, basic, or middleware in production.
  *
  * @example
  * ```ts
  * await app.register(createFastifyAdminPlugin, {
  *   prefix: '/admin/ratelimit',
  *   keyManager: limiter.keyManager!,
+ *   options: { auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! } },
  * });
  * ```
  * @since 2.2.0

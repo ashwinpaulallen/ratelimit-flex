@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [4.0.0] - 2026-04-13
+
+### Changed — BREAKING
+
+- `createAdminRouter(keyManager)` now requires an `options.auth` argument.
+  Unauthenticated admin routes are no longer possible by default.
+  See README for migration. This change is motivated by the real-world
+  security impact of unauthenticated admin APIs in rate-limiting libraries.
+
+### Added
+
+- `AdminAuthMode` discriminated union: `bearer`, `basic`, `middleware`,
+  `unsafe-no-auth`
+- Built-in timing-safe bearer and basic auth implementations
+- `onAdminAction` audit log callback
+- `AdminAuthRequiredError` thrown at construction time when auth is omitted
 
 ## [3.3.0] - 2026-04-09
 
