@@ -27,10 +27,6 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API
 - **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes
 
-### Comparison with rate-limiter-flexible
-
-- **Store backends:** [rate-limiter-flexible](https://github.com/animir/node-rate-limiter-flexible) ships more drivers (Memcached, MySQL, SQLite, Etcd, Prisma, Drizzle, and others). **ratelimit-flex** focuses on fewer, high-traffic integrations: **Redis**, **PostgreSQL**, **MongoDB**, and **DynamoDB**, each with atomic window semantics (where the datastore allows) and shared test coverage.
-
 ## Table of Contents
 
 - [Installation](#installation)
