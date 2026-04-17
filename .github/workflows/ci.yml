@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fails the job if the advisory database reports unresolved issues at or
+      # above moderate (low is often noisy or disputed).
+      - name: npm audit
+        run: npm audit --audit-level=moderate
+
   test:
     runs-on: ubuntu-latest
     strategy:

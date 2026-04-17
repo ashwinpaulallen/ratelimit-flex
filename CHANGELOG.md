@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.1.0] - 2026-04-17
+
+### Changed — BREAKING
+
+- **`engines.node`** is now **`>=20.19.0`** (was `>=20`). This matches the
+  minimum Node version required by **`mongodb` driver v7**, which this repo
+  uses for development and integration tests of `MongoStore`. Installations
+  on Node 20.0–20.18 may fail `engines` checks with strict mode; upgrade Node
+  or stay on **4.0.x** if you cannot move yet. Optional peer **`mongodb` `>=5`**
+  is unchanged for consumers.
+
+### Development
+
+- **TypeScript** **6.0.x** (from 5.9.x); **`typescript-eslint`** **8.58.x**
+  aligned with ESLint 10.2 and TypeScript 6.
+- **`mongodb`** dev dependency **7.x** (from 6.x), deduped with
+  **`mongodb-memory-server`** in the lockfile.
+- Refreshed dev dependency lower bounds: **AWS SDK for JavaScript v3**
+  (`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`) **3.1031.x**;
+  **NestJS** **11.1.19** (`common`, `core`, `platform-express`, `testing`);
+  **`@nestjs/graphql`** **13.2.5**; **`@types/node`** **25.6.x**;
+  **Vitest** / **`@vitest/coverage-v8`** **4.1.4**; **ESLint** **10.2.0**
+  (`@eslint/js` remains **10.0.1**, latest published for that package);
+  **Fastify** **5.8.5**; **Hono** **4.12.14**; **Prettier** **3.8.3**;
+  **TypeDoc** **0.28.19**; **`@opentelemetry/api`** **1.9.1** (dev).
+
+### Documentation
+
+- **README:** Node.js requirement updated to **`>=20.19.0`** to match
+  `package.json` `engines`.
+
 ## [4.0.0] - 2026-04-13
 
 ### Changed — BREAKING
