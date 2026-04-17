@@ -7,7 +7,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 [![Security](https://img.shields.io/badge/security-reviewed-brightgreen)](#security-and-abuse)
 ![Tests](https://img.shields.io/badge/tests-vitest%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
-![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
+![Node](https://img.shields.io/badge/node-%3E%3D20.19-339933?logo=node.js&logoColor=white)
 
 > **v4.0.0 breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
 
@@ -103,7 +103,7 @@ pnpm add ratelimit-flex
 
 All peers are optional at install time; the runtime you choose must be present when you import that integration.
 
-**Node.js:** `>= 20` (see `package.json` `engines`).
+**Node.js:** `>= 20.19.0` (see `package.json` `engines`).
 
 ## Quick Start
 
