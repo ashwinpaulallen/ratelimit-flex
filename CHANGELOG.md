@@ -130,7 +130,7 @@ requests with 503 responses instead of dropping them silently.
 
 ### Documentation
 
-- **README:** Store backends comparison table; Quick Start (Redis, PostgreSQL, MongoDB, DynamoDB); peer dependency table; **Deployment guide** sections for `PgStore`, `MongoStore`, `DynamoStore`; deployment topology rows; API reference rows; comparison with rate-limiter-flexible.
+- **README:** Store backends comparison table; Quick Start (Redis, PostgreSQL, MongoDB, DynamoDB); peer dependency table; **Deployment guide** sections for `PgStore`, `MongoStore`, `DynamoStore`; deployment topology rows; API reference rows.
 - **`docs/stores/postgres.md`**, **`docs/stores/mongo.md`**, **`docs/stores/dynamo.md`:** schema/setup, indexes/TTL, performance, troubleshooting (including DynamoDB sliding approximation).
 
 ## [3.2.0] - 2026-04-07
