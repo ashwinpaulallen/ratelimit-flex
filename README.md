@@ -1,15 +1,18 @@
 # ratelimit-flex
 
-Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, NestJS, and Hono.
-
-[![npm version](https://img.shields.io/npm/v/ratelimit-flex.svg)](https://www.npmjs.com/package/ratelimit-flex)
+[![npm version](https://img.shields.io/npm/v/ratelimit-flex.svg?label=npm)](https://www.npmjs.com/package/ratelimit-flex)
+[![npm downloads](https://img.shields.io/npm/dm/ratelimit-flex.svg)](https://www.npmjs.com/package/ratelimit-flex)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/ashwinpaulallen/ratelimit-flex/blob/main/LICENSE)
 [![Security](https://img.shields.io/badge/security-reviewed-brightgreen)](#security-and-abuse)
 ![Tests](https://img.shields.io/badge/tests-vitest%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-First-3178C6?logo=typescript&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D20.19-339933?logo=node.js&logoColor=white)
 
-> **v4.0.0 breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
+## Introduction
+
+**ratelimit-flex** is a TypeScript-first **Node.js rate limiting** library for HTTP APIs: **Express** middleware, **Fastify** plugin, **NestJS** integration, and **Hono** middleware. Use **Redis**, **PostgreSQL**, **MongoDB**, or **DynamoDB** (or in-memory / cluster stores) for **distributed rate limiting** with **sliding window**, **token bucket**, and **fixed window** algorithms — plus optional **Prometheus** and **OpenTelemetry** metrics.
+
+> **v4.x breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
 
 ## Features
 
@@ -29,6 +32,7 @@ Flexible, TypeScript-first rate limiting for Node.js with Express, Fastify, Nest
 
 ## Table of Contents
 
+- [Introduction](#introduction)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
   - [Express](#quick-start)
