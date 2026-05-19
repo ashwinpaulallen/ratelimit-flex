@@ -15,6 +15,7 @@ import {
   keyManagerBlockedJson,
   mergeRateLimiterOptions,
   resolveStoreWithInMemoryShield,
+  toRateLimitInfo,
 } from '../middleware/merge-options.js';
 import type { MetricsManager } from '../metrics/manager.js';
 import type { MetricsCounters } from '../metrics/counters.js';
@@ -255,6 +256,10 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
 
     const result = await engine.consumeWithKey(key, req);
 
+    if (result.layers) {
+      (req as Record<string, unknown>).rateLimitComposed = result;
+    }
+
     const headerCfg = resolveHeaderConfig(effectiveOpts, req, result.bindingSlotIndex);
     if (headerCfg.format) {
       const headerInput: HeaderInput = {
@@ -283,6 +288,8 @@ export class RateLimitGuard implements CanActivate, OnModuleDestroy {
     if (result.isBlocked) {
       throw this.mapBlockedToHttpException(context, key, result, effectiveOpts);
     }
+
+    (req as Record<string, unknown>).rateLimit = toRateLimitInfo(effectiveOpts, result, req);
 
     return true;
   }

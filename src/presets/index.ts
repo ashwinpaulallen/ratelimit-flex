@@ -7,6 +7,8 @@ import { RedisStore, type RedisStoreOptions } from '../stores/redis-store.js';
 import { defaultKeyGenerator } from '../strategies/rate-limit-engine.js';
 import { ceilDiv, estimateWorkersFromEnvironment } from './estimate-workers.js';
 import type { RedisStoreConnectionOptions } from '../utils/store-factory.js';
+import type { InMemoryShieldOptions } from '../shield/types.js';
+import { compose } from '../composition/compose.js';
 import type {
   RateLimitOptions,
   TokenBucketRateLimitOptions,
@@ -459,6 +461,143 @@ export function multiInstancePreset(
     });
 
   return { ...base, store };
+}
+
+/**
+ * Slots for {@link hybridWindowsPreset} (both default to sliding **`MemoryStore`** windows via {@link compose.windows}).
+ *
+ * @since 4.2.0
+ */
+export type HybridWindowsPresetSlots = {
+  /**
+   * Tight bucket (defaults: **`windowMs: 1000`**, **`maxRequests: 10`**).
+   * Paired with {@link HybridWindowsPresetSlots.longWindow}: both must permit for **`compose.all`** traffic to pass.
+   */
+  shortWindow?: Partial<{
+    windowMs: number;
+    maxRequests: number;
+    strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+  }>;
+  /** Sustaining bucket (defaults **60s window** × **100** requests). */
+  longWindow?: Partial<{
+    windowMs: number;
+    maxRequests: number;
+    strategy: RateLimitStrategy.SLIDING_WINDOW | RateLimitStrategy.FIXED_WINDOW;
+  }>;
+};
+
+/**
+ * Window overrides merged with {@link HybridWindowsPresetSlots}.
+ *
+ * @since 4.2.0
+ */
+export type HybridWindowsPresetOptions = Partial<WindowRateLimitOptions> & HybridWindowsPresetSlots;
+
+/**
+ * Multi-window **`MemoryStore` preset**: short **AND** longer caps (**`compose.windows`** → **`mode: all`** semantics).
+ *
+ * @example
+ * ```ts
+ * app.use(expressRateLimiter(hybridWindowsPreset({
+ *   shortWindow: { maxRequests: 20 },
+ *   longWindow: { maxRequests: 500 },
+ * })));
+ * ```
+ * @since 4.2.0
+ */
+export function hybridWindowsPreset(options?: HybridWindowsPresetOptions): Partial<RateLimitOptions> {
+  const { shortWindow, longWindow, store: _storeOverride, ...restOpts } = options ?? {};
+  void _storeOverride;
+  const s0 = shortWindow ?? {};
+  const s1 = longWindow ?? {};
+  const w0 = {
+    windowMs: s0.windowMs ?? 1_000,
+    maxRequests: s0.maxRequests ?? 10,
+    strategy: s0.strategy ?? RateLimitStrategy.SLIDING_WINDOW,
+  };
+  const w1 = {
+    windowMs: s1.windowMs ?? 60_000,
+    maxRequests: s1.maxRequests ?? 100,
+    strategy: s1.strategy ?? RateLimitStrategy.SLIDING_WINDOW,
+  };
+
+  const sW0 =
+    w0.strategy === RateLimitStrategy.FIXED_WINDOW
+      ? RateLimitStrategy.FIXED_WINDOW
+      : RateLimitStrategy.SLIDING_WINDOW;
+  const sW1 =
+    w1.strategy === RateLimitStrategy.FIXED_WINDOW
+      ? RateLimitStrategy.FIXED_WINDOW
+      : RateLimitStrategy.SLIDING_WINDOW;
+
+  const store = compose.windows(
+    { windowMs: w0.windowMs, maxRequests: w0.maxRequests, strategy: sW0 },
+    { windowMs: w1.windowMs, maxRequests: w1.maxRequests, strategy: sW1 },
+  );
+
+  return {
+    strategy: RateLimitStrategy.SLIDING_WINDOW,
+    standardHeaders: 'draft-6',
+    legacyHeaders: false,
+    windowMs: w1.windowMs,
+    maxRequests: w1.maxRequests,
+    ...restOpts,
+    store,
+  };
+}
+
+/** Second argument shape for {@link redisWithShieldPreset}. @since 4.2.0 */
+export type RedisWithShieldPresetOptions = Partial<Omit<WindowRateLimitOptions, 'inMemoryBlock'>> & {
+  /**
+   * @default **`true`** — applies explicit {@link InMemoryShieldOptions} with **`maxBlockedKeys: 50000`** and **`blockOnConsumed`** synced to **`maxRequests`** when omitted.
+   */
+  shield?: true | InMemoryShieldOptions;
+};
+
+/**
+ * Redis multi-instance preset with **explicit** {@link InMemoryShieldOptions} defaults for gateways under attack (**`maxBlockedKeys: 50_000`** by default vs implicit middleware **`true`**).
+ *
+ * @see {@link multiInstancePreset}
+ * @since 4.2.0
+ */
+export function redisWithShieldPreset(
+  redisOptions: RedisStoreConnectionOptions,
+  options?: RedisWithShieldPresetOptions,
+): Partial<RateLimitOptions> {
+  const { shield = true, ...rest } = options ?? {};
+  const maxFallback = typeof rest.maxRequests === 'number' ? rest.maxRequests : 100;
+
+  const inMemoryBlock: boolean | InMemoryShieldOptions =
+    shield === true
+      ? { blockOnConsumed: maxFallback, maxBlockedKeys: 50_000 }
+      : { maxBlockedKeys: 50_000, ...shield, blockOnConsumed: shield.blockOnConsumed ?? maxFallback };
+
+  return multiInstancePreset(redisOptions, { ...rest, inMemoryBlock });
+}
+
+/**
+ * Opinionated **`Redis`** partial for observability-heavy deployments (metrics + in-memory shield defaults).
+ *
+ * @description Applies {@link RateLimitOptionsBase.metrics} **`true`** and **`inMemoryBlock: true`** on top of {@link multiInstancePreset}.
+ * Returns **`Partial<RateLimitOptions>`** like other presets — pass to **`expressRateLimiter`**, **`fastifyRateLimiter`**, or
+ * **`mergeRateLimiterOptions`** once; do **not** assume a pre-merged {@link RateLimitOptions} with a resolved store.
+ *
+ * @example
+ * ```ts
+ * app.use(expressRateLimiter(observabilityPreset({ url: process.env.REDIS_URL! })));
+ * ```
+ * @since 4.2.0
+ */
+export function observabilityPreset(
+  redisOptions: RedisStoreConnectionOptions,
+  options?: Partial<WindowRateLimitOptions>,
+): Partial<RateLimitOptions> {
+  return {
+    ...multiInstancePreset(redisOptions),
+    metrics: true,
+    inMemoryBlock: true,
+    ...options,
+  };
 }
 
 /**

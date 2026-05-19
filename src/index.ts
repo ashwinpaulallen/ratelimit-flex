@@ -69,7 +69,14 @@ export {
  * @since 1.0.0
  */
 export { MemoryStore } from './stores/memory-store.js';
-export type { MemoryStoreLruOptions, MemoryStoreOptions, MemoryStoreTokenBucketOptions, MemoryStoreWindowOptions } from './stores/memory-store.js';
+export type {
+  MemoryStoreEvictionBurstSnapshot,
+  MemoryStoreEvictionVelocityAlert,
+  MemoryStoreLruOptions,
+  MemoryStoreOptions,
+  MemoryStoreTokenBucketOptions,
+  MemoryStoreWindowOptions,
+} from './stores/memory-store.js';
 
 /**
  * In-memory block shield (wraps a remote rate-limit store).
@@ -155,6 +162,17 @@ export {
   type CreateStoreOptions,
   type RedisStoreConnectionOptions,
 } from './utils/store-factory.js';
+
+/**
+ * Helpers for deterministic **storage keys** derived from headers / fingerprints.
+ *
+ * @since 4.2.0
+ */
+export {
+  hashStorageKeyFingerprint,
+  stripIpV6ZoneId,
+  truncateStorageKey,
+} from './utils/key-hygiene.js';
 
 /**
  * Deployment detection and MemoryStore warning helper.
@@ -266,18 +284,24 @@ export {
   authEndpointPreset,
   clusterPreset,
   dynamoPreset,
+  hybridWindowsPreset,
   multiInstancePreset,
   failClosedPostgresPreset,
   mongoPreset,
+  observabilityPreset,
   postgresInsuranceMemoryStore,
   postgresPreset,
   publicApiPreset,
   queuedClusterPreset,
   resilientPostgresPreset,
   resilientRedisPreset,
+  redisWithShieldPreset,
   singleInstancePreset,
   type PostgresPresetPgOptions,
   type ResilientRedisPresetRedisOptions,
+  type HybridWindowsPresetOptions,
+  type HybridWindowsPresetSlots,
+  type RedisWithShieldPresetOptions,
 } from './presets/index.js';
 
 /**
@@ -335,15 +359,20 @@ export {
   RedisBlockStore,
   createAdminRouter,
   fastifyAdminPlugin,
+  ADMIN_HTTP_AUDIT_SCHEMA_VERSION,
   capped,
   exponentialEscalation,
   fibonacciEscalation,
   fixedEscalation,
   linearEscalation,
+  formatAdminHttpAuditNdjsonV1,
+  toAdminHttpAuditEnvelopeV1,
 } from './key-manager/index.js';
 export type {
   AdminAuthMiddleware,
   AdminAuthMode,
+  AdminHttpAuditEnvelopeV1,
+  AdminHttpAuditEventV1,
   AdminRouterOptions,
   AuditEntry,
   BlockReason,

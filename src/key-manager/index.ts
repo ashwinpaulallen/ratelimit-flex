@@ -14,6 +14,13 @@ export type {
   KeyState,
 } from './types.js';
 
+export type { AdminHttpAuditEnvelopeV1, AdminHttpAuditEventV1 } from './admin-http-audit-v1.js';
+export {
+  ADMIN_HTTP_AUDIT_SCHEMA_VERSION,
+  formatAdminHttpAuditNdjsonV1,
+  toAdminHttpAuditEnvelopeV1,
+} from './admin-http-audit-v1.js';
+
 export type { BlockStore } from './block-store.js';
 export { MemoryBlockStore, RedisBlockStore } from './block-store.js';
 

@@ -150,4 +150,119 @@ describe('weighted sliding (DynamoStore model)', () => {
     expect(r.isBlocked).toBe(false);
     expect(r.totalHits).toBe(Math.ceil(40 * (1 - 50 / windowMs) + 3));
   });
+
+  it('emits sliding observation with blend counters and survives throwing observers', async () => {
+    const windowMs = 10_000;
+    const tStart = 3_000_000_000_000;
+    const thisBoundary = fixedWindowBoundaryMs(tStart + 50, windowMs);
+    const prevBoundary = thisBoundary - windowMs;
+
+    vi.setSystemTime(tStart + 50);
+
+    const send = vi.fn();
+    let call = 0;
+    send.mockImplementation(async (command: { input: Record<string, unknown> }) => {
+      const input = command.input;
+      call += 1;
+      if (call === 1) {
+        throw new ConditionalCheckFailedException({
+          message: 'The conditional request failed',
+          $metadata: {},
+        });
+      }
+      expect(String(input.UpdateExpression)).toContain('SET previousCount = currentCount');
+      expect(input.ConditionExpression).toBe('currentWindowStart = :pb');
+      expect(input.ExpressionAttributeValues).toMatchObject({
+        ':pb': prevBoundary,
+        ':b': thisBoundary,
+        ':cost': 3,
+      });
+      return {
+        Attributes: {
+          pk: 'rlf:k',
+          currentWindowStart: thisBoundary,
+          currentCount: 3,
+          previousCount: 40,
+          ttl: 1,
+        },
+      };
+    });
+
+    const reckless = vi.fn(() => {
+      throw new Error('observer exploded');
+    });
+    const sane = vi.fn();
+
+    const storeBrokenObserver = new DynamoStore({
+      client: { send } as never,
+      tableName: 'rate_limits',
+      windowMs,
+      maxRequests: 100,
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      onSlidingWindowObservation: reckless,
+    });
+
+    await expect(storeBrokenObserver.increment('k', { cost: 3 })).resolves.toMatchObject({
+      isBlocked: false,
+    });
+    expect(reckless).toHaveBeenCalledTimes(1);
+
+    const send2 = vi.fn();
+    let c2 = 0;
+    send2.mockImplementation(async (command: { input: Record<string, unknown> }) => {
+      const input = command.input;
+      c2 += 1;
+      if (c2 === 1) {
+        throw new ConditionalCheckFailedException({
+          message: 'The conditional request failed',
+          $metadata: {},
+        });
+      }
+      expect(String(input.UpdateExpression)).toContain('SET previousCount = currentCount');
+      expect(input.ConditionExpression).toBe('currentWindowStart = :pb');
+      expect(input.ExpressionAttributeValues).toMatchObject({
+        ':pb': prevBoundary,
+        ':b': thisBoundary,
+        ':cost': 3,
+      });
+      return {
+        Attributes: {
+          pk: 'obs:k',
+          currentWindowStart: thisBoundary,
+          currentCount: 3,
+          previousCount: 40,
+          ttl: 1,
+        },
+      };
+    });
+
+    const observerStore = new DynamoStore({
+      client: { send: send2 } as never,
+      tableName: 'rate_limits_obs',
+      windowMs,
+      maxRequests: 100,
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      onSlidingWindowObservation: sane,
+      keyPrefix: 'obs:',
+    });
+
+    const nowProbe = tStart + 50;
+    const blend = 1 - (nowProbe - thisBoundary) / windowMs;
+
+    await observerStore.increment('k', { cost: 3 });
+    expect(sane).toHaveBeenCalledTimes(1);
+    expect(sane.mock.calls[0]![0]).toMatchObject({
+      previousWindowBlendWeight: blend,
+      previousSubwindowHits: 40,
+      currentSubwindowHits: 3,
+      cap: 100,
+      windowMs,
+      currentWindowStartMs: thisBoundary,
+      nowMs: nowProbe,
+    });
+    expect(sane.mock.calls[0]![0].approximateUsage).toBeCloseTo(40 * blend + 3, 10);
+    expect(sane.mock.calls[0]![0].roundedTotalHitsEstimate).toBe(
+      Math.ceil(40 * blend + 3),
+    );
+  });
 });

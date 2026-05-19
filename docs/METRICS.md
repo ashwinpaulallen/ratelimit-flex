@@ -264,6 +264,54 @@ await app.register(fastifyRateLimiter, {
 - **Express:** `limiter.openTelemetryAdapter?.shutdown()`
 - **Fastify:** `app.rateLimitMetrics?.getOpenTelemetryAdapter()?.shutdown()` (or let plugin `onClose` handle it)
 
+### Semantic conventions (mapping)
+
+Upstream **OpenTelemetry semantic conventions for HTTP middleware** evolve independently of this repo. Exported instruments today use prefixed names such as **`ratelimit.requests_total`** (see Prometheus table above).
+
+| Exported signal | Typical OTel semantic bucket | Gap / note |
+|-----------------|-------------------------------|-------------|
+| `requests_total`, `middleware_duration_ms`, `store_duration_ms` | Generic **HTTP server** instrumentation often appears on framework spans — **prefer unique meter name** **`ratelimit-flex`** (`metrics.getMeter('ratelimit-flex')`) when mixing exporters. |
+| **`shield.*` metrics inside snapshots** (`limiter.shield?.getMetrics()`) | Align custom dashboards with **`ratelimit_shield`** (if you Prometheus-wrap) manually; no stable semconv slug yet from OTel WG. |
+
+### Distributed tracing (optional cookbook)
+
+Tracing hooks are **not** emitted automatically. When you maintain an SDK (`@opentelemetry/api` tracer), instrument **around** `{ store.increment }`, Redis failover hooks, or **`KeyManager.block`** handlers — keep spans **bounded** (<10 attributes) so hot paths remain cheap.
+
+Example sketch:
+
+```ts
+import { trace } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('ratelimit-flex');
+
+async function guardedIncrement(store: RateLimitStore, key: string) {
+  return tracer.startActiveSpan('ratelimit.store.increment', async (span) => {
+    span.setAttribute('limiter.key_hash', stableHash(key));
+    try {
+      return await store.increment(key);
+    } finally {
+      span.end();
+    }
+  });
+}
+```
+
+### PromQL dashboards (extras)
+
+Shield efficiency (**prefix** defaults to **`ratelimit_`; adjust **`${p}`** if you customised):
+
+```promql
+rate(ratelimit_shield_store_calls_saved_total[5m])
+  /
+(rate(ratelimit_shield_store_calls_total[5m]) + 1e-9)
+```
+
+Monitor **`MemoryStore` LRU eviction** pressure:
+
+```promql
+increase(ratelimit_store_total_evictions{store="memory"}[1h])
+```
+
 ---
 
 ## Snapshot API

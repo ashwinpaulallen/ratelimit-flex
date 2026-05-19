@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ComposedStore } from '../../src/composition/ComposedStore.js';
 import { extractLayerMetrics } from '../../src/composition/extractLayerMetrics.js';
 import type { CompositionLayer } from '../../src/composition/types.js';
+import { compose } from '../../src/composition/compose.js';
 import { MemoryStore } from '../../src/stores/memory-store.js';
 import { RateLimitStrategy } from '../../src/types/index.js';
 
@@ -89,6 +90,30 @@ describe('ComposedStore inspection helpers', () => {
         consulted: expect.any(Boolean),
       });
     }
+    await c.shutdown();
+  });
+
+  it('extractLayerMetrics works for overflow mode', async () => {
+    const steady = sliding(50);
+    const burst = sliding(200);
+    const c = compose.overflow(compose.layer('steady', steady), compose.layer('burst', burst));
+    const r = await c.increment('ovf');
+    const m = extractLayerMetrics(r);
+    expect(m.some((row) => row.layer === 'steady')).toBe(true);
+    expect(m.some((row) => row.layer === 'burst')).toBe(true);
+    await c.shutdown();
+  });
+
+  it('extractLayerMetrics works for first-available mode', async () => {
+    const primary = sliding(1);
+    const fallback = sliding(500);
+    const c = compose.firstAvailable(
+      compose.layer('redis', primary),
+      compose.layer('memory', fallback),
+    );
+    const r = await c.increment('fa');
+    const m = extractLayerMetrics(r);
+    expect(m.length).toBeGreaterThanOrEqual(2);
     await c.shutdown();
   });
 

@@ -5,6 +5,7 @@ import {
   RateLimitEngine,
   createRateLimiter as createEngineRateLimiter,
   defaultKeyGenerator,
+  matchingDecrementOptions,
   resolveIncrementOpts,
 } from '../src/strategies/rate-limit-engine.js';
 import type { RateLimitOptions } from '../src/types/index.js';
@@ -122,6 +123,29 @@ describe('RateLimitEngine / strategies', () => {
       store,
     } as RateLimitOptions;
     expect(resolveIncrementOpts(opts, { n: 7 })).toEqual({ maxRequests: 7, cost: 2 });
+  });
+
+  it('matchingDecrementOptions pairs resolveIncrementOpts cost for rollback', async () => {
+    const store = new MemoryStore({
+      strategy: RateLimitStrategy.SLIDING_WINDOW,
+      windowMs: 60_000,
+      maxRequests: 50,
+    });
+    try {
+      const opts = {
+        strategy: RateLimitStrategy.SLIDING_WINDOW,
+        windowMs: 60_000,
+        maxRequests: 50,
+        incrementCost: () => 9,
+        store,
+      } as RateLimitOptions;
+      const inc = resolveIncrementOpts(opts, {});
+      expect(inc?.cost).toBe(9);
+      expect(matchingDecrementOptions(inc)).toEqual({ cost: 9 });
+      expect(matchingDecrementOptions(undefined)).toEqual({ cost: 1 });
+    } finally {
+      await store.shutdown();
+    }
   });
 
   it('uses key generation correctly', async () => {

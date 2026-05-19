@@ -33,6 +33,16 @@ Use **`pgStoreSchemaDown`** only in dev or when you intentionally drop the table
 
 - **`postgresPreset({ pool })`** — defaults to sliding window, draft-6 headers, **`inMemoryBlock: true`**. Merge overrides (e.g. **`maxRequests`**, **`strategy`**). Use **`failClosedPostgresPreset`** when you want **fail-closed** behavior on database errors instead of the default preset.
 
+## Operational housekeeping
+
+Postgres **`rate_limits`** remains compact while **`autoSweepIntervalMs`** deletes expired rows backed by **`reset_at`** (see DDL). Sanity checks operators run in prod:
+
+| Concern | Remedy |
+|---------|--------|
+| **Sudden eviction growth** (`MemoryStore`-like symptoms not applicable — row bloat instead) | Ensure sweep cron runs (or shorten **`autoSweepIntervalMs`**), verify index **`rate_limits_reset_at_idx`**. |
+| **Write amplification** (“QPS sanity”) | Each limit check touches **one row** (hot key ⇒ hot row lock). Multiply expected route RPS × replicas ÷ Postgres TPS envelope; if nearing CPU saturation, offload hottest traffic to **`RedisStore`**. |
+| **Vacuum churn** (`JSONB` sliding arrays) | Use **AUTOVACUUM** defaults tuned for churny tables; **`JSONB`** updates inflate dead tuples quicker than scalar counters alone. Monitor **`n_dead_tup`**. |
+
 ## Failure modes
 
 - Configure **`onPostgresError`** on **`PgStore`** (or use **`failClosedPostgresPreset`**) to choose **fail-open** vs **fail-closed** when the database errors.

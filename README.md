@@ -12,8 +12,6 @@
 
 **ratelimit-flex** is a TypeScript-first **Node.js rate limiting** library for HTTP APIs: **Express** middleware, **Fastify** plugin, **NestJS** integration, and **Hono** middleware. Use **Redis**, **PostgreSQL**, **MongoDB**, or **DynamoDB** (or in-memory / cluster stores) for **distributed rate limiting** with **sliding window**, **token bucket**, and **fixed window** algorithms — plus optional **Prometheus** and **OpenTelemetry** metrics.
 
-> **v4.x breaking changes:** [`createAdminRouter`](#admin-api-authentication) now **requires** `options.auth`. [`MemoryStore`](#when-to-use-memorystore) defaults to **`maxKeys: 100_000`** with LRU eviction (use `maxKeys: 0` only if you need unbounded keys). [`RateLimiterQueue.shutdown()`](#graceful-shutdown) rejects pending waiters with **503** / `ShutdownError` instead of dropping them silently. See [CHANGELOG](CHANGELOG.md) for the migration guide.
-
 ## Features
 
 - **Three algorithms:** **Sliding window**, **Token bucket**, **Fixed window** — implemented across **`MemoryStore`**, **`RedisStore`** (Lua), **`PgStore`**, **`MongoStore`** (exact for all strategies), and **`DynamoStore`** (exact fixed window & token bucket; sliding window uses a weighted approximation on DynamoDB — see [docs/stores/dynamo.md](docs/stores/dynamo.md))
@@ -25,7 +23,7 @@
 - **In-memory block shielding:** `InMemoryShield` / `inMemoryBlock` — cache blocked keys in process memory so hot keys stop hitting Redis under attack
 - **Metrics & observability (Express & Fastify):** aggregated snapshots, Prometheus, OpenTelemetry — `metrics: true` ([full docs][doc-metrics])
 - **Weighted requests:** `incrementCost` (or `store.increment(..., { cost })`) so expensive endpoints consume more quota than cheap ones
-- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`, `postgresPreset`, `mongoPreset`, `dynamoPreset`
+- **Presets:** `singleInstancePreset`, `multiInstancePreset`, `redisWithShieldPreset`, `hybridWindowsPreset`, `resilientRedisPreset`, `clusterPreset`, `queuedClusterPreset`, `apiGatewayPreset`, `authEndpointPreset`, `publicApiPreset`, `postgresPreset`, `mongoPreset`, `dynamoPreset`
 - **Limiter composition:** `compose.all()`, `compose.overflow()`, `compose.firstAvailable()`, `compose.race()`, `compose.windows()`, `compose.withBurst()`, nested `ComposedStore`
 - **Programmatic key management:** `KeyManager` for blocks, penalties, rewards, events, audit log, and optional admin HTTP API
 - **Security:** key cardinality, Redis namespaces, Lua usage, and locking down admin routes
@@ -58,6 +56,7 @@
 - [Presets](#presets)
 - [Redis Failure Handling](#redis-failure-handling)
 - [Redis Resilience](#redis-resilience)
+- [Operational failure modes](docs/FAILURE_MODES.md)
 - [Metrics & Observability](#metrics--observability)
 - [Configuration Reference](#configuration-reference)
 - [Standard Headers](#standard-headers)
@@ -69,6 +68,7 @@
 - [Custom Stores](#custom-stores)
 - [API Reference](#api-reference)
 - [Migration Guide](#migration-guide)
+- [Documentation hub](#documentation-hub)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -535,8 +535,8 @@ keyManager.on('blocked', ({ key, reason }) => {
 
 The admin router is a SECURITY-SENSITIVE surface. Mounting it without
 authentication exposes block/unblock/reward endpoints to every caller on
-the network. **As of v4.0.0, the `auth` option is REQUIRED** — unauthenticated
-admin routes are no longer allowed without an explicit opt-in.
+the network. The **`auth` option is required** — unauthenticated admin routes are
+only available via the explicit development opt-in below.
 
 #### Bearer token (recommended for service-to-service)
 
@@ -593,27 +593,11 @@ createAdminRouter(keyManager, {
 
 This logs a warning at construction time. **Never use this in production.**
 
-#### Migration from v3.3.x
+If you already protect admin routes with your own middleware, you can use
+`type: 'middleware'` (outer guard + built-in check for defense in depth, or move
+auth entirely into the router):
 
 ```typescript
-// Before (v3.3.x — no auth required by default; invalid in v4)
-// createAdminRouter(keyManager)
-
-// After (v4.0.0 — explicit auth required)
-app.use('/admin/ratelimit', createAdminRouter(keyManager, {
-  auth: { type: 'bearer', token: process.env.ADMIN_TOKEN! },
-}));
-```
-
-Existing deployments that already wrap the admin router with their own
-`authMiddleware` can use `type: 'middleware'`:
-
-```typescript
-// Before (v3.3.x)
-// app.use('/admin/ratelimit', authMiddleware, createAdminRouter(keyManager));
-
-// After — either keep the outer middleware (auth checked twice for defense in
-// depth) or move it into the admin router:
 app.use('/admin/ratelimit', createAdminRouter(keyManager, {
   auth: { type: 'middleware', handler: authMiddleware },
 }));
@@ -921,9 +905,9 @@ flowchart LR
   B --> C["B cannot skip ahead — one FIFO per RateLimiterQueue"]
 ```
 
-## Request queuing
+Over-limit requests wait in a **FIFO** queue until the backing **`store.increment`** allows them (**not** the full **`RateLimitEngine`** path — see **[Engine vs queued parity](docs/QUEUING.md#engine-middleware-vs-queued-middleware-parity)** and [Failure modes](docs/FAILURE_MODES.md)).
 
-Queue over-limit requests instead of rejecting them immediately. Requests wait in a FIFO queue and are released when quota becomes available.
+For **many distinct keys** hitting the **same Express/Fastify scope**, treat **`KeyedRateLimiterQueue`** (or separate queues per key) as the default pattern — a single **`RateLimiterQueue`** is FIFO across unrelated keys (**head‑of‑line blocking**).
 
 ### Quick Start
 
@@ -1017,11 +1001,7 @@ await githubQueue.removeTokens('github-api');
 const response = await fetch('https://api.github.com/repos/...');
 ```
 
-### Important: Head-of-Line Blocking
-
-The queue is one **FIFO** array. If you share that queue across **different** keys, a waiting request for key **A** blocks requests for key **B** — even when **B** has capacity.
-
-**Solution:** Use one queue per key, or use `KeyedRateLimiterQueue` for automatic per-key queues with LRU eviction.
+**Multi-key fairness:** Prefer **`KeyedRateLimiterQueue`** (or one **`RateLimiterQueue` per logical key)—see **[Engine vs queued parity](docs/QUEUING.md#engine-middleware-vs-queued-middleware-parity)** and [Multi-key patterns][doc-queuing].
 
 **Full documentation:** See [docs/QUEUING.md][doc-queuing] for:
 - Multi-key patterns
@@ -1029,10 +1009,26 @@ The queue is one **FIFO** array. If you share that queue across **different** ke
 - Store ownership
 - Advanced patterns (per-tenant, priority queuing)
 
-**Implementation:**
+**Backing store implementation (waiting / slot accounting):**
+
 - **Redis:** `ZSET` with `ZREMRANGEBYSCORE` + `ZADD` + `ZCARD` in atomic Lua
 - **Memory:** Sorted array of timestamps per key
 - **Boundary behavior:** Smooth - no 2x burst at window edges
+
+---
+
+## Choosing a strategy
+
+Examples use **`expressRateLimiter`**; **`fastifyRateLimiter`**, **`rateLimiter`** (Hono), and presets accept the same strategy fields unless the integration README calls out an exception.
+
+### Sliding window (default)
+
+Smooth limiting without boundary spikes typical of naive fixed slicing.
+
+**Algorithm implementation (rate-limit store — not queue):**
+
+- **Redis:** `ZSET`-based Lua prune + score + cardinality
+- **Memory:** Per-key sliding timestamp list within `windowMs`
 
 ```ts
 import { expressRateLimiter, RateLimitStrategy } from 'ratelimit-flex';
@@ -1144,20 +1140,17 @@ Benchmarks measured on Apple M1 Pro, Node.js v20, using isolated test harness. Y
 
 ### Benchmark Methodology
 
-Benchmarks use:
-- Isolated test harness with controlled load
-- Single key (worst case for contention)
-- Mixed read/write patterns
-- Local Redis (Docker) for network tests
-- No other services running
+Published numbers below were gathered with **isolated harnesses** at a fixed point in time (hardware-dependent). **`npm run benchmark`** in this repo runs only **`MemoryStore` `increment` micro-benchmarks** (round-robin keys, configurable `BENCHMARK_OPS`; **no Redis**). For **`RedisStore`**, reproduce with your Redis topology and tooling (see `examples/redis/README.md`).
 
-**Run benchmarks yourself:**
+**Run the MemoryStore script:**
 ```bash
-git clone https://github.com/yourusername/ratelimit-flex
+git clone https://github.com/ashwinpaulallen/ratelimit-flex.git
 cd ratelimit-flex
 npm install
 npm run benchmark
 ```
+
+Optional: **`BENCHMARK_OPS=500000 npm run benchmark`** (`--expose-gc` if you tweak the script for heap deltas).
 
 > **Note:** These are micro-benchmarks. Real-world performance depends on your application's request patterns, key cardinality, network topology, and Redis configuration.
 
@@ -1641,68 +1634,9 @@ When the circuit **closes** again after an outage, accumulated hits in the insur
 
 When insurance is configured, it **replaces** the binary fail-open/fail-closed behavior for quota operations (see [Redis failure handling](#redis-failure-handling)).
 
-## Redis resilience
+Further reading on breaker tuning and sync nuances: **[docs/REDIS_RESILIENCE.md][doc-redis-resilience]**.
 
-Handle Redis outages gracefully with insurance limiters and circuit breakers. When Redis is unavailable, an **insurance limiter** (dedicated `MemoryStore`) activates automatically, so each process still enforces **per-process** limits.
-
-### Quick Start
-
-**Manual setup:**
-```typescript
-import { expressRateLimiter, RedisStore, MemoryStore, RateLimitStrategy } from 'ratelimit-flex';
-
-const insuranceStore = new MemoryStore({
-  strategy: RateLimitStrategy.SLIDING_WINDOW,
-  windowMs: 60_000,
-  maxRequests: 60, // 300 / 5 workers
-});
-
-const store = new RedisStore({
-  strategy: RateLimitStrategy.SLIDING_WINDOW,
-  windowMs: 60_000,
-  maxRequests: 300,
-  url: process.env.REDIS_URL!,
-  resilience: {
-    insuranceLimiter: { store: insuranceStore },
-    circuitBreaker: { failureThreshold: 3, recoveryTimeMs: 5000 },
-    hooks: {
-      onFailover: (err) => console.error('Redis down, using fallback', err),
-      onRecovery: (ms) => console.log(`Redis recovered after ${ms}ms`),
-    },
-  },
-});
-
-app.use(expressRateLimiter({ store }));
-```
-
-**Preset:**
-```typescript
-import { expressRateLimiter, resilientRedisPreset } from 'ratelimit-flex';
-
-app.use(expressRateLimiter(
-  resilientRedisPreset(
-    { url: process.env.REDIS_URL! },
-    { maxRequests: 300, estimatedWorkers: 5 }
-  )
-));
-```
-
-### How It Works
-
-**Circuit Breaker States:**
-- **Closed** — Redis is used; successes reset failure streaks
-- **Open** — Too many failures; requests use insurance store instead
-- **Half-open** — After recovery window, probe Redis; success closes circuit
-
-**Counter Sync:** When Redis recovers, accumulated hits in insurance `MemoryStore` are replayed to Redis (`syncOnRecovery: true` by default).
-
-**Full documentation:** See [docs/REDIS_RESILIENCE.md][doc-redis-resilience] for:
-- Circuit breaker configuration
-- Counter synchronization details
-- Observability hooks
-- Comparison with fail-open/fail-closed
-- Best practices and monitoring
-
+## Configuration Reference
 
 Options are merged with strategy defaults. Omit **`store`** to get an auto-created **`MemoryStore`** (unless you use **`limits`**, which builds grouped in-memory stores).
 
@@ -1773,6 +1707,8 @@ Express and Fastify attach rate-limit response headers via **`standardHeaders`**
 On **429** (and other blocked responses where headers are enabled), **`Retry-After`** is included in seconds until reset — for legacy and draft profiles.
 
 **Note:** If the store’s **`resetTime`** is already in the past when headers are formatted (clock skew, slow handling), the seconds-until-reset value is **0**, so you may see **`Retry-After: 0`**. RFC 7231 defines that as “retry immediately” (valid); some clients treat **`0`** as no backoff and may retry aggressively — not a spec violation, but worth knowing for operators.
+
+**Regional skew:** Servers in **different regions**, **multi-primary Redis** misconfiguration, or **container wall-clock drift** can move **`resetTime`** relative to the edge proxy clock that formats headers. When limits must be legally auditable, align NTP/Chrony and prefer clients that parse **`RateLimit`** / **`Retry-After`** hints defensively (`t=` / RFC seconds are authoritative from the responder’s clock, not the caller’s ambient wall clock).
 
 **Grouped windows (`limits`):** policy metadata uses the **shortest** window length for **`w=`** and **`getLimit`**’s **minimum** cap across windows, so **`RateLimit-Policy`** / default **`identifier`** read like a single-window policy. That is a reasonable approximation but can mislead if you rely on headers to document a multi-window ruleset — set **`identifier`** (and document behavior out-of-band) when that matters. Without a Redis **`store`** template, **`limits`** uses **in-memory** slots; with a Redis template or **`compose.windows(redis, …)`**, counters can be **shared across processes** — see [Multi-window limits (`limits`)](#multi-window-limits-limits).
 
@@ -2000,7 +1936,7 @@ Pass your store as **`store`** in middleware options.
 | **`fastifyRateLimiter`** | From `ratelimit-flex/fastify` — Fastify plugin |
 | **`createStore(options)`** | Build `MemoryStore` or `RedisStore` (`CreateStoreOptions`) |
 | **`detectEnvironment()`** | `EnvironmentInfo` — deployment hints |
-| **`singleInstancePreset`**, **`multiInstancePreset`**, **`resilientRedisPreset`**, **`apiGatewayPreset`**, **`authEndpointPreset`**, **`publicApiPreset`** | Opinionated `Partial<RateLimitOptions>` |
+| **`singleInstancePreset`**, **`multiInstancePreset`**, **`redisWithShieldPreset`**, **`observabilityPreset`**, **`hybridWindowsPreset`**, **`resilientRedisPreset`**, **`apiGatewayPreset`**, **`authEndpointPreset`**, **`publicApiPreset`** | Opinionated `Partial<RateLimitOptions>` |
 | **`CircuitBreaker`**, **`RedisResilienceOptions`**, **`ResilienceHooks`**, **`InsuranceLimiterOptions`**, **`CircuitBreakerOptions`**, **`CircuitState`** | Circuit breaker and Redis failover types ([Redis resilience](#redis-resilience)) |
 | **`MemoryStore`** | In-memory store (`getActiveKeys` / `resetAll` for advanced sync scenarios) |
 | **`RedisStore`** | Redis-backed store (Lua); optional **`resilience`** for insurance + breaker |
@@ -2009,6 +1945,7 @@ Pass your store as **`store`** in middleware options.
 | **`DynamoStore`** | `ratelimit-flex/dynamo` — DynamoDB ([docs/stores/dynamo.md](docs/stores/dynamo.md)); **`dynamoPreset`** from `ratelimit-flex` |
 | **`RateLimitEngine`**, **`createRateLimitEngine`** | Core engine without HTTP |
 | **`resolveIncrementOpts`**, **`matchingDecrementOptions`** | Resolve per-request `increment` / `decrement` options (weighted limits) |
+| **`truncateStorageKey`**, **`hashStorageKeyFingerprint`**, **`stripIpV6ZoneId`** | Optional key hygiene helpers (high-cardinality / IPv6-zone stripping) |
 | **`createRateLimiter`** | `{ express }` middleware helper |
 | **`MetricsManager`**, **`normalizeMetricsConfig`**, **`PrometheusAdapter`**, **`OpenTelemetryAdapter`** | Metrics wiring and exporters ([Metrics & Observability](#metrics--observability)) |
 
@@ -2032,16 +1969,36 @@ Migrating from another rate limiting library or upgrading from v2.x? See **[docs
 - `max` → `maxRequests`
 - `timeWindow` → `windowMs` (convert to milliseconds)
 
+## Documentation hub
+
+| Topic | Where to read |
+|-------|----------------|
+| Operational failure tables | **[docs/FAILURE_MODES.md](docs/FAILURE_MODES.md)** |
+| Mermaid timelines | **[docs/OPERATIONAL_SEQUENCES.md](docs/OPERATIONAL_SEQUENCES.md)** |
+| Deployment path pick-list | **[docs/DEPLOYMENT_PATHS.md](docs/DEPLOYMENT_PATHS.md)** |
+| Redis tuning / Sentinel notes | **[docs/REDIS_STORE_OPERATIONS.md](docs/REDIS_STORE_OPERATIONS.md)** |
+| Resilience semantics | **[docs/REDIS_RESILIENCE.md](docs/REDIS_RESILIENCE.md)** |
+| Queuing cookbook | **[docs/QUEUING.md](docs/QUEUING.md)** |
+| Metrics & Grafana sketches | **[docs/METRICS.md](docs/METRICS.md)** |
+| Benchmark reproducibility | **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** |
+| Library comparison matrix | **[docs/COMPARE_LIBRARIES.md](docs/COMPARE_LIBRARIES.md)** |
+| Node / framework compatibility | **[docs/VERSION_SUPPORT.md](docs/VERSION_SUPPORT.md)** |
+| Terminology glossary | **[docs/GLOSSARY.md](docs/GLOSSARY.md)** |
+| P2 parity / reference index | **[docs/guides/P2_REFERENCE.md](docs/guides/P2_REFERENCE.md)** |
+| Postgres / Mongo / Dynamo DDL | **`docs/stores/*.md`** |
+| Migration | **[docs/MIGRATION.md](docs/MIGRATION.md)** |
+| Recipes (Nest/Hono/etc.) | **[docs/recipes.md][doc-recipes]** |
+
+Contributing norms live in **[CONTRIBUTING.md](CONTRIBUTING.md)**; security reporting in **[SECURITY.md](SECURITY.md)**.
+
 ## Contributing
 
-1. Clone the repo and run **`npm install`**
-2. **`npm test`** — Vitest
-3. **`npm run lint`** — ESLint
-4. **`npm run build`** — TypeScript (`dist/`)
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** — quick smoke steps:
 
-Open a PR with a short description of behavior changes and any new tests.
+1. **`npm install`**, **`npm test`**, **`npm run lint`**, **`npm run build`**
 
-## License
+Open a PR with a short behaviour summary referencing related docs updates when applicable.
+
 
 MIT
 

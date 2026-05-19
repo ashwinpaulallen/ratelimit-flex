@@ -24,6 +24,13 @@ All three strategies are **exact** (conditional updates in one pipeline).
 
 - **`mongoPreset(mongo, overrides?)`** — sliding window by default, draft-6 headers, **`inMemoryBlock: true`**.
 
+## Operational housekeeping
+
+| Concern | Remedy |
+|---------|--------|
+| **Stale documents** linger | TTL index must target the field **`MongoStore`** updates when scheduling expiry; revisit **`expireAfterSeconds`** semantics (`0` means delete when **`resetAt < now`**). Run **`compact`** / monitor **storage** budget on archival clusters. |
+| **Write hotspots** (“QPS sanity”) | One doc per **`key`**; megabit-class fan-in on a single **`key`** competes like Postgres hot rows — shard identities or offload to **`RedisStore`**. |
+
 ## Performance
 
 - Expect **~2–10ms** per increment over a network hop to Atlas or self-hosted MongoDB; pipeline updates are single-document.

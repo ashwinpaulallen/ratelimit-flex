@@ -179,26 +179,31 @@ export function keyManagerRetryAfterSeconds(resolved: RateLimitOptions, key: str
 }
 
 /**
- * @throws {Error} When both `penaltyBox` and `keyManager` are provided (mutually exclusive).
- * @throws {Error} When both `limits` and a non-template `store` are provided (see {@link mergeRateLimiterOptions}).
+ * Fields used only during {@link resolveStoreWithInMemoryShield}; never forwarded to {@link RateLimitEngine}.
  */
-function stripInMemoryBlock(resolved: RateLimitOptions): RateLimitOptions {
-  if (!('inMemoryBlock' in resolved)) {
-    return resolved;
+function stripShieldExclusiveFields(options: RateLimitOptions): RateLimitOptions {
+  if (!('inMemoryBlock' in options) && !('throwOnDoubleInMemoryShield' in options)) {
+    return options;
   }
-  const { inMemoryBlock, ...rest } = resolved as RateLimitOptions & {
+  const { inMemoryBlock, throwOnDoubleInMemoryShield, ...rest } = options as RateLimitOptions & {
     inMemoryBlock?: unknown;
+    throwOnDoubleInMemoryShield?: boolean;
   };
   void inMemoryBlock;
+  void throwOnDoubleInMemoryShield;
   return rest as RateLimitOptions;
 }
 
 /**
  * Optionally wraps `resolved.store` with `InMemoryShield` when `inMemoryBlock` is set.
- * Strips `inMemoryBlock` from the object passed to `RateLimitEngine`.
+ * Strips `inMemoryBlock` and **`throwOnDoubleInMemoryShield`** from the object passed to `RateLimitEngine`.
  *
- * In **non-production**, if `store` is **already** an {@link InMemoryShield}, a **one-time** `console.warn`
- * is emitted (double-shielding); wrapping still proceeds so intentional stacks remain possible.
+ * **`throwOnDoubleInMemoryShield`:** When **`true`**, throws if **`store`** is already an {@link InMemoryShield}
+ * (middleware-only guardrail against accidental double-shield stacks).
+ *
+ * In **non-production**, if **`throwOnDoubleInMemoryShield`** is not set and `store` is **already**
+ * an **`InMemoryShield`**, a **one-time** `console.warn` is emitted (double-shielding); wrapping still
+ * proceeds so intentional stacks remain possible.
  *
  * @returns `shield` when wrapping applied; `null` when disabled or when the store is already a `MemoryStore`.
  */
@@ -206,17 +211,24 @@ export function resolveStoreWithInMemoryShield(
   resolved: RateLimitOptions,
 ): { optionsForEngine: RateLimitOptions; shield: InMemoryShield | null } {
   const flag = resolved.inMemoryBlock;
-  const stripped = stripInMemoryBlock(resolved);
+  const stripForEngine = (): RateLimitOptions => stripShieldExclusiveFields(resolved);
 
   if (flag === undefined || flag === false) {
-    return { optionsForEngine: stripped, shield: null };
+    return { optionsForEngine: stripForEngine(), shield: null };
+  }
+
+  if (resolved.throwOnDoubleInMemoryShield === true && resolved.store instanceof InMemoryShield) {
+    throw new Error(
+      '[ratelimit-flex] inMemoryBlock would wrap an InMemoryShield (double-shield). ' +
+        'Use a single shield layer or omit `throwOnDoubleInMemoryShield`; set `throwOnDoubleInMemoryShield: false` to allow stacking after review.',
+    );
   }
 
   if (resolved.store instanceof MemoryStore) {
     console.debug(
       '[ratelimit-flex] inMemoryBlock: ignoring MemoryStore (already in-memory; no remote store calls to save).',
     );
-    return { optionsForEngine: stripped, shield: null };
+    return { optionsForEngine: stripForEngine(), shield: null };
   }
 
   if (
@@ -247,6 +259,7 @@ export function resolveStoreWithInMemoryShield(
     };
   }
 
+  const stripped = stripForEngine();
   const shield = new InMemoryShield(resolved.store, shieldOpts);
   return {
     optionsForEngine: { ...stripped, store: shield },
