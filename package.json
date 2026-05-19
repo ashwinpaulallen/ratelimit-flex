@@ -204,6 +204,9 @@
   "engines": {
     "node": ">=20.19.0"
   },
+  "overrides": {
+    "ws": "8.20.1"
+  },
   "files": [
     "dist/",
     "!dist/**/*.map",
@@ -234,7 +237,7 @@
     "@eslint/js": "^10.0.1",
     "@nestjs/common": "^11.1.19",
     "@nestjs/core": "^11.1.19",
-    "@nestjs/graphql": "^13.2.5",
+    "@nestjs/graphql": "^13.4.0",
     "@nestjs/platform-express": "^11.1.19",
     "@nestjs/testing": "^11.1.19",
     "@opentelemetry/api": "^1.9.1",
@@ -248,7 +251,7 @@
     "express": "^5.2.1",
     "fastify": "^5.8.5",
     "fastify-plugin": "^5.1.0",
-    "hono": "^4.12.14",
+    "hono": "^4.12.19",
     "mongodb": "^7.1.1",
     "mongodb-memory-server": "^11.0.1",
     "pg": "^8.20.0",
