@@ -1,6 +1,6 @@
 {
   "name": "ratelimit-flex",
-  "version": "4.1.0",
+  "version": "4.2.0",
   "description": "TypeScript rate limiting for Node.js: Express, Fastify, NestJS, Hono. Redis, PostgreSQL, MongoDB, DynamoDB or in-memory stores. Sliding window, token bucket, fixed window. Prometheus & OpenTelemetry.",
   "license": "MIT",
   "keywords": [
