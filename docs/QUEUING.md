@@ -5,6 +5,7 @@ Queue over-limit requests instead of rejecting them immediately. Requests wait i
 ## Table of Contents
 
 - [Overview](#overview)
+- [Engine middleware vs queued middleware parity](#engine-middleware-vs-queued-middleware-parity)
 - [Use Cases](#use-cases)
 - [Quick Start](#quick-start)
   - [HTTP Middleware](#http-middleware)
@@ -22,6 +23,23 @@ Queue over-limit requests instead of rejecting them immediately. Requests wait i
 **Source of truth:** Full FIFO semantics, head-of-line blocking, and multi-key patterns are documented in JSDoc on [`src/queue/RateLimiterQueue.ts`](../src/queue/RateLimiterQueue.ts) (`RateLimiterQueueOptions`, `RateLimiterQueue`). That file is the canonical explanation; this document summarizes it for users.
 
 **Typical use case:** Outbound API throttling (one queue per external API, single key for all requests).
+
+---
+
+## Engine middleware vs queued middleware parity
+
+| Capability | `expressRateLimiter` / engine path | `expressQueuedRateLimiter` / **`queuedRateLimiter`** (Hono), etc. |
+|------------|-------------------------------------|----------------------------------------------------------------------|
+| **`RateLimitEngine`** (full merge path) | **Yes** — allowlist/blocklist/penalty, **`draft`**, composed metadata | **Merge path** merges options onto the handler, but **`RateLimiterQueue` drives **`store.increment`** only — **engine-only behaviors are not applied** |
+| **`draft`** (observe-only) | **Supported** | **Not** enforced via engine path while waiting on the queue |
+| **`keyManager`** / **`penaltyBox`** enforcement ordering | Matches engine pipeline | **Queued path does not** mirror pre-increment **KeyManager** / penalty enforcement the same way; confirm your security model if you relied on guard ordering |
+| **`req.rateLimitComposed` / `c.get('rateLimitComposed')`** | Composed **`layer`** results available where documented | Generally **absent** (queue path); see README *Hono* queuing parity note |
+| **Skip-response rules (`skipFailedRequests` / `skipSuccessfulRequests`)** | decrement after response via engine/helpers | Implemented per framework (**Hono**: **`resolvedHonoRollbackStatus`**, deferred work with **`waitUntil`** on Workers) |
+| **`webSocketLimiter`** | Separate WebSocket pacing surface | **`queuedRateLimiter`** is HTTP-oriented; combine patterns carefully |
+
+**Rule of thumb:** If you need **`draft`**, reliable composed inspection, or strict **KeyManager** ordering with inbound HTTP, use **`rateLimiter`** (engine). If you need **wait-until-slot** outbound or edge throttling semantics, prefer **`createRateLimiterQueue`** / keyed queues with clear key boundaries.
+
+Operational failure combos (Redis down, shield, KeyManager lag) are summarized in [FAILURE_MODES.md](./FAILURE_MODES.md).
 
 ---
 

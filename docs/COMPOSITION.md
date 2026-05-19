@@ -187,6 +187,8 @@ console.log(store.summarize('client-key'));
 // "ALLOWED by 'per-sec' | per-sec: 9/10 remaining | per-min: 99/100 remaining"
 ```
 
+`extractLayerMetrics` walks nested **`innerLayers`** the same way for **all modes** exercised in-tree (`compose.all`, `compose.overflow`, `compose.first-available` — see **`tests/composition/composedInspect.test.ts`**). **`race`** returns the winning branch only; dashboards should treat timings as directional, not exhaustive per-layer cardinality.
+
 ---
 
 ## Redis Composition Presets

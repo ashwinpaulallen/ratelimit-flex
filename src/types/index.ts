@@ -485,6 +485,18 @@ export interface RateLimitOptionsBase {
    * @since 2.2.0
    */
   keyManager?: import('../key-manager/KeyManager.js').KeyManager;
+
+  /**
+   * When **`true`** and {@link RateLimitOptionsBase.inMemoryBlock} would wrap a store that is already an **`InMemoryShield`**,
+   * {@link resolveStoreWithInMemoryShield} throws at startup instead of stacking shields (or emitting a dev warning).
+   * Default **`false`** (warn in non-production only, then wrap — intentional stacking remains possible).
+   *
+   * Not forwarded to {@link RateLimitEngine}; stripped alongside **`inMemoryBlock`** after shield resolution.
+   *
+   * @default undefined (false)
+   * @since 4.2.0
+   */
+  throwOnDoubleInMemoryShield?: boolean;
 }
 
 /**
@@ -619,3 +631,5 @@ export interface TokenBucketRateLimitOptions extends RateLimitOptionsBase {
  * @since 1.0.0
  */
 export type RateLimitOptions = WindowRateLimitOptions | TokenBucketRateLimitOptions;
+
+export type { RateLimitMiddlewareDiagramPhase } from './middleware-hooks.js';

@@ -33,3 +33,29 @@ See [Client IP & reverse proxies](../README.md#client-ip-and-reverse-proxies).
 4. **Lifecycle:** For non-blocking work after the response (e.g. custom rollback patterns), Cloudflare’s **`executionCtx.waitUntil`** may be available on the execution context — see [Hono limitations](../README.md#hono-limitations) in the README and `HonoRateLimitOptions` JSDoc in the source tree.
 
 **Hono:** Pass **`skipFailedRequests` / `skipSuccessfulRequests`** to **`rateLimiter()`** (v3.0.0+), or use the manual **`await next()`** + **`store.decrement`** pattern from the README if you need extra control.
+
+5. **`queuedRateLimiter`** on Workers **does not persist** FIFO waiters beyond the isolate lifecycle — Cloudflare **evicts** isolates arbitrarily; callers should tolerate **burst 503 / shutdown errors** surfaced by **`RateLimiterQueue.shutdown()`** semantics. Prefer **`rateLimiter`** (reject fast) unless you deliberately accept backlog loss.
+
+6. **WebSockets** — `webSocketLimiter` runs before the handshake; pairing with **`upgradeWebSocket`** must respect host runtime limits (**subrequest counts**, **`waitUntil`** for decrement rollbacks identical to HTTP).
+
+## NestJS: different algorithms per boundary
+
+Today **`RateLimitModule.forRoot*`** configures **one** global **`RateLimitEngine`** strategy (`RateLimitStrategy` enum). Patterns when you genuinely need mismatched algorithms:
+
+| Approach | Fit |
+|-----------|-----|
+| **Split deployable / service boundary** | Simplest when auth API needs **fixed window** but public API needs **token bucket** presets. |
+| **Programmatic `RateLimitEngine`** (`createRateLimitEngine`) | Outbound queues, batch jobs, cron—**not** the NestHTTP guard. |
+
+For most HTTP surfaces, unify on **sliding window** + differentiated **`incrementCost`**/`store` rather than juggling multiple Nest strategies inside one runtime.
+
+See [NestJS README section](../README.md#nestjs-per-route-configuration).
+
+## KeyManager admin — hardening patterns
+
+Combine **`createAdminRouter(keyManager, { auth: … })`** (or **`fastifyAdminPlugin`**) with defense-in-depth:
+
+1. **Network policy** — publish admin routers on **private interfaces** only; terminate **mTLS**/OIDC **before** traffic reaches Node when possible.
+2. **App-level choke** — mount a secondary **`expressRateLimiter({ maxRequests: 30, windowMs: 60_000, skip })`** scoped to `/admin/**` so scripted discovery pays immediately.
+3. **JWT middleware** — `auth: { type: 'middleware', handler }` should validate **issuer, audience, expiry slack, scope** centrally; bearer tokens rotate via secret manager—not git.
+4. **Never ship `unsafe-no-auth` outside notebooks** (`acknowledgeRisk: true`).

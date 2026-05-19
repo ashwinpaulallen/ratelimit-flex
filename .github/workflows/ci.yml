@@ -73,3 +73,39 @@ jobs:
           name: coverage-node-${{ matrix.node-version }}
           path: coverage
           if-no-files-found: warn
+
+  test-compat-express4-peers:
+    # Full matrix is expensive; run on main pushes only (default PR job still uses Express 5).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (lockfile authoritative)
+        run: npm ci
+
+      - name: Downgrade Express 4 peers for semver coverage
+        run: |
+          npm pkg set devDependencies.express='^4.21.2'
+          npm pkg set devDependencies.@types/express='^4.17.21'
+          npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        env:
+          PG_STORE_TEST: '1'
+          MONGO_STORE_TEST: '1'
+          DYNAMO_STORE_TEST: '1'
+        run: npm test

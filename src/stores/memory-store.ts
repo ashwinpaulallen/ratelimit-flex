@@ -35,6 +35,47 @@ export interface MemoryStoreLruOptions {
    * Useful for metrics and debugging high-cardinality bugs.
    */
   onEvict?: (key: string, reason: 'lru-cap' | 'expired') => void;
+
+  /**
+   * Optional alert when **`lru-cap`** evictions spike inside a sliding time window (high-cardinality / attack signal).
+   *
+   * Counts **only LRU evictions** from {@link MemoryStoreEvictionBurstSnapshot.evictionsInWindow}, not TTL /
+   * `expired` cleanups triggered while making room under **`maxKeys`** pressure.
+   *
+   * @since 4.2.0
+   */
+  evictionVelocityAlert?: MemoryStoreEvictionVelocityAlert;
+}
+
+/**
+ * Rolling-window eviction burst detector for {@link MemoryStoreEvictionBurstSnapshot}.
+ *
+ * @since 4.2.0
+ */
+export interface MemoryStoreEvictionVelocityAlert {
+  /**
+   * Rolling window length for counting LRU evictions. Default **`30_000`** ms.
+   */
+  windowMs?: number;
+  /**
+   * Invoke **`callback`** when at least this many LRU evictions land inside the rolling window.
+   */
+  minEvictions: number;
+  /**
+   * Minimum ms between **`callback`** invocations while the burst condition holds. Default **`5_000`**.
+   */
+  cooldownMs?: number;
+  callback: (snapshot: MemoryStoreEvictionBurstSnapshot) => void;
+}
+
+/**
+ * @since 4.2.0
+ */
+export interface MemoryStoreEvictionBurstSnapshot {
+  windowMs: number;
+  evictionsInWindow: number;
+  oldestEvictionAtMs: number;
+  newestEvictionAtMs: number;
 }
 
 /**
@@ -152,6 +193,15 @@ export class MemoryStore implements RateLimitStore {
 
   private readonly onEvict?: MemoryStoreOptions['onEvict'];
 
+  private readonly evictionVelocityAlertCfg?:
+    | (MemoryStoreEvictionVelocityAlert & { windowMs: number; cooldownMs: number })
+    | undefined;
+
+  /** Timestamps for recent LRU-cap evictions (rolling window telemetry). */
+  private evictionLRUTimestampsMs: number[] = [];
+
+  private evictionVelocityLastEmitMs = 0;
+
   /** Count of LRU evictions (`lru-cap`) since this instance was constructed. Not reset by {@link MemoryStore.resetAll}. */
   private _totalEvictions = 0;
 
@@ -190,6 +240,17 @@ export class MemoryStore implements RateLimitStore {
 
     this.maxKeys = options.maxKeys === undefined ? 100_000 : Math.max(0, Math.floor(options.maxKeys));
     this.onEvict = options.onEvict;
+
+    const evCfg = options.evictionVelocityAlert;
+    this.evictionVelocityAlertCfg =
+      evCfg?.callback !== undefined
+        ? {
+            windowMs: sanitizeWindowMs(evCfg.windowMs ?? 30_000, 30_000),
+            minEvictions: Math.max(1, Math.floor(evCfg.minEvictions)),
+            cooldownMs: Math.max(0, Math.floor(evCfg.cooldownMs ?? 5_000)),
+            callback: evCfg.callback,
+          }
+        : undefined;
 
     this.cleanupTimer = setInterval(() => {
       this.purgeExpired();
@@ -476,15 +537,48 @@ export class MemoryStore implements RateLimitStore {
     this.onEvict?.(key, reason);
   }
 
+  private noteLruBurstEviction(now: number): void {
+    const cfg = this.evictionVelocityAlertCfg;
+    if (!cfg) {
+      return;
+    }
+    this.evictionLRUTimestampsMs.push(now);
+    const cutoff = now - cfg.windowMs;
+    while (this.evictionLRUTimestampsMs.length > 0 && this.evictionLRUTimestampsMs[0]! < cutoff) {
+      this.evictionLRUTimestampsMs.shift();
+    }
+    if (this.evictionLRUTimestampsMs.length < cfg.minEvictions) {
+      return;
+    }
+    if (cfg.cooldownMs > 0 && now - this.evictionVelocityLastEmitMs < cfg.cooldownMs) {
+      return;
+    }
+    this.evictionVelocityLastEmitMs = now;
+    const oldest = this.evictionLRUTimestampsMs[0]!;
+    const newest = this.evictionLRUTimestampsMs[this.evictionLRUTimestampsMs.length - 1]!;
+    try {
+      cfg.callback({
+        windowMs: cfg.windowMs,
+        evictionsInWindow: this.evictionLRUTimestampsMs.length,
+        oldestEvictionAtMs: oldest,
+        newestEvictionAtMs: newest,
+      });
+    } catch {
+      /* ignore consumer errors — never disrupt eviction */
+    }
+  }
+
   private evictOldest(): void {
     const first = this.state.keys().next();
     if (first.done) {
       return;
     }
     const oldestKey = first.value;
+    const now = Date.now();
     this.state.delete(oldestKey);
     this._totalEvictions++;
     this.onEvict?.(oldestKey, 'lru-cap');
+    this.noteLruBurstEviction(now);
   }
 
   /**

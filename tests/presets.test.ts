@@ -9,9 +9,12 @@ import {
   apiGatewayPreset,
   apiKeyHeaderKeyGenerator,
   authEndpointPreset,
+  hybridWindowsPreset,
   multiInstancePreset,
+  observabilityPreset,
   publicApiPreset,
   resilientRedisPreset,
+  redisWithShieldPreset,
   singleInstancePreset,
 } from '../src/presets/index.js';
 import {
@@ -512,6 +515,20 @@ describe('presets — unit', () => {
       expect(resilience?.insuranceLimiter?.syncOnRecovery).toBe(false);
     });
   });
+
+  describe('observabilityPreset', () => {
+    it('merges Redis base with metrics and in-memory shield defaults', async () => {
+      const client = mockRedisClient();
+      const merged = mergeRateLimiterOptions(
+        observabilityPreset({ client }, { legacyHeaders: true }),
+      );
+      assertResolvedOptions(merged);
+      expect(merged.metrics).not.toEqual(false);
+      expect(merged.inMemoryBlock).toBe(true);
+      expect(merged.store).toBeInstanceOf(RedisStore);
+      await merged.store.shutdown();
+    });
+  });
 });
 
 describe('presets — integration (Express + supertest)', () => {
@@ -600,5 +617,29 @@ describe('presets — integration (Express + supertest)', () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     expect(c.status).toBe(429);
+  });
+
+  it('hybridWindowsPreset builds compose.windows ComposedStore', async () => {
+    const partial = hybridWindowsPreset({ shortWindow: { maxRequests: 3 }, longWindow: { maxRequests: 20 } });
+    const merged = mergeRateLimiterOptions(partial as Partial<RateLimitOptions>);
+    expect(merged.store).toBeInstanceOf(ComposedStore);
+    trackComposedStore(merged.store as ComposedStore);
+    await merged.store.shutdown();
+  });
+
+  it('redisWithShieldPreset forwards explicit shield tuning', async () => {
+    const client = mockRedisClient();
+    const p = redisWithShieldPreset(
+      { client },
+      { maxRequests: 40, shield: { maxBlockedKeys: 1200 } },
+    );
+    expect(p.inMemoryBlock).toEqual(
+      expect.objectContaining({
+        blockOnConsumed: 40,
+        maxBlockedKeys: 1200,
+      }),
+    );
+    const store = p.store as RedisStore;
+    await store.shutdown();
   });
 });

@@ -30,6 +30,25 @@ DynamoDB does not offer Redis-style ordered sets or cheap “count events in thi
 
 For **exact** sliding windows, use **`RedisStore`**, **`PgStore`**, or **`MongoStore`**.
 
+### Sliding window: optional observation hook (`onSlidingWindowObservation`)
+
+Because the sliding algorithm is approximate, **`DynamoStoreOptions.onSlidingWindowObservation`** emits a **`DynamoSlidingWindowObservation`** after each committed sliding-window **`increment`** (fixed window / token bucket do **not** call it).
+
+Use this to derive **confidence-style signals for your dashboards**:
+
+- **`previousWindowBlendWeight`** — how heavily the estimator still weights counts from the previous fixed sub-window (boundary effects spike when weight is near `1`).
+- **`approximateUsage` vs `cap`** — how close raw weighted usage is to the enforced cap prior to **`Math.ceil`**.
+
+The callback runs inside the hot path — keep work minimal (push to a bounded queue). **Throwing errors is swallowed**: consumers must not break rate limiting.
+
+Exported from **`ratelimit-flex/dynamo`** beside **`DynamoStoreOptions`** / **`DynamoSlidingWindowObservation`**.
+
+### Capacity planning & hot partitions
+
+Dynamo partitions on **`pk`**. Extremely hot keys (**single API key powering all traffic**) concentrate write load on **one partition** regardless of adaptive capacity; watch **`ThrottlingException`** spikes and **`ConsumedWriteCapacityUnits`**. Model **provisioned/on-demand spikes** independently of application QPS spreadsheets because each increment is a transactional **`UpdateItem`**.
+
+Prefer **credential diversity** (`keyGenerator` fan-out), or accept short bursts of Dynamo throttling surfaced through SDK retries (**configure client retry/backoff**) + **`onDynamoError`** policy aligned with README guidance.
+
 ## TTL cleanup
 
 DynamoDB’s **managed TTL** deletes expired items using the **`ttl`** attribute (Unix epoch seconds). No application cron is required; allow time for the TTL background process after **`reset_at`**.

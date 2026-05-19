@@ -1,6 +1,6 @@
 {
   "name": "ratelimit-flex",
-  "version": "4.1.1",
+  "version": "4.1.0",
   "description": "TypeScript rate limiting for Node.js: Express, Fastify, NestJS, Hono. Redis, PostgreSQL, MongoDB, DynamoDB or in-memory stores. Sliding window, token bucket, fixed window. Prometheus & OpenTelemetry.",
   "license": "MIT",
   "keywords": [
@@ -204,6 +204,9 @@
   "engines": {
     "node": ">=20.19.0"
   },
+  "overrides": {
+    "ws": "8.20.1"
+  },
   "files": [
     "dist/",
     "!dist/**/*.map",
@@ -221,6 +224,8 @@
     "pretest": "npm run sync-version",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "soak-smoke": "npm run build && node scripts/soak-smoke.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -232,7 +237,7 @@
     "@eslint/js": "^10.0.1",
     "@nestjs/common": "^11.1.19",
     "@nestjs/core": "^11.1.19",
-    "@nestjs/graphql": "^13.2.5",
+    "@nestjs/graphql": "^13.4.0",
     "@nestjs/platform-express": "^11.1.19",
     "@nestjs/testing": "^11.1.19",
     "@opentelemetry/api": "^1.9.1",
@@ -246,7 +251,7 @@
     "express": "^5.2.1",
     "fastify": "^5.8.5",
     "fastify-plugin": "^5.1.0",
-    "hono": "^4.12.14",
+    "hono": "^4.12.19",
     "mongodb": "^7.1.1",
     "mongodb-memory-server": "^11.0.1",
     "pg": "^8.20.0",

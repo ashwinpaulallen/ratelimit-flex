@@ -46,6 +46,9 @@ import {
   defaultRateLimitIdentifier,
   detectEnvironment,
   formatRateLimitHeaders,
+  hashStorageKeyFingerprint,
+  hybridWindowsPreset,
+  observabilityPreset,
   matchingDecrementOptions,
   resolveHeaderConfig,
   resolveIncrementOpts,
@@ -59,6 +62,7 @@ import {
   MetricsManager,
   mongoPreset,
   multiInstancePreset,
+  truncateStorageKey,
   multiWindowPreset,
   postgresInsuranceMemoryStore,
   postgresPreset,
@@ -68,6 +72,7 @@ import {
   PgStore,
   queuedClusterPreset,
   RedisStore,
+  redisWithShieldPreset,
   resilientPostgresPreset,
   resilientRedisPreset,
   RateLimitEngine,
@@ -77,7 +82,11 @@ import {
   singleInstancePreset,
   shield,
   slidingWindowDefaults,
+  stripIpV6ZoneId,
   tokenBucketDefaults,
+  ADMIN_HTTP_AUDIT_SCHEMA_VERSION,
+  formatAdminHttpAuditNdjsonV1,
+  toAdminHttpAuditEnvelopeV1,
   isComposedStoreBrand,
   isRateLimitFlexMessage,
   registerComposedStoreFacade,
@@ -255,6 +264,21 @@ describe('package exports', () => {
     expect(typeof clusterPreset).toBe('function');
     expect(typeof queuedClusterPreset).toBe('function');
     expect(typeof apiKeyHeaderKeyGenerator).toBe('function');
+    expect(typeof observabilityPreset).toBe('function');
+  });
+
+  it('exports admin HTTP audit v1 helpers', () => {
+    expect(ADMIN_HTTP_AUDIT_SCHEMA_VERSION).toBe('1');
+    const env = toAdminHttpAuditEnvelopeV1({
+      method: 'POST',
+      path: '/admin/blocks',
+      timestamp: new Date('2026-01-02T03:04:05.006Z'),
+    });
+    expect(env.schemaVersion).toBe('1');
+    const nd = formatAdminHttpAuditNdjsonV1(env);
+    expect(nd.endsWith('\n')).toBe(true);
+    expect(nd).toContain('"schemaVersion":"1"');
+    expect(nd).toContain('2026-01-02');
   });
 
   it('exports ClusterStorePrimary', () => {
@@ -376,5 +400,24 @@ describe('package exports', () => {
     expect(redisPartial.store).toBeInstanceOf(RedisStore);
 
     void (redisPartial.store as RateLimitStore).shutdown();
+  });
+
+  it('exports key hygiene helpers and multi-window presets', async () => {
+    expect(truncateStorageKey('abcd', 2)).toBe('ab');
+    expect(hashStorageKeyFingerprint('x')).toHaveLength(64);
+    expect(stripIpV6ZoneId('::1%lo')).toBe('::1');
+
+    const hybrid = hybridWindowsPreset();
+    const mh = mergeRateLimiterOptions(hybrid);
+    expect(mh.store).toBeInstanceOf(ComposedStore);
+    await mh.store.shutdown();
+
+    const mockClient = {
+      get: async () => null,
+      set: async () => 'OK',
+      eval: async () => [1, 0, String(Date.now() + 60_000)],
+    };
+    const rs = redisWithShieldPreset({ client: mockClient });
+    await (rs.store as RedisStore).shutdown();
   });
 });

@@ -24,10 +24,11 @@ import { sanitizeIncrementCost, sanitizeRateLimitCap, sanitizeWindowMs } from '.
 import { num, refillBucketState } from '../../utils/store-utils.js';
 import {
   fixedWindowBoundaryMs,
+  slidingWeight,
   ttlEpochSeconds,
   weightedSlidingCount,
 } from './sliding-weighted.js';
-import type { DynamoStoreOptions } from './types.js';
+import type { DynamoSlidingWindowObservation, DynamoStoreOptions } from './types.js';
 
 function isConditionalCheckFailure(err: unknown): boolean {
   return err instanceof ConditionalCheckFailedException;
@@ -104,6 +105,8 @@ export class DynamoStore implements RateLimitStore {
 
   private readonly onWarn: (msg: string, err?: Error) => void;
 
+  private readonly onSlidingWindowObservation?: (observation: DynamoSlidingWindowObservation) => void;
+
   constructor(options: DynamoStoreOptions) {
     if (!options.client) {
       throw new Error('DynamoStore: "client" is required');
@@ -124,6 +127,7 @@ export class DynamoStore implements RateLimitStore {
     this.onDynamoError = options.onDynamoError ?? 'fail-open';
     this.onWarn =
       options.onWarn ?? ((msg, err) => console.warn(`[ratelimit-flex] ${msg}`, err ?? ''));
+    this.onSlidingWindowObservation = options.onSlidingWindowObservation;
   }
 
   async increment(key: string, options?: RateLimitIncrementOptions): Promise<RateLimitResult> {
@@ -461,7 +465,25 @@ export class DynamoStore implements RateLimitStore {
     const cws = Number(attrs.currentWindowStart);
     const pc = Number(attrs.previousCount ?? 0);
     const cc = Number(attrs.currentCount ?? 0);
+    const w = slidingWeight(now, this.windowMs, cws);
     const raw = weightedSlidingCount(pc, cc, now, this.windowMs, cws);
+    if (this.onSlidingWindowObservation) {
+      try {
+        this.onSlidingWindowObservation({
+          previousWindowBlendWeight: w,
+          previousSubwindowHits: pc,
+          currentSubwindowHits: cc,
+          approximateUsage: raw,
+          roundedTotalHitsEstimate: Math.ceil(raw),
+          cap,
+          windowMs: this.windowMs,
+          currentWindowStartMs: cws,
+          nowMs: now,
+        });
+      } catch {
+        /* ignore consumer errors — never break increments */
+      }
+    }
     const totalHits = Math.ceil(raw);
     const isBlocked = raw > cap;
     const remaining = Math.max(0, cap - Math.ceil(raw));

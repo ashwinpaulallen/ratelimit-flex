@@ -3,6 +3,8 @@
  *
  * @description Import from `ratelimit-flex/nestjs` so Nest-specific code stays separate from the main bundle.
  */
+import './express-types-augment.js';
+
 export { RateLimitModule, RATE_LIMIT_MODULE_INIT, type RateLimitModuleInit } from './RateLimitModule.js';
 export { RateLimitModuleLifecycle } from './rate-limit-module-lifecycle.js';
 export { RateLimitGuard } from './RateLimitGuard.js';

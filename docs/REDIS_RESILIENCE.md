@@ -159,6 +159,14 @@ resilience: {
 }
 ```
 
+### Operators: watch for these edge effects
+
+| Scenario | What to expect |
+|----------|----------------|
+| Sliding window replay | Hits are synthesized at recovery time—the **instantaneous** throughput shape during the outage is **not reconstructed** inside Redis; **`totalHits`/limits** converge but bursts may visually differ on dashboards for a moment. |
+| Multi-key fan-out | Replay runs per **logical key**; large key cardinalities lengthen **`onCounterSync`** fan-out bursts—alert on Redis CPU after recovery. |
+| Insurance cap vs Redis cap | If **`estimatedWorkers`** is wrong during rolling deploy (more pods landing than maths assumed), failover traffic allows **either stricter / looser** per-pod budgets than nominal—revisit **`ceil(max/global/workers)`** after autoscaling tuning. |
+
 ---
 
 ## Comparison: fail-open/fail-closed vs Insurance

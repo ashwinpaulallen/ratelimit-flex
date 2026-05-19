@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.2.0] - 2026-05-19
+
+### Added
+
+- **`throwOnDoubleInMemoryShield`** on rate limit options — when **`true`**, `resolveStoreWithInMemoryShield` throws if `inMemoryBlock` would wrap an existing **`InMemoryShield`** (middleware-only; stripped before the engine).
+- **NestJS request attachments:** **`req.rateLimit`** and **`req.rateLimitComposed`** on allowed requests when using **`RateLimitGuard`** (parity with Express); Express typings augmented via `ratelimit-flex/nestjs` side-effect import.
+- **Presets:** **`hybridWindowsPreset`**, **`redisWithShieldPreset`**, **`observabilityPreset`** (metrics + shield defaults on **`multiInstancePreset`**).
+- **Key hygiene helpers:** **`truncateStorageKey`**, **`hashStorageKeyFingerprint`**, **`stripIpV6ZoneId`** (main entry).
+- **`MemoryStore.evictionVelocityAlert`** — rolling-window LRU burst callback for high-cardinality signals.
+- **DynamoDB:** **`onSlidingWindowObservation`** hook on **`DynamoStore`** sliding-window increments (blend weight + approximate usage telemetry).
+- **Key manager admin audit v1:** **`ADMIN_HTTP_AUDIT_SCHEMA_VERSION`**, **`toAdminHttpAuditEnvelopeV1`**, **`formatAdminHttpAuditNdjsonV1`** (see `docs/key-manager/ADMIN_AUDIT_SCHEMA.md`).
+- **`RateLimitMiddlewareDiagramPhase`** type for custom middleware / diagram correlation (no runtime hooks).
+- **Scripts:** **`npm run benchmark`** (MemoryStore micro-bench), **`npm run soak-smoke`** (manual queue soak).
+- **Documentation hub:** failure modes, deployment paths, operational sequences, benchmarks, compare matrix, version support, glossary, P2 reference guides, store/redis ops expansions, **`CONTRIBUTING.md`**, **`SECURITY.md`**.
+
+### Changed
+
+- **README:** deduplicated long Redis resilience / queuing sections in favor of linked docs; restored **Choosing a strategy** and **Documentation hub**; regional clock-skew note for headers.
+- **CI:** Express 4 peer compatibility job runs on **`main` pushes only** (default PR matrix still uses Express 5).
+
+### Development
+
+- ESLint config for **`scripts/**/*.mjs`**.
+- Property-style test for **`limits` → getLimit** minimum cap; header extreme-value tests; Nest composed-metadata test.
+
 ## [4.1.0] - 2026-04-17
 
 ### Changed — BREAKING
